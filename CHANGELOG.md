@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/scarletkc/colab-playground/compare/v0.4.0...v0.5.0) (2026-11-23)
+
+
+### Added
+
+* **app:** show what the chosen hardware burns per hour when starting a session ([#73](https://github.com/scarletkc/colab-playground/issues/73)) ([3b5bcd3](https://github.com/scarletkc/colab-playground/commit/3b5bcd3028793e5b9d5886823c8c31d804d593c5))
+
+
+### Fixed
+
+* **core:** find a colab installed by uv when bash has no profile for it ([#69](https://github.com/scarletkc/colab-playground/issues/69)) ([ac9a0a1](https://github.com/scarletkc/colab-playground/commit/ac9a0a138c9a2a259a9b6966d62b6c483bab9683))
+
 ## [0.4.0](https://github.com/scarletkc/colab-playground/compare/v0.3.0...v0.4.0) (2026-11-20)
 
 
