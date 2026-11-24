@@ -551,9 +551,17 @@ def newest_job():
     _, prompt_id, entry = newest
     graph = entry.get("prompt")
     nodes = {}
+    links = []
     if isinstance(graph, list) and len(graph) > 2 and isinstance(graph[2], dict):
-        nodes = {str(k): (v.get("class_type") or "?")
-                 for k, v in graph[2].items() if isinstance(v, dict)}
+        for node_id, node in graph[2].items():
+            if not isinstance(node, dict):
+                continue
+            nodes[str(node_id)] = node.get("class_type") or "?"
+            for name, value in (node.get("inputs") or {}).items():
+                # An input that comes from another node is [node id, slot].
+                if (isinstance(value, list) and len(value) == 2
+                        and isinstance(value[0], str) and isinstance(value[1], int)):
+                    links.append([value[0], str(node_id), name])
     paths = []
     for out in (entry.get("outputs") or {}).values():
         if not isinstance(out, dict):
@@ -567,7 +575,7 @@ def newest_job():
                 "subfolder": image.get("subfolder", ""),
                 "type": image.get("type", "output"),
             }))
-    return prompt_id, nodes, paths
+    return prompt_id, {"nodes": nodes, "links": links}, paths
 
 
 def warmup_graph(ckpt_name, steps, cfg, size, latent_node):
@@ -639,8 +647,10 @@ def fake_safetensors(path, keys):
 
 def pid_alive(pid):
     if os.name == "nt":
+        # tasklist writes in the console code page, which is not always UTF-8 (a Chinese
+        # Windows, for one): the pid is ASCII, so undecodable bytes are replaced, not fatal.
         out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"],
-                             capture_output=True, text=True).stdout
+                             capture_output=True, text=True, errors="replace").stdout
         return str(pid) in out
     try:
         os.kill(pid, 0)
@@ -729,7 +739,10 @@ def self_test():
             },
             "new": {
                 "status": {"completed": 9},
-                "prompt": [1, "new", {"9": {"class_type": "SaveImage"}}],
+                "prompt": [1, "new", {
+                    "Y": {"class_type": "KSampler"},
+                    "9": {"class_type": "SaveImage", "inputs": {"images": ["Y", 0]}},
+                }],
                 "outputs": {"6": {"images": images}},
             },
         }
@@ -741,7 +754,8 @@ def self_test():
     finally:
         restore()
     check("the newest job wins", job[0], "new")
-    check("its workflow is read", job[1], {"9": "SaveImage"})
+    check("its workflow is read", job[1],
+          {"nodes": {"Y": "KSampler", "9": "SaveImage"}, "links": [["Y", "9", "images"]]})
 
     restore = patch(http_json=lambda url, **kw: job_history([
         {"filename": "a.png", "subfolder": "", "type": "output"}]))

@@ -16,7 +16,7 @@ use ely_gpui_component::{
     forms::Switch,
     layout::{Card, CardHeader, Page, ScrollArea, Well},
     motion::ProgressBar,
-    primitives::{IconName, Severity},
+    primitives::{Divider, IconName, Severity},
     terminal::AnsiText,
     theme::{ActiveTheme, ControlSize, TextSize, Theme},
     typography::Caption,
@@ -115,9 +115,14 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
             _ => None,
         };
         let rows = status.outputs.iter().flat_map(|(key, value)| {
+            if let Some(workflow) = workflow_of(value) {
+                // A workflow is drawn as a graph, not as rows of text.
+                return vec![workflow_graph(&workflow, theme)];
+            }
             output_rows(key, value, base.as_deref())
                 .into_iter()
                 .map(|row| output_row(row, theme, cx))
+                .collect::<Vec<AnyElement>>()
         });
         page = page.child(
             Card::new()
@@ -127,6 +132,112 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
         );
     }
     page.child(log(run, cx))
+}
+
+/// A workflow as the app draws it: the nodes and the lines between them.
+#[derive(Debug, Clone, Default)]
+struct Workflow {
+    /// Node id → its type.
+    nodes: std::collections::BTreeMap<String, String>,
+    /// From node → to node.
+    links: Vec<(String, String)>,
+}
+
+/// The workflow an output carries, when it carries one.
+fn workflow_of(value: &serde_json::Value) -> Option<Workflow> {
+    let map = value.as_object()?;
+    let nodes = map.get("nodes")?.as_object()?;
+    let mut workflow = Workflow {
+        nodes: nodes
+            .iter()
+            .filter_map(|(id, kind)| Some((id.clone(), kind.as_str()?.to_owned())))
+            .collect(),
+        links: Vec::new(),
+    };
+    if let Some(links) = map.get("links").and_then(|l| l.as_array()) {
+        for link in links {
+            let Some(pair) = link.as_array() else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            if let (Some(from), Some(to)) = (from.as_str(), to.as_str()) {
+                workflow.links.push((from.to_owned(), to.to_owned()));
+            }
+        }
+    }
+    Some(workflow)
+}
+
+/// The layers of a workflow: every node sits below the nodes it takes its
+/// input from. A cycle ends in one last layer.
+fn workflow_layers(workflow: &Workflow) -> Vec<Vec<String>> {
+    let mut sources: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (from, to) in &workflow.links {
+        sources.entry(to.as_str()).or_default().push(from.as_str());
+    }
+    let mut layers: Vec<Vec<String>> = Vec::new();
+    let mut placed: std::collections::BTreeSet<String> = Default::default();
+    let mut left: Vec<String> = workflow.nodes.keys().cloned().collect();
+    while !left.is_empty() {
+        let ready: Vec<String> = left
+            .iter()
+            .filter(|id| {
+                sources
+                    .get(id.as_str())
+                    .map(|s| s.iter().all(|x| placed.contains(*x)))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            layers.push(left.iter().map(|id| (*id).to_owned()).collect());
+            break;
+        }
+        layers.push(ready.clone());
+        for id in &ready {
+            placed.insert(id.clone());
+        }
+        left.retain(|id| !ready.iter().any(|r| r == id));
+    }
+    layers
+}
+
+/// The workflow as a graph: a row of nodes per layer, one layer below the other.
+fn workflow_graph(workflow: &Workflow, theme: &Theme) -> AnyElement {
+    let layers = workflow_layers(workflow);
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for (i, layer) in layers.iter().enumerate() {
+        if i > 0 {
+            rows.push(Divider::horizontal().into_any_element());
+        }
+        rows.push(
+            div()
+                .flex()
+                .gap_2()
+                .flex_wrap()
+                .children(layer.iter().map(|id| {
+                    let kind = workflow.nodes.get(id).cloned().unwrap_or_default();
+                    Well::new()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .px_2()
+                        .py_1()
+                        .child(div().font_family(theme.mono_family.clone()).child(kind))
+                        .child(Caption::new(id.clone()))
+                        .into_any_element()
+                }))
+                .into_any_element(),
+        );
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .children(rows)
+        .into_any_element()
 }
 
 /// How one output is shown.
@@ -713,6 +824,52 @@ mod tests {
             }
             other => panic!("expected text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_workflow_is_drawn_in_layers() {
+        let value = serde_json::json!({
+            "nodes": {
+                "1": "CheckpointLoaderSimple",
+                "2": "CLIPTextEncode",
+                "3": "KSampler",
+                "4": "SaveImage",
+            },
+            "links": [
+                ["2", "3", "positive"],
+                ["1", "3", "model"],
+                ["3", "4", "images"],
+            ],
+        });
+        let workflow = workflow_of(&value).expect("a workflow");
+        assert_eq!(
+            workflow.nodes.get("3").map(String::as_str),
+            Some("KSampler")
+        );
+        assert!(
+            workflow.links.contains(&("2".to_string(), "3".to_string())),
+            "the link from the text encoder to the sampler"
+        );
+        assert_eq!(
+            workflow_layers(&workflow),
+            vec![
+                vec!["1".to_string(), "2".to_string()],
+                vec!["3".to_string()],
+                vec!["4".to_string()],
+            ],
+            "every node sits below the nodes it takes its input from"
+        );
+    }
+
+    #[test]
+    fn a_workflow_that_loops_still_lays_out() {
+        let value = serde_json::json!({
+            "nodes": {"1": "A", "2": "B"},
+            "links": [["1", "2", "x"], ["2", "1", "y"]],
+        });
+        let workflow = workflow_of(&value).expect("a workflow");
+        let layers = workflow_layers(&workflow);
+        assert_eq!(layers.len(), 1, "a cycle ends in one layer");
     }
 
     #[test]
