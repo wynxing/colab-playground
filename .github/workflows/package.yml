@@ -1,0 +1,306 @@
+# Builds the downloads of a release and attaches them to its GitHub release.
+#
+# Push a vX.Y.Z tag, or run this workflow by hand with that tag: the three platform
+# files, SHA256SUMS and — when the UPDATE_SIGNING_KEY secret is set — its signature
+# are attached to the release, which is created as a draft and published only once
+# every file is on it. The version in [workspace.package] must be the tag without
+# its `v`, or the build fails.
+#
+# What each file is and why it looks the way it does: docs/RELEASING.md.
+name: Package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and attach to (for example v0.5.0).
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per tag: a second run of the same tag replaces the files, it does not
+  # race the first.
+  group: package-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # The oldest Ubuntu runner: the binary needs the glibc it was built against
+          # or newer (Ubuntu 22.04: glibc 2.35). Keep the requirement in docs/USAGE.md
+          # in step.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      BUILD_TARGET: ${{ matrix.target }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+      # Windows: link the C runtime statically, so the exe starts without the Visual
+      # C++ Redistributable installed.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # macOS: the oldest version the binary targets and the bundle declares.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.98"
+          targets: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-x11-dev libfontconfig-dev
+
+      - name: Version and file name
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "colab-playground") | .version' | tr -d '\r')
+          if [ -z "$version" ]; then
+            echo "::error::Could not read the version of colab-playground"
+            exit 1
+          fi
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match the version in Cargo.toml ($version)"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # No version in the names: the release tag says which version the files are,
+          # and an installed copy fetches them by these names.
+          echo "BASE=colab-playground-$BUILD_TARGET" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          # Marks the binary as a release download, the only kind that replaces itself
+          # with a newer release (crates/core/src/updater/layout.rs).
+          COLAB_PLAYGROUND_RELEASE_BUILD: "1"
+        run: cargo build --release --locked -p colab-playground --target "$BUILD_TARGET"
+
+      - name: Package (Windows, bare exe)
+        if: runner.os == 'Windows'
+        run: |
+          exe="target/$BUILD_TARGET/release/colab-playground.exe"
+          # A dynamically linked C runtime would import VCRUNTIME140.dll.
+          if grep -qai 'vcruntime140' "$exe"; then
+            echo "::error::$exe imports the Visual C++ runtime DLL; the static C runtime did not apply"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$exe" "dist/$BASE.exe"
+          echo "ASSET=$BASE.exe" >> "$GITHUB_ENV"
+
+      - name: Package (Linux, tar.gz)
+        if: runner.os == 'Linux'
+        run: |
+          stage="$RUNNER_TEMP/$BASE"
+          mkdir -p "$stage" dist
+          install -m 755 "target/$BUILD_TARGET/release/colab-playground" "$stage/colab-playground"
+          readelf -d "$stage/colab-playground" | grep NEEDED
+          install -m 644 LICENSE README.md "$stage/"
+          tar -C "$RUNNER_TEMP" --owner=0 --group=0 --numeric-owner -czf "dist/$BASE.tar.gz" "$BASE"
+          listing=$(tar -tzvf "dist/$BASE.tar.gz")
+          if ! grep -Eq "^-rwxr-xr-x .* $BASE/colab-playground\$" <<<"$listing"; then
+            echo "::error::The binary in the archive is not executable"
+            exit 1
+          fi
+          echo "ASSET=$BASE.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (macOS, .app in a zip)
+        if: runner.os == 'macOS'
+        run: |
+          stage="$RUNNER_TEMP/$BASE"
+          app="$stage/Colab Playground.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" dist
+          cp "target/$BUILD_TARGET/release/colab-playground" "$app/Contents/MacOS/colab-playground"
+          cp assets/icon/icon.icns "$app/Contents/Resources/AppIcon.icns"
+          copyright=$(grep -m 1 '^Copyright' LICENSE)
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>Colab Playground</string>
+            <key>CFBundleExecutable</key>
+            <string>colab-playground</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.wynxing.colab-playground</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>Colab Playground</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$VERSION</string>
+            <key>CFBundleVersion</key>
+            <string>$VERSION</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.developer-tools</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>$MACOSX_DEPLOYMENT_TARGET</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSHumanReadableCopyright</key>
+            <string>$copyright</string>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$app/Contents/Info.plist"
+          # Ad-hoc signature (no Apple Developer ID, not notarised): Apple silicon runs
+          # only signed code, and the signature seals Info.plist and the icon.
+          codesign --force --sign - "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          install -m 644 LICENSE README.md "$stage/"
+          ditto -c -k --keepParent "$stage" "dist/$BASE.zip"
+          check="$RUNNER_TEMP/unzipped"
+          ditto -x -k "dist/$BASE.zip" "$check"
+          codesign --verify --strict --verbose=2 "$check/$BASE/Colab Playground.app"
+          echo "ASSET=$BASE.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ env.ASSET }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          # Keep each file as it was uploaded: the macOS download is itself a zip.
+          skip-decompress: true
+          path: dist
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          ls -l
+          count=$(find . -maxdepth 1 -type f -name 'colab-playground-*' | wc -l)
+          if [ "$count" -ne 3 ]; then
+            echo "::error::Expected 3 files, found $count"
+            exit 1
+          fi
+          sha256sum colab-playground-* > SHA256SUMS
+          cat SHA256SUMS
+      # Signing is optional here: without the secret the release still goes out, it
+      # just cannot be installed by the app's update check. To turn it on, make the
+      # key pair as docs/RELEASING.md describes, save the private key as the Actions
+      # secret UPDATE_SIGNING_KEY and add the printed public key to
+      # crates/core/update-keys.txt.
+      - name: Sign SHA256SUMS
+        if: env.UPDATE_SIGNING_KEY != ''
+        working-directory: dist
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/update-signing-key.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key"
+          # What is signed: a line naming the release, then SHA256SUMS. The app
+          # rebuilds it from the tag it downloads from, so an older release's signed
+          # files cannot pass for this one.
+          signed="$RUNNER_TEMP/signed"
+          { printf 'colab-playground %s\n' "$TAG"; cat SHA256SUMS; } > "$signed"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in "$signed" -out SHA256SUMS.sig
+          ls -l SHA256SUMS.sig
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sums
+          path: dist/SHA256SUMS
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+      - if: env.UPDATE_SIGNING_KEY != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: sums
+          path: dist/SHA256SUMS.sig
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      # The workflow's `if` cannot read the secrets context, so it is mapped here.
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+
+  publish:
+    name: Attach to the release and publish it
+    needs: checksums
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+          skip-decompress: true # as in the checksums job: the macOS zip stays a zip
+          path: dist
+      - name: Check the files
+        working-directory: dist
+        run: |
+          ls -l
+          sha256sum -c SHA256SUMS
+          for asset in colab-playground-x86_64-pc-windows-msvc.exe \
+                       colab-playground-x86_64-unknown-linux-gnu.tar.gz \
+                       colab-playground-aarch64-apple-darwin.zip SHA256SUMS; do
+            [ -s "$asset" ] || { echo "::error::$asset is missing or empty"; exit 1; }
+          done
+      - name: Create the release as a draft
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG already has a release; its files are replaced."
+            exit 0
+          fi
+          # The notes are the tag's changelog entry when there is one, and GitHub's
+          # own summary otherwise.
+          version="${TAG#v}"
+          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {on=1; next} on && /^## /{exit} on{print}' \
+            CHANGELOG.md > notes.md 2>/dev/null || true
+          if [ -s notes.md ]; then
+            gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --draft --title "$TAG" --generate-notes
+          fi
+      - name: Upload the files
+        run: gh release upload "$TAG" dist/* --clobber
+      # Last step: the release stays a draft (hidden, never "latest", so the app's
+      # update check cannot point at it) until every file is attached.
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false
