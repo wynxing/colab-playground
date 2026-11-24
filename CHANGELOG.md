@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0](https://github.com/wynxing/colab-playground/compare/v0.4.0...v0.5.0) (2026-11-24)
+
+
+### Added
+
+* **app:** draw a run's workflow as a graph ([cbcb3c3](https://github.com/wynxing/colab-playground/commit/cbcb3c30dd6fafdad199e2d24dd97b455be554b5))
+* **app:** say how to drive a ComfyUI run with an agent ([9c40c18](https://github.com/wynxing/colab-playground/commit/9c40c18be5d43f22b69367dda19844a2a05e8a78))
+* **app:** show what a ComfyUI run produced ([717439c](https://github.com/wynxing/colab-playground/commit/717439c52596634ae77f37170fd6428de102d042))
+* **app:** show what the chosen hardware burns per hour when starting a session ([3b5bcd3](https://github.com/wynxing/colab-playground/commit/3b5bcd3028793e5b9d5886823c8c31d804d593c5))
+* **core:** bundle a ComfyUI plugin ([5f71f2a](https://github.com/wynxing/colab-playground/commit/5f71f2a9729bf6ef9fa761f4a886bca62af525c7))
+* keep reading a live run, and save what it produced ([f706fc2](https://github.com/wynxing/colab-playground/commit/f706fc25d27cb086a48497c2e3293f6e6e85c05f))
+
+
+### Changed
+
+* **core:** write the session ledger once per usage round ([146ce3a](https://github.com/wynxing/colab-playground/commit/146ce3a301d907044dac3cdc7221ff60c3b3e4ae))
+
+
+### Fixed
+
+* **app:** name a new session after the hardware chosen in the form, not the default ([bb17287](https://github.com/wynxing/colab-playground/commit/bb17287ddc27a621f165b5f42a970002613c50e8))
+* **core:** cover a ComfyUI worker's failure paths and clean up harder ([d3c2d4d](https://github.com/wynxing/colab-playground/commit/d3c2d4ddb43f7358c4066de2e50877a5c3cdeda4))
+* **core:** cover the real install path of the ComfyUI worker ([57ab443](https://github.com/wynxing/colab-playground/commit/57ab443a9b256a4cedb2c53fcdf900e994770ba4))
+* **core:** keep the ComfyUI worker's subprocess helper from being shadowed ([dbfac2e](https://github.com/wynxing/colab-playground/commit/dbfac2ea9c002e96cb7e46e25c414a2fdb8e0cea))
+* **core:** leave a server that this worker does not own alone ([4b5b910](https://github.com/wynxing/colab-playground/commit/4b5b910fe628218d20d299f69c37518c19a5cddb))
+* **core:** load the all-in-one Flux checkpoint and stop the server after a failed run ([499009c](https://github.com/wynxing/colab-playground/commit/499009c5e1e97e7dba115304d8917d01cec8b531))
+
+
 ## [0.4.0](https://github.com/scarletkc/colab-playground/compare/v0.3.0...v0.4.0) (2026-11-20)
 
 
