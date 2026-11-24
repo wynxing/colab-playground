@@ -69,6 +69,7 @@ max = 65535
 
 [run]
 script = "worker.py"       # relative, no "..", ends in .py or .sh
+keep_alive = false         # true for a server: the app keeps reading its status
 
 [[stages]]                 # progress steps shown in order; ids are what status.json reports
 id = "download"
@@ -154,6 +155,9 @@ often as useful:
 
 - `state`: `running`, `ready` or `failed`. Before the first write the app shows
   "starting".
+- A script with `keep_alive` reports `ready` and stays running: the app keeps reading its
+  status, so a server can show what it does later. The run ends when the script stops or the
+  user cancels it.
 - `stage`: one of the manifest's stage ids.
 - `progress`: optional, 0.0 to 1.0, for the current stage.
 - `message`: short, plain text (not localised; keep it informative).

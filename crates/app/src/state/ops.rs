@@ -70,6 +70,8 @@ pub enum Op {
     Secret,
     /// Listing a Hugging Face repo's files (keyed by repo).
     HfFiles(u64),
+    /// Saving what a run produced on the VM (keyed by the path).
+    DownloadOutputs(u64),
     /// Stopping every runtime before quitting.
     StopAll,
     /// Checking GitHub for a newer release.

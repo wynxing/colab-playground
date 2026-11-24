@@ -1671,6 +1671,49 @@ impl Backend for RealBackend {
         self.inner.stop(target, &options, cancel)
     }
 
+    fn vm_ls(&self, target: &RuntimeRef, path: &str, cancel: &CancelToken) -> Result<Vec<VmFile>> {
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        let value = cli.exec_json(
+            &state,
+            &name,
+            &[],
+            &crate::vm::vm_ls_snippet(path),
+            120,
+            cancel,
+        )?;
+        let files = value
+            .get("files")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(files
+            .iter()
+            .filter_map(|f| {
+                Some(VmFile {
+                    path: f.get("path")?.as_str()?.to_owned(),
+                    size: f.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    fn vm_download(
+        &self,
+        target: &RuntimeRef,
+        remote: &str,
+        local: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        cli.download(&state, &name, remote, local, cancel)
+    }
+
     fn extend_session(
         &self,
         target: &RuntimeRef,
@@ -2354,6 +2397,9 @@ impl RealBackend {
         };
         let mut offset = 0u64;
         let mut last: Option<RunStatus> = None;
+        // A plugin that keeps itself alive reports ready and stays running: its
+        // status is read until it stops.
+        let mut ready: Option<RunStatus> = None;
         let mut transient = 0u32;
         let mut first = true;
         let mut catching_up = 0u32;
@@ -2411,14 +2457,19 @@ impl RealBackend {
                 }
                 match s.state {
                     RunState::Ready => {
-                        show_rest_of_log(poll, false)?;
-                        return Ok(PluginRunOutcome {
-                            session: session.to_owned(),
-                            account: account.clone(),
-                            run_id,
-                            status: s,
-                            endpoints: endpoints.to_vec(),
-                        });
+                        if !plugin.manifest.run.keep_alive {
+                            show_rest_of_log(poll, false)?;
+                            return Ok(PluginRunOutcome {
+                                session: session.to_owned(),
+                                account: account.clone(),
+                                run_id,
+                                status: s,
+                                endpoints: endpoints.to_vec(),
+                            });
+                        }
+                        // A server keeps writing to its log; the rest of it is
+                        // shown when it stops.
+                        ready = Some(s);
                     }
                     RunState::Failed => {
                         show_rest_of_log(poll, true)?;
@@ -2431,6 +2482,16 @@ impl RealBackend {
             }
             if !poll.alive {
                 show_rest_of_log(poll, false)?;
+                if let Some(s) = ready {
+                    // The server stopped on its own: the run ends as it was.
+                    return Ok(PluginRunOutcome {
+                        session: session.to_owned(),
+                        account: account.clone(),
+                        run_id,
+                        status: s,
+                        endpoints: endpoints.to_vec(),
+                    });
+                }
                 let stage = last
                     .as_ref()
                     .and_then(|s| s.stage.clone())

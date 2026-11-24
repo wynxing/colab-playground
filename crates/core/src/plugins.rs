@@ -151,6 +151,10 @@ pub struct RunSpec {
     /// Script file in the plugin directory (`.py` runs with the VM's Python,
     /// `.sh` with bash).
     pub script: String,
+    /// The script keeps running after it reports ready (a server), so the app
+    /// keeps reading its status.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 /// A progress stage shown in the run view.
@@ -1199,6 +1203,7 @@ script = "main.py"
         assert!(p.manifest.needs.contains(&Capability::HfToken));
         assert!(!p.script.is_empty());
         assert_eq!(p.manifest.stages.len(), 5);
+        assert!(p.manifest.run.keep_alive, "the server keeps running");
         let ep = &p.manifest.endpoints[0];
         assert_eq!(ep.port_input.as_deref(), Some("port"));
         assert_eq!(p.manifest.keep[0].path, "/content/ComfyUI/output");
@@ -1210,6 +1215,25 @@ script = "main.py"
         assert_eq!(m.name.get("zh-CN"), Some("演示"));
         assert_eq!(m.name.get("zh-TW"), Some("演示"), "same language before en");
         assert_eq!(m.name.get("fr"), Some("Demo"));
+    }
+
+    #[test]
+    fn a_server_may_say_it_keeps_running() {
+        let text = MINIMAL.replace(
+            "script = \"main.py\"",
+            "script = \"main.py\"
+keep_alive = true",
+        );
+        let manifest = Manifest::parse(&text).expect("a manifest with keep_alive");
+        manifest.validate().expect("keep_alive is valid");
+        assert!(manifest.run.keep_alive);
+        let bad = MINIMAL.replace(
+            "script = \"main.py\"",
+            "script = \"main.py\"
+keep_alive = \"yes\"",
+        );
+        let err = Manifest::parse(&bad).expect_err("keep_alive must be a boolean");
+        assert!(err.is(ErrorKind::ManifestInvalid), "{err}");
     }
 
     #[test]

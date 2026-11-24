@@ -377,6 +377,8 @@ struct World {
     login_live: bool,
     update_checks: u32,
     runtime_listings: u32,
+    /// The files that were downloaded, as `remote -> local`.
+    downloads: Vec<String>,
     update_installs: u32,
     update_relaunches: u32,
 }
@@ -689,6 +691,7 @@ impl MockBackend {
             login_live: false,
             update_checks: 0,
             runtime_listings: 0,
+            downloads: Vec::new(),
             update_installs: 0,
             update_relaunches: 0,
         };
@@ -1578,6 +1581,35 @@ impl Backend for MockBackend {
         self.stop_inner(target, options.reason)
     }
 
+    fn vm_ls(&self, _target: &RuntimeRef, path: &str, cancel: &CancelToken) -> Result<Vec<VmFile>> {
+        self.ready()?;
+        self.step(cancel)?;
+        Ok(vec![
+            VmFile {
+                path: format!("{path}/image.png"),
+                size: 12_345,
+            },
+            VmFile {
+                path: format!("{path}/other.png"),
+                size: 6_789,
+            },
+        ])
+    }
+
+    fn vm_download(
+        &self,
+        _target: &RuntimeRef,
+        remote: &str,
+        local: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        self.ready()?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        w.downloads.push(format!("{remote} -> {local}"));
+        Ok(())
+    }
+
     fn extend_session(
         &self,
         target: &RuntimeRef,
@@ -2145,6 +2177,25 @@ mod tests {
 
     fn nc() -> CancelToken {
         CancelToken::new()
+    }
+
+    #[test]
+    fn the_files_of_a_run_are_listed_and_downloaded() {
+        let (m, _) = mock(MockScenario::demo());
+        let target = RuntimeRef {
+            account: AccountId::new("mock1").unwrap(),
+            name: Some("demo".into()),
+            endpoint: "ep".into(),
+        };
+        let files = m
+            .vm_ls(&target, "/content/out", &nc())
+            .expect("the files are listed");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "/content/out/image.png");
+        m.vm_download(&target, "/content/out/image.png", "/tmp/image.png", &nc())
+            .expect("the file comes over");
+        let downloads = m.w().downloads.clone();
+        assert_eq!(downloads, ["/content/out/image.png -> /tmp/image.png"]);
     }
 
     #[test]

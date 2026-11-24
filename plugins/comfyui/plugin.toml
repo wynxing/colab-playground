@@ -142,6 +142,8 @@ ko = "그대로 ComfyUI에 전달됩니다(예: --preview-method auto, --highvra
 
 [run]
 script = "worker.py"
+# The server keeps running after it reports ready, so the app keeps reading its status.
+keep_alive = true
 
 [[stages]]
 id = "detect"

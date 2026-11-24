@@ -55,6 +55,15 @@ pub enum CliCommand {
         /// Session name.
         name: String,
     },
+    /// `colab download -s NAME REMOTE LOCAL`.
+    Download {
+        /// Session name.
+        name: String,
+        /// The path on the VM.
+        remote: String,
+        /// Where the file lands on this computer.
+        local: String,
+    },
     /// `colab version`.
     Version,
     /// `colab whoami` (triggers login when no credential exists).
@@ -115,6 +124,23 @@ pub fn build_argv(state_file: Option<&HostPath>, cmd: &CliCommand) -> Result<Vec
         CliCommand::Stop { name } => {
             validate_session_name(name)?;
             argv.extend(["stop".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::Download {
+            name,
+            remote,
+            local,
+        } => {
+            validate_session_name(name)?;
+            if remote.is_empty() || local.is_empty() {
+                return Err(Error::invalid("download", "the path may not be empty"));
+            }
+            argv.extend([
+                "download".into(),
+                "-s".into(),
+                name.clone(),
+                remote.clone(),
+                local.clone(),
+            ]);
         }
     }
     Ok(argv)
@@ -476,6 +502,31 @@ impl Cli {
         } else {
             Err(classify_failure(&out))
         }
+    }
+
+    /// `colab download -s NAME REMOTE LOCAL`: a file comes to this computer.
+    pub fn download(
+        &self,
+        state: &HostPath,
+        name: &str,
+        remote: &str,
+        local: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Download {
+                name: name.to_owned(),
+                remote: remote.to_owned(),
+                local: local.to_owned(),
+            },
+            900,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(())
     }
 
     pub fn version(&self, cancel: &CancelToken) -> Result<String> {

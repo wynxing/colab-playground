@@ -176,6 +176,26 @@ print("__CPG_RESULT__ " + json.dumps({{"signalled": _ok}}))
     )
 }
 
+/// Code that lists the files under a path on the VM, with their sizes.
+pub fn vm_ls_snippet(path: &str) -> String {
+    let quoted = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".to_owned());
+    format!(
+        r#"import json, os
+_path = {quoted}
+_files = []
+for _root, _dirs, _names in os.walk(_path):
+    for _name in _names:
+        _p = os.path.join(_root, _name)
+        try:
+            _size = os.path.getsize(_p)
+        except OSError:
+            _size = 0
+        _files.append({{"path": _p, "size": _size}})
+print("__CPG_RESULT__ " + json.dumps({{"files": _files}}))
+"#
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {

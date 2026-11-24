@@ -96,6 +96,13 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
                 .map(|endpoint| endpoint_card(endpoint, outcome, info, state, handle, cx)),
         );
     }
+    if let RunPhase::Ready(outcome) = &run.phase
+        && let Some(info) = info
+        && !info.manifest.keep.is_empty()
+    {
+        let _ = outcome;
+        page = page.child(keep_card(&info.manifest.keep, state, handle, cx));
+    }
     if let Some(status) = &run.status
         && !status.outputs.is_empty()
     {
@@ -281,38 +288,102 @@ fn stages(run: &PluginRun, info: &PluginInfo, state: &AppState, cx: &App) -> Any
         .into_any_element()
 }
 
+/// The paths a plugin wants to keep, with a button that saves them to this
+/// computer.
+fn keep_card(
+    keep: &[colab_playground_core::plugins::KeepSpec],
+    state: &AppState,
+    handle: &Entity<AppState>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let tag = state.language().tag();
+    let rows = keep.iter().map(|entry| {
+        let label = entry.label.get(tag).unwrap_or(&entry.path).to_owned();
+        let path = entry.path.clone();
+        let save = handle.clone();
+        let clicked = path.clone();
+        div()
+            .flex()
+            .gap_3()
+            .text_size(theme.text_size(TextSize::Sm))
+            .child(
+                div()
+                    .w(theme.label_width())
+                    .text_color(theme.colors.fg_muted)
+                    .child(label),
+            )
+            .child(
+                div().flex_1().min_w_0().child(
+                    div()
+                        .font_family(theme.mono_family.clone())
+                        .child(path.clone()),
+                ),
+            )
+            .child(tagged(
+                format!("run-save-{}", path),
+                Button::new(
+                    SharedString::from(format!("run-save-{}", path)),
+                    tr(cx, keys::RUN_SAVE),
+                )
+                .size(ControlSize::Sm)
+                .on_click(move |_, _, cx| {
+                    save.update(cx, |state, cx| state.save_run_outputs(&clicked, cx))
+                }),
+            ))
+    });
+    Card::new()
+        .header(CardHeader::new(tr(cx, keys::RUN_KEEP)))
+        .child(div().flex().flex_col().gap_1().children(rows))
+        .w_full()
+        .into_any_element()
+}
+
+/// The row that stops a running script.
+fn cancel_row(
+    run: &PluginRun,
+    state: &AppState,
+    handle: &Entity<AppState>,
+    cx: &App,
+) -> AnyElement {
+    let cancelling = state.is_cancelling_run();
+    let cancel = handle.clone();
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(cancel_work_button(
+            RUN_CANCEL,
+            cancelling,
+            move |_, cx| cancel.update(cx, |state, cx| state.cancel_run(cx)),
+            cx,
+        ))
+        .child(Caption::new(tr(
+            cx,
+            if run.provisions {
+                keys::RUN_CANCEL_NOTE_NEW
+            } else {
+                keys::RUN_CANCEL_NOTE_EXISTING
+            },
+        )))
+        .into_any_element()
+}
+
 fn outcome(run: &PluginRun, state: &AppState, handle: &Entity<AppState>, cx: &App) -> AnyElement {
     let mut section = div().flex().flex_col().gap_2().w_full();
     match &run.phase {
         RunPhase::Running => {
-            let cancelling = state.is_cancelling_run();
-            let cancel = handle.clone();
-            section = section.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(cancel_work_button(
-                        RUN_CANCEL,
-                        cancelling,
-                        move |_, cx| cancel.update(cx, |state, cx| state.cancel_run(cx)),
-                        cx,
-                    ))
-                    .child(Caption::new(tr(
-                        cx,
-                        if run.provisions {
-                            keys::RUN_CANCEL_NOTE_NEW
-                        } else {
-                            keys::RUN_CANCEL_NOTE_EXISTING
-                        },
-                    ))),
-            );
+            section = section.child(cancel_row(run, state, handle, cx));
         }
         RunPhase::Ready(_) => {
             section = section.child(InlineMessage::new(
                 Severity::Success,
                 tr(cx, keys::RUN_READY),
             ));
+            if run.live {
+                // The server is still running: it can be stopped from here.
+                section = section.child(cancel_row(run, state, handle, cx));
+            }
         }
         RunPhase::Failed(error) => {
             section = section.child(error_view::alert(

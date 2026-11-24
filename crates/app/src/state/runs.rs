@@ -12,13 +12,14 @@ use colab_playground_core::{
     accounts::AccountId,
     backend::{Backend, PluginRunEvent, PluginRunOutcome, PluginRunSpec, RunTarget, Runtime},
     hf::HfModel,
-    plugins::{InputKind, InputValue, PluginInfo},
+    plugins::{InputKind, InputValue, PluginInfo, ResolvedEndpoint, resolve_endpoints},
     provision::ProvisionSpec,
     quant::GgufListing,
     tunnel::TunnelSpec,
+    vm::RunState,
     vm::RunStatus,
 };
-use gpui::{App, AppContext, Context};
+use gpui::{AppContext, Context};
 
 use super::{AppState, InputSlot, Load, Op, ProvisionProgress, ops::key_of};
 use crate::{
@@ -97,6 +98,11 @@ pub struct PluginRun {
     pub status: Option<RunStatus>,
     pub log: RunLog,
     pub phase: RunPhase,
+    /// The script is a server: it reported ready and keeps running, so its
+    /// status is still read.
+    pub live: bool,
+    /// The endpoints the run offers, resolved when it starts.
+    pub endpoints: Vec<ResolvedEndpoint>,
 }
 
 /// Lines of a run's log the app keeps, the newest ones. The log view builds every line it has
@@ -104,6 +110,15 @@ pub struct PluginRun {
 /// (release build, Apple M4 Pro), so this many leave about half of a 60 Hz frame. The whole log
 /// is a file on the runtime.
 pub const RUN_LOG_LINES_KEPT: usize = 2_000;
+
+/// Where the files a run produced are saved: a folder of the plugin's own in the
+/// user's downloads, or in the app's own directory when there is none.
+fn outputs_dir(plugin: &str) -> std::path::PathBuf {
+    let base = dirs::download_dir()
+        .or_else(colab_playground_core::paths::default_local_data_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("colab-playground").join(plugin)
+}
 
 /// The newest lines of a run's log (secrets already redacted by core).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -442,11 +457,19 @@ impl AppState {
             }
         };
         let provisions = matches!(target, RunTarget::Provision(_));
+        let keep_alive = self
+            .plugin(&form.plugin)
+            .is_some_and(|info| info.manifest.run.keep_alive);
+        let endpoints = self
+            .plugin(&form.plugin)
+            .and_then(|info| resolve_endpoints(&info.manifest, &inputs).ok())
+            .unwrap_or_default();
         let spec = PluginRunSpec {
             plugin: form.plugin.clone(),
             inputs,
             target,
             stop_on_failure: form.stop_on_failure,
+            keep_alive,
         };
         self.plugin_run = Some(PluginRun {
             plugin: form.plugin.clone(),
@@ -457,6 +480,8 @@ impl AppState {
             status: None,
             log: RunLog::default(),
             phase: RunPhase::Running,
+            live: false,
+            endpoints,
         });
         self.plugin_view = PluginView::Run;
         self.run_backend_streaming(
@@ -477,20 +502,27 @@ impl AppState {
         true
     }
 
-    pub fn apply_run_event(&mut self, event: PluginRunEvent, cx: &App) {
+    pub fn apply_run_event(&mut self, event: PluginRunEvent, cx: &mut Context<Self>) {
         let at = self.backend_now();
         let Some(run) = &mut self.plugin_run else {
             return;
         };
+        let mut became_ready = false;
         match event {
             PluginRunEvent::Provision(event) => run.provision.push(event, at),
             PluginRunEvent::Launched { session, .. } => run.session = Some(session),
-            PluginRunEvent::Status(status) => run.status = Some(status),
+            PluginRunEvent::Status(status) => {
+                became_ready = status.state == RunState::Ready;
+                run.status = Some(status);
+            }
             PluginRunEvent::Log { lines } => run.log.extend(lines),
             PluginRunEvent::LogSkipped { path } => {
                 run.log
                     .extend([tr_args(cx, keys::RUN_LOG_SKIPPED, &[("path", &path)]).into()])
             }
+        }
+        if became_ready {
+            self.run_became_ready(cx);
         }
     }
 
@@ -503,6 +535,9 @@ impl AppState {
             return;
         };
         let mut forwards = Vec::new();
+        // A run that reported ready while it was still going is already shown
+        // as ready; it must not say so twice.
+        let was_ready = matches!(run.phase, RunPhase::Ready(_));
         run.phase = match result {
             Ok(outcome) => {
                 run.session = Some(outcome.session.clone());
@@ -529,15 +564,12 @@ impl AppState {
         if run.account.is_none() {
             run.account = active;
         }
+        // The script is gone now, whatever it was.
+        run.live = false;
         let ready = matches!(run.phase, RunPhase::Ready(_));
         let plugin = run.plugin.clone();
-        if ready {
-            let name = self
-                .plugin(&plugin)
-                .map(|info| self.plugin_name(info))
-                .unwrap_or(plugin);
-            self.toast_done(tr_args(cx, keys::RUN_READY_TOAST, &[("name", &name)]), cx);
-            self.count_ready(cx);
+        if ready && !was_ready {
+            self.toast_ready(&plugin, cx);
         }
         for spec in forwards {
             self.open_tunnel(spec, false, cx);
@@ -545,10 +577,107 @@ impl AppState {
         self.after_runtime_change(cx);
     }
 
+    /// The run reported ready: the phase turns ready so the endpoints show, and
+    /// the forwards open. A server keeps running, so it stays cancellable.
+    fn run_became_ready(&mut self, cx: &mut Context<Self>) {
+        let Some(run) = &self.plugin_run else {
+            return;
+        };
+        if matches!(run.phase, RunPhase::Ready(_)) {
+            return;
+        }
+        let Some(status) = run.status.clone() else {
+            return;
+        };
+        let session = run.session.clone().unwrap_or_default();
+        let endpoints = run.endpoints.clone();
+        let plugin = run.plugin.clone();
+        let live = self
+            .plugin(&plugin)
+            .is_some_and(|info| info.manifest.run.keep_alive);
+        let Some(account) = self.accounts.ready().and_then(|view| view.active.clone()) else {
+            return;
+        };
+        let forwards: Vec<TunnelSpec> = endpoints
+            .iter()
+            .map(|endpoint| TunnelSpec {
+                account: account.clone(),
+                session: session.clone(),
+                local_port: endpoint.remote_port,
+                remote_port: endpoint.remote_port,
+                health_path: endpoint.health.clone(),
+            })
+            .collect();
+        let outcome = PluginRunOutcome {
+            session,
+            account,
+            run_id: String::new(),
+            status,
+            endpoints,
+        };
+        if let Some(run) = &mut self.plugin_run {
+            run.phase = RunPhase::Ready(Box::new(outcome));
+            run.live = live;
+        }
+        for spec in forwards {
+            self.open_tunnel(spec, false, cx);
+        }
+        self.toast_ready(&plugin, cx);
+    }
+
+    /// Says that a run is ready, once.
+    fn toast_ready(&mut self, plugin: &str, cx: &mut Context<Self>) {
+        let name = self
+            .plugin(plugin)
+            .map(|info| self.plugin_name(info))
+            .unwrap_or_else(|| plugin.to_owned());
+        self.toast_done(tr_args(cx, keys::RUN_READY_TOAST, &[("name", &name)]), cx);
+        self.count_ready(cx);
+    }
+
     /// Asks the run to stop; a session it provisioned is stopped too.
     pub fn cancel_run(&mut self, cx: &mut Context<Self>) {
         self.ops.cancel(Op::PluginRun);
         cx.notify();
+    }
+
+    /// Saves what the run produced on the VM to this computer: every file
+    /// under `path` lands in a folder of its own.
+    pub fn save_run_outputs(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(target) = self.run_runtime() else {
+            self.toast_error(&Error::new(ErrorKind::SessionGone), cx);
+            return;
+        };
+        let plugin = self
+            .plugin_run
+            .as_ref()
+            .map(|run| run.plugin.clone())
+            .unwrap_or_default();
+        let path = path.to_owned();
+        self.run_backend(
+            Op::DownloadOutputs(key_of(&path)),
+            cx,
+            move |backend, cancel| {
+                let files = backend.vm_ls(&target, &path, cancel)?;
+                let dir = outputs_dir(&plugin);
+                std::fs::create_dir_all(&dir)?;
+                for file in &files {
+                    let name = file.path.rsplit('/').next().unwrap_or("file");
+                    let local = dir.join(name).to_string_lossy().to_string();
+                    backend.vm_download(&target, &file.path, &local, cancel)?;
+                }
+                Ok(dir.to_string_lossy().to_string())
+            },
+            |state, result, cx| {
+                match result {
+                    Ok(dir) => {
+                        state.toast_done(tr_args(cx, keys::RUN_SAVED, &[("path", &dir)]), cx)
+                    }
+                    Err(error) => state.toast_error(&error, cx),
+                }
+                cx.notify();
+            },
+        );
     }
 
     pub fn is_running_plugin(&self) -> bool {

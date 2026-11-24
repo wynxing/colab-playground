@@ -124,6 +124,11 @@ fn a_comfyui_endpoint_shows_how_to_point_an_agent_at_it(cx: &mut TestAppContext)
         app.shown(&format!("endpoint-mcp {}", endpoint.id)),
         "the endpoint says how to drive it with an agent"
     );
+    app.reveal("run-save-/content/ComfyUI/output");
+    assert!(
+        app.shown("run-save-/content/ComfyUI/output"),
+        "the files the run produced can be saved to this computer"
+    );
 }
 
 /// The run's log as the app keeps it: how many lines, the oldest and the newest.

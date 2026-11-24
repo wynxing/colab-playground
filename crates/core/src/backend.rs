@@ -206,6 +206,9 @@ pub struct PluginRunSpec {
     /// Stop a session provisioned for this run when the run fails. (A
     /// cancelled run always stops the session it provisioned.)
     pub stop_on_failure: bool,
+    /// The script is a server: it keeps running after it reports ready, and
+    /// the app keeps reading its status.
+    pub keep_alive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,6 +244,15 @@ pub struct PluginRunOutcome {
     /// Final status (`ready`).
     pub status: RunStatus,
     pub endpoints: Vec<ResolvedEndpoint>,
+}
+
+/// A file on the VM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmFile {
+    /// Its path on the VM.
+    pub path: String,
+    /// Its size in bytes.
+    pub size: u64,
 }
 
 pub trait Backend: Send + Sync {
@@ -307,6 +319,16 @@ pub trait Backend: Send + Sync {
         &self,
         target: &RuntimeRef,
         options: StopOptions,
+        cancel: &CancelToken,
+    ) -> Result<()>;
+    /// Lists the files under a path on the VM.
+    fn vm_ls(&self, target: &RuntimeRef, path: &str, cancel: &CancelToken) -> Result<Vec<VmFile>>;
+    /// Downloads a file from the VM to this computer.
+    fn vm_download(
+        &self,
+        target: &RuntimeRef,
+        remote: &str,
+        local: &str,
         cancel: &CancelToken,
     ) -> Result<()>;
     /// Moves the auto-stop `by` later than where the session has it (active
@@ -490,6 +512,7 @@ pub fn run_template(info: &PluginInfo, defaults: &Defaults, taken: &[String]) ->
         inputs,
         target: RunTarget::Provision(spec),
         stop_on_failure: true,
+        keep_alive: m.run.keep_alive,
     }
 }
 
