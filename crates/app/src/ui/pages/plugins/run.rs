@@ -18,7 +18,7 @@ use ely_gpui_component::{
     motion::ProgressBar,
     primitives::{IconName, Severity},
     terminal::AnsiText,
-    theme::{ActiveTheme, ControlSize, TextSize},
+    theme::{ActiveTheme, ControlSize, TextSize, Theme},
     typography::Caption,
 };
 use gpui::{
@@ -100,22 +100,17 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
         && !status.outputs.is_empty()
     {
         let theme = cx.theme();
-        let rows = status.outputs.iter().map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::String(text) => text.clone(),
-                other => other.to_string(),
-            };
-            div()
-                .flex()
-                .gap_3()
-                .text_size(theme.text_size(TextSize::Sm))
-                .child(
-                    div()
-                        .w(theme.label_width())
-                        .text_color(theme.colors.fg_muted)
-                        .child(key.clone()),
-                )
-                .child(div().flex_1().min_w_0().child(value))
+        let base = match &run.phase {
+            RunPhase::Ready(outcome) => outcome
+                .endpoints
+                .first()
+                .map(|endpoint| format!("http://localhost:{}", endpoint.remote_port)),
+            _ => None,
+        };
+        let rows = status.outputs.iter().flat_map(|(key, value)| {
+            output_rows(key, value, base.as_deref())
+                .into_iter()
+                .map(|row| output_row(row, theme, cx))
         });
         page = page.child(
             Card::new()
@@ -125,6 +120,97 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
         );
     }
     page.child(log(run, cx))
+}
+
+/// How one output is shown.
+#[derive(Debug)]
+enum OutputRow {
+    /// A value to read.
+    Text { key: String, value: String },
+    /// A path on the VM: the forward turns it into a link.
+    Link {
+        key: String,
+        value: String,
+        url: String,
+    },
+}
+
+/// The rows an output is shown as. A nested object or a list becomes a row per
+/// entry, so a workflow reads as nodes instead of one long line.
+fn output_rows(key: &str, value: &serde_json::Value, base: Option<&str>) -> Vec<OutputRow> {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .flat_map(|(k, v)| output_rows(&format!("{key}.{k}"), v, base))
+            .collect(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .flat_map(|(i, v)| output_rows(&format!("{key}[{i}]"), v, base))
+            .collect(),
+        serde_json::Value::String(text) if text.starts_with('/') => {
+            let url = base
+                .map(|b| format!("{b}{text}"))
+                .unwrap_or_else(|| text.clone());
+            vec![OutputRow::Link {
+                key: key.to_owned(),
+                value: text.clone(),
+                url,
+            }]
+        }
+        serde_json::Value::String(text) => vec![OutputRow::Text {
+            key: key.to_owned(),
+            value: text.clone(),
+        }],
+        other => vec![OutputRow::Text {
+            key: key.to_owned(),
+            value: other.to_string(),
+        }],
+    }
+}
+
+fn output_row(row: OutputRow, theme: &Theme, cx: &App) -> AnyElement {
+    let label = |key: &str| {
+        div()
+            .w(theme.label_width())
+            .text_color(theme.colors.fg_muted)
+            .child(SharedString::from(key.to_owned()))
+    };
+    match row {
+        OutputRow::Text { key, value } => div()
+            .flex()
+            .gap_3()
+            .text_size(theme.text_size(TextSize::Sm))
+            .child(label(&key))
+            .child(div().flex_1().min_w_0().child(value))
+            .into_any_element(),
+        OutputRow::Link { key, value, url } => {
+            let open = url.starts_with("http");
+            div()
+                .flex()
+                .gap_3()
+                .text_size(theme.text_size(TextSize::Sm))
+                .child(label(&key))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().font_family(theme.mono_family.clone()).child(value)),
+                )
+                .child(
+                    Button::new(
+                        SharedString::from(format!("output-open-{key}")),
+                        tr(cx, keys::ACTION_OPEN_BROWSER),
+                    )
+                    .size(ControlSize::Sm)
+                    .variant(ButtonVariant::Ghost)
+                    .icon(IconName::ExternalLink)
+                    .disabled(!open)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                )
+                .into_any_element()
+        }
+    }
 }
 
 fn stages(run: &PluginRun, info: &PluginInfo, state: &AppState, cx: &App) -> AnyElement {
@@ -532,4 +618,52 @@ fn log(run: &PluginRun, cx: &App) -> AnyElement {
         )
         .w_full()
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nested_output_becomes_a_row_per_entry() {
+        let value = serde_json::json!({"workflow": {"5": "KSampler", "6": "VAEDecode"}});
+        let rows = output_rows("outputs", &value, None);
+        let keys: Vec<&str> = rows
+            .iter()
+            .map(|row| match row {
+                OutputRow::Text { key, .. } | OutputRow::Link { key, .. } => key.as_str(),
+            })
+            .collect();
+        assert_eq!(keys, ["outputs.workflow.5", "outputs.workflow.6"]);
+        match &rows[0] {
+            OutputRow::Text { key, value } => {
+                assert_eq!(key, "outputs.workflow.5");
+                assert_eq!(value, "KSampler");
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_on_the_vm_becomes_a_link_through_the_forward() {
+        let value = serde_json::json!({"images": ["/view?filename=a.png"]});
+        let rows = output_rows("outputs", &value, Some("http://localhost:8188"));
+        match &rows[0] {
+            OutputRow::Link { url, value, .. } => {
+                assert_eq!(url, "http://localhost:8188/view?filename=a.png");
+                assert_eq!(value, "/view?filename=a.png");
+            }
+            other => panic!("expected a link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_without_a_forward_stays_a_path() {
+        let value = serde_json::json!({"image": "/view?filename=a.png"});
+        let rows = output_rows("outputs", &value, None);
+        match &rows[0] {
+            OutputRow::Link { url, .. } => assert_eq!(url, "/view?filename=a.png"),
+            other => panic!("expected a link, got {other:?}"),
+        }
+    }
 }

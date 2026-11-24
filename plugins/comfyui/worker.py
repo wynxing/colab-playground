@@ -93,6 +93,7 @@ NOT_A_CHECKPOINT = re.compile(
 
 _current_stage = ["detect"]
 _failure = [""]
+_outputs = {}
 
 
 def redact(text):
@@ -504,7 +505,9 @@ def client_attached(port):
 def monitor():
     """After `ready`: touch the heartbeat while a generation runs or while a
     browser is connected, so that the idle rule of the session can still stop
-    a session nobody uses any more. A crashed server ends the run."""
+    a session nobody uses any more. A crashed server ends the run. The
+    workflow of the newest job is published as it changes."""
+    last = ""
     while True:
         time.sleep(30)
         p = _server[0]
@@ -518,9 +521,53 @@ def monitor():
         attached = client_attached(PORT)
         if busy or attached is not False:
             touch_heartbeat()
+        job = newest_job()
+        if job and job[0] != last:
+            last = job[0]
+            _outputs["workflow"] = job[1]
+            if job[2]:
+                _outputs["images"] = job[2]
+            status("ready", message="a new workflow finished", outputs=_outputs)
 
 
 # ------------------------------------------------------------- warm-up
+
+
+def newest_job():
+    """The newest job ComfyUI ran: its id, the nodes of its workflow and the
+    paths of the images it produced. The paths are on the VM; the app turns
+    them into links through the forward."""
+    try:
+        history = http_json("http://127.0.0.1:%d/history" % PORT, timeout=15)
+    except Exception:  # noqa: BLE001
+        return None
+    newest = None
+    for prompt_id, entry in history.items():
+        completed = ((entry.get("status") or {}).get("completed")) or 0
+        if newest is None or completed >= newest[0]:
+            newest = (completed, prompt_id, entry)
+    if newest is None:
+        return None
+    _, prompt_id, entry = newest
+    graph = entry.get("prompt")
+    nodes = {}
+    if isinstance(graph, list) and len(graph) > 2 and isinstance(graph[2], dict):
+        nodes = {str(k): (v.get("class_type") or "?")
+                 for k, v in graph[2].items() if isinstance(v, dict)}
+    paths = []
+    for out in (entry.get("outputs") or {}).values():
+        if not isinstance(out, dict):
+            continue
+        for image in out.get("images") or []:
+            name = image.get("filename")
+            if not name:
+                continue
+            paths.append("/view?" + urllib.parse.urlencode({
+                "filename": name,
+                "subfolder": image.get("subfolder", ""),
+                "type": image.get("type", "output"),
+            }))
+    return prompt_id, nodes, paths
 
 
 def warmup_graph(ckpt_name, steps, cfg, size, latent_node):
@@ -671,6 +718,38 @@ def self_test():
         "double_blocks.0.img_attn.qkv.weight", "single_blocks.0.modulation.lin.weight"])), (True, False, False))
     check("a LoRA is no checkpoint", checkpoint_assets(fake_safetensors(ckpt, [
         "lora_unet_down_blocks.0.to_q.lora_A.weight"])), (False, False, False))
+
+    # ---------------------------------------------------------- the newest job
+    def job_history(images):
+        return {
+            "old": {
+                "status": {"completed": 1},
+                "prompt": [1, "old", {"5": {"class_type": "KSampler"}}],
+                "outputs": {},
+            },
+            "new": {
+                "status": {"completed": 9},
+                "prompt": [1, "new", {"9": {"class_type": "SaveImage"}}],
+                "outputs": {"6": {"images": images}},
+            },
+        }
+
+    restore = patch(http_json=lambda url, **kw: job_history([
+        {"filename": "a.png", "subfolder": "", "type": "output"}]))
+    try:
+        job = newest_job()
+    finally:
+        restore()
+    check("the newest job wins", job[0], "new")
+    check("its workflow is read", job[1], {"9": "SaveImage"})
+
+    restore = patch(http_json=lambda url, **kw: job_history([
+        {"filename": "a.png", "subfolder": "", "type": "output"}]))
+    try:
+        job = newest_job()
+    finally:
+        restore()
+    check("its images are paths on the VM", job[2], ["/view?filename=a.png&subfolder=&type=output"])
 
     # ---------------------------------------------------------- the install
     # The real install path, with the command helper replaced by a recorder:
@@ -878,9 +957,15 @@ def main():
                    "vram_total_mib": vram, "vram_used_mib": used, "test_image": image,
                    "steps": steps, "cfg": cfg, "size": size, "url_path": "/",
                    "workflows_dir": os.path.join(COMFY, "user", "default", "workflows")}
+        job = newest_job()
+        if job:
+            outputs["workflow"] = job[1]
+            if job[2]:
+                outputs["images"] = job[2]
+        _outputs.update(outputs)
         busy.set()
         status("ready", "warmup", "%s ready: test image %s" % (ckpt_name, image or "done"),
-               progress=1.0, outputs=outputs)
+               progress=1.0, outputs=_outputs)
         ready = True
         monitor()
     finally:
