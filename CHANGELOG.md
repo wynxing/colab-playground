@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.1](https://github.com/wynxing/colab-playground/compare/v0.5.0...v0.5.1) (2026-11-24)
+
+
+### Changed
+
+* sign the downloads, so an installed copy can update itself ([d615980](https://github.com/wynxing/colab-playground/commit/d6159806e6670458a62bc42aab1a8040a2238910))
+* name Wynn in the executable's properties ([ca6a93e](https://github.com/wynxing/colab-playground/commit/ca6a93ef9f88f39e9ebfb6d744b0f203e5e4c0f9))
+
+
 ## [0.5.0](https://github.com/wynxing/colab-playground/compare/v0.4.0...v0.5.0) (2026-11-24)
 
 
