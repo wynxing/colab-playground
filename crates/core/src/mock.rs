@@ -640,6 +640,11 @@ impl World {
     }
 }
 
+/// How many steps a simulated server runs before it is over.
+const LIVE_RUN_STEPS: u32 = 100;
+/// How long a simulated server waits between two steps.
+const LIVE_STEP_MILLIS: u64 = 5;
+
 #[derive(Clone)]
 pub struct MockBackend {
     cfg: Arc<MockConfig>,
@@ -1984,6 +1989,18 @@ impl Backend for MockBackend {
             outputs,
         };
         let _ = events.send(PluginRunEvent::Status(status.clone()));
+        if plugin.manifest.run.keep_alive {
+            // A server stays running: the run ends when it is cancelled.
+            for _ in 0..LIVE_RUN_STEPS {
+                if cancel.is_cancelled() {
+                    return Err(Error::cancelled());
+                }
+                if self.step(cancel).is_err() {
+                    return Err(Error::cancelled());
+                }
+                std::thread::sleep(Duration::from_millis(LIVE_STEP_MILLIS));
+            }
+        }
         Ok(PluginRunOutcome {
             session,
             account,
@@ -2656,6 +2673,38 @@ mod tests {
             }
             self.inner.sleep(duration, cancel)
         }
+    }
+
+    #[test]
+    fn a_server_run_reports_ready_and_keeps_running() {
+        let (m, _) = mock(MockScenario::single());
+        let spec = m.plugin_run_template("comfyui").expect("the plugin");
+        assert!(spec.keep_alive, "the ComfyUI plugin is a server");
+        let (tx, rx) = mpsc::channel();
+        let cancel = CancelToken::new();
+        std::thread::scope(|scope| {
+            let run = scope.spawn(|| m.run_plugin(spec, tx, &cancel));
+            let mut ready = false;
+            let until = std::time::Instant::now() + TOLD_WITHIN;
+            while std::time::Instant::now() < until {
+                let Ok(event) = rx.recv_timeout(Duration::from_millis(50)) else {
+                    continue;
+                };
+                if let PluginRunEvent::Status(status) = event
+                    && status.state == RunState::Ready
+                {
+                    ready = true;
+                    break;
+                }
+            }
+            assert!(ready, "the server reports ready");
+            assert!(!run.is_finished(), "and keeps running");
+            cancel.cancel();
+            assert!(
+                run.join().unwrap().is_err(),
+                "the run ends when it is cancelled"
+            );
+        });
     }
 
     #[test]
