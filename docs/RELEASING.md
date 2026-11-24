@@ -1,42 +1,39 @@
 # Releasing Colab Playground
 
-How a version goes from commits on `main` to a GitHub release with downloads. Releases are driven by
-[release-please](https://github.com/googleapis/release-please) in manifest mode; the changelog
-follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) as far as release-please allows.
+How a version goes from commits on `main` to a GitHub release with downloads. This fork releases by
+hand — the changelog follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
+version, the entry and the tag are made by the steps below. There is no release bot and no CI on
+`main`: both were upstream's and were removed.
 How users install a download is in [USAGE.md](USAGE.md#install-a-release).
 
 The pieces:
 
-- [`.github/workflows/release.yml`](../.github/workflows/release.yml): runs release-please on every
-  push to `main`, then calls Package when a release was created.
-- [`.github/workflows/package.yml`](../.github/workflows/package.yml): builds and checks the
-  downloads; attaches them to a release, or keeps them as workflow artifacts (dry run).
-- [`release-please-config.json`](../release-please-config.json): release type, version rules,
-  changelog sections, the files that carry the version.
-- [`.release-please-manifest.json`](../.release-please-manifest.json): the last released version.
-  Only release-please writes it.
+- [`.github/workflows/package.yml`](../.github/workflows/package.yml): the one workflow. A `vX.Y.Z`
+  tag — or a manual run naming one — builds the downloads, writes and signs `SHA256SUMS` and
+  attaches everything to that tag's release; a manual run with **dry run** ticked does all of the
+  build and signing without touching a release.
+- The three files a release changes, in one commit: `version` under `[workspace.package]` in
+  [`Cargo.toml`](../Cargo.toml) (both crates inherit it), the workspace crates' entries in
+  `Cargo.lock`, and `CHANGELOG.md`.
 
 ## How a release happens
 
-1. Pull requests are squash-merged into `main`: each becomes one conventional commit, titled after
-   the pull request.
-2. On each push, the **Release** workflow runs release-please. If anything since the last release
-   would appear in the changelog, it opens or updates one pull request, `chore(main): release
-   X.Y.Z`, from the branch `release-please--branches--main`. The pull request changes:
-   - `version` under `[workspace.package]` in `Cargo.toml` (both crates inherit it);
-   - the workspace crates' entries in `Cargo.lock`, so CI's `--locked` builds pass;
-   - `CHANGELOG.md` (the new entry goes on top; the file is created by the first release);
-   - `.release-please-manifest.json`.
+1. Pick the version from the commits since the last tag ([Version numbers](#version-numbers)), and
+   land the release as one `chore: release X.Y.Z` commit on `main`: the version in `Cargo.toml`, the
+   same version for both workspace crates in `Cargo.lock` (`cargo metadata --locked` fails while the
+   lock file is stale), and the new `CHANGELOG.md` entry on top.
+2. Push that commit, then push the tag `vX.Y.Z` on it.
+3. The tag starts **Package**: Windows and Linux build, `SHA256SUMS` is written and signed with the
+   `UPDATE_SIGNING_KEY` secret, the signature is checked against `crates/core/update-keys.txt`, the
+   GitHub release is created as a **draft**, every file is attached to it, and only then is it
+   published. A draft is hidden from visitors and is never the "latest" release, so the app's update
+   check (which reads the latest release) never sees a release whose downloads are missing.
+4. To try a packaging change without publishing anything: Actions → Package → Run workflow on
+   `main`, with **tag** `vX.Y.Z` (a version `Cargo.toml` already carries) and **dry run** ticked. It
+   runs the whole build and the signing, and skips only the job that attaches and publishes.
 
-   Commits of hidden types alone (see the table below) open no pull request.
-3. When the release should go out, merge that pull request with **Squash and merge**, like every
-   other pull request. Nothing else needs editing.
-4. That push runs Release again. release-please tags the squash commit `vX.Y.Z` and creates the
-   GitHub release as a **draft**, with the changelog entry as its notes.
-5. In the same run, **Package** builds the downloads on Windows, Linux and macOS, writes
-   `SHA256SUMS`, signs it, attaches all five files to the draft and only then publishes it. A
-   draft is hidden from visitors and is never the "latest" release, so the app's update check
-   (which reads the latest release) never sees a release whose downloads are missing.
+A release is always signed: an unsigned one could not be installed by the app, so a run without the
+`UPDATE_SIGNING_KEY` secret fails instead of publishing.
 
 ### The downloads
 
@@ -69,7 +66,7 @@ does, and what Package checks before anything is attached:
   oldest one left and update the requirement there.
 - **macOS: a `.zip` holding the `.app`.** An `.app` is a folder and a release asset must be a single
   file. The workflow assembles the bundle: an `Info.plist` it writes (identifier
-  `io.github.scarletkc.colab-playground`, version from Cargo, copyright line from `LICENSE`), the
+  `io.github.wynxing.colab-playground`, version from Cargo, copyright line from `LICENSE`), the
   binary, and [`assets/icon/icon.icns`](../assets/icon/icon.icns). It is ad-hoc signed (Apple
   silicon runs only signed code) but has no Developer ID and is not notarised, so the first launch
   needs the steps in USAGE.md. The zip is made with `ditto`, and the job unzips it again and
@@ -125,29 +122,19 @@ a newer one.
   with the footer `Release-As: 1.0.0` (see [footers](#writing-commits-for-the-changelog)). A
   commit of a hidden type that carries the footer is listed in the changelog anyway, under its
   hidden section's name (for example "Chores").
-- The release type is `simple`, with the version written into `Cargo.toml` and `Cargo.lock` as
-  `extra-files`. release-please's `rust` type and its `cargo-workspace` plugin cannot handle a
-  version inherited from `[workspace.package]` (the `rust` updater only edits `[package].version`,
-  and the plugin rejects `version.workspace = true`), so do not switch to them. The `Cargo.lock`
-  path matches every package without a `source`, which is every workspace member: a new crate under
-  `crates/` that inherits the version is covered without touching the config.
+- `Cargo.lock` lists the version of every package without a `source`, which is every workspace
+  member: a new crate under `crates/` that inherits the version is one more entry to bump.
 
 ## Writing commits for the changelog
 
-Each commit on `main` is a squash-merged pull request, and its subject is the pull request's title:
-**write the title as a conventional commit**, because it becomes one changelog line. The rest of
-the message does not appear in the changelog, with two exceptions:
+**Write every commit subject as a conventional commit**: the subject becomes one changelog line, in
+the section its type picks (table below), and a hidden type keeps its commit out of the entry. The
+changelog is written by hand in the shape upstream's bot used: the scope (`app`, `core`) in bold
+before the line, and the line linking to its commit. The rest of the message does not appear.
 
-- the text of a `BREAKING CHANGE:` footer (see **Breaking change** below);
-- a paragraph that starts with a standard type after a blank line (`feat: …`, `fix(app): …`):
-  release-please reads it as one more commit, with its own changelog line and its effect on the
-  version. The commits GitHub lists in the proposed message start with `* `, so they do not count.
-
-The scope (`app`, `core`) is printed in bold before the line, and each line links to its commit.
-
-**Footers** (`BREAKING CHANGE:`, `Release-As:`) belong at the end of the squash commit's message.
-When merging, check the message GitHub proposes: put any footer on its last lines, and make sure
-no paragraph starts with a type unless you want that extra line.
+A **breaking change** carries `!` after the type or scope and, ideally, a `BREAKING CHANGE:` footer
+as the commit's last lines; the footer text is also listed under **⚠ BREAKING CHANGES** at the top
+of the entry.
 
 | Type | Section | Use it for |
 | --- | --- | --- |
@@ -169,7 +156,7 @@ no paragraph starts with a type unless you want that extra line.
 - **Reverts:** undoing a change that was already released is described by its effect (`remove:` for
   a feature taken back, `fix:` for a regression). `revert:` is hidden, for undoing unreleased work.
 - A wrong line cannot be fixed by rewriting the commit. Fix it in `CHANGELOG.md` with a `docs:`
-  commit after the release (release-please only adds new entries above the old ones and never
+  commit after the release (the changelog only ever gains entries above the old ones; it never
   rewrites them), and edit the release notes on GitHub if needed.
 
 ### What matches Keep a Changelog and what does not
@@ -178,72 +165,57 @@ Matches: one `CHANGELOG.md`, newest version first; one entry per version with it
 the sections `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`, in that order and
 only when they have lines; Semantic Versioning; no commit noise.
 
-Does not match (release-please's fixed format):
+Does not match the shape the bot used:
 
-- **No `[Unreleased]` section.** The next entry is shown in the open release pull request instead.
-  Do not add one by hand: release-please inserts each new entry above the first version heading,
-  which an `## [Unreleased]` heading would be.
+- **No `[Unreleased]` section.** An entry is written when its release is made, so there is nothing
+  to park: it goes above the first version heading.
 - **Version headings** read `## [0.2.0](compare link) (2026-01-31)` instead of
   `## [0.2.0] - 2026-01-31` with link references at the bottom; the first release has no compare
   link: `## 0.1.0 (date)`.
 - **Breaking changes** get an extra `⚠ BREAKING CHANGES` section, which Keep a Changelog does not
   have.
 - **Lines** carry the bold scope and a commit link; there is no `[YANKED]` marker.
-- **The file starts with `# Changelog`** and no introduction. An introduction can be added once,
-  between that title and the first version heading; release-please keeps everything above the
-  first version heading.
+- **The file starts with `# Changelog`** and no introduction. An introduction can sit between that
+  title and the first version heading.
 
 ## The first release
 
-- `.release-please-manifest.json` starts as `{}` (nothing released) and the config sets
-  `initial-version` to `0.1.0`. With no earlier release, release-please uses that version instead
-  of computing a bump, so the first release is 0.1.0 whatever the commit types.
-- `bootstrap-sha` is `61c92b2`, the commit just before `feat: initial release`. release-please reads
-  only the commits after it for the first entry (the commit itself is excluded), and that one
-  commit exists to give the entry its line. So the 0.1.0 entry reads "initial release" instead of
-  listing every commit since the project began; the README describes what the app does, and the
-  full history stays in `git log`. The `bootstrap-sha` commit must stay on `main` unrewritten.
-- Once a release exists, release-please counts from it and ignores `bootstrap-sha` and
-  `initial-version`; both can stay in the config.
-- The first release is otherwise a normal one: do the one-time settings below, push, wait for the
-  release pull request, get CI to run on it (see below), merge it, and watch the Release run publish
-  v0.1.0 with its files.
+Versions 0.1.0 to 0.5.0 were made by upstream's release bot, which is no longer in this repository:
+its manifest, config and workflows are gone, so the version is now chosen by hand as described
+above. The one thing it left behind that still matters is the tag history — a version number is
+never reused.
 
 ## One-time repository settings
 
-1. **Let Actions open pull requests.** Settings → Actions → General → Workflow permissions: tick
-   **Allow GitHub Actions to create and approve pull requests** and click **Save**. Without it
-   release-please cannot open the release pull request. Leave the default token permission at
-   "Read repository contents and packages permissions": each job requests the permissions it needs.
-   The same with the CLI:
+1. **Token permissions.** Settings → Actions → General → Workflow permissions: leave the default
+   token permission at "Read repository contents and packages permissions": each job requests the
+   permissions it needs. Nothing else is needed here — this fork has no bot that opens pull
+   requests. The same with the CLI:
 
    ```sh
-   gh api -X PUT repos/scarletkc/colab-playground/actions/permissions/workflow \
-     -f default_workflow_permissions=read -F can_approve_pull_request_reviews=true
+   gh api -X PUT repos/wynxing/colab-playground/actions/permissions/workflow \
+     -f default_workflow_permissions=read
    ```
 
 2. **Protect `main` with a ruleset.** Settings → Rules → Rulesets. The ruleset `main` applies to the
    default branch:
    - changes arrive by pull request (no approval needed);
-   - the Linux and Windows CI jobs must pass, on a branch that is up to date with `main`;
    - force pushes and deleting the branch are blocked;
    - repository admins can bypass all of it.
 
-   Only those two CI jobs are required. The macOS CI job often waits for a runner that is never
-   assigned, and Release and Package do not run on every pull request, so requiring any of them
-   would block every merge. The macOS job still runs when a runner is assigned. The required
-   names are the job names in [`ci.yml`](../.github/workflows/ci.yml): change one and the ruleset
-   must follow.
+   No status check is required: this fork has no CI workflows, so there is none to require. A
+   required check that never runs would block every merge, and a release commit is pushed straight
+   to `main` anyway.
 
 3. **Merge by squashing only.** Settings → General → Pull Requests: tick only **Allow squash
    merging**, with the default commit message set to "Default to pull request title and commit
    details", and tick **Automatically delete head branches**. Each pull request then lands as one
    commit titled after it, so fix-up commits (review fixes and the like) never reach the changelog;
-   this is also the merge method release-please recommends. The ruleset still lists all three merge
+   and it keeps fix-up commits out of the changelog. The ruleset still lists all three merge
    methods; the repository setting is the one that limits them. The same with the CLI:
 
    ```sh
-   gh api -X PATCH repos/scarletkc/colab-playground -F allow_squash_merge=true \
+   gh api -X PATCH repos/wynxing/colab-playground -F allow_squash_merge=true \
      -F allow_rebase_merge=false -F allow_merge_commit=false -F delete_branch_on_merge=true \
      -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
    ```
@@ -255,77 +227,54 @@ Does not match (release-please's fixed format):
 
    ```sh
    (umask 077 && openssl genpkey -algorithm ed25519 -out update-signing-key.pem)
-   gh secret set UPDATE_SIGNING_KEY --repo scarletkc/colab-playground < update-signing-key.pem
+   gh secret set UPDATE_SIGNING_KEY --repo wynxing/colab-playground < update-signing-key.pem
    openssl pkey -in update-signing-key.pem -pubout -outform DER | tail -c 32 | base64
    rm update-signing-key.pem
    ```
 
    The third command prints the public key, 44 characters ending in `=`. It is not secret: add it
-   as a line of [`crates/core/update-keys.txt`](../crates/core/update-keys.txt) through a pull
-   request, so the app trusts it. A release fails until the secret is set.
+   as a line of [`crates/core/update-keys.txt`](../crates/core/update-keys.txt), so the app trusts
+   it. A release fails until the secret is set. (This repository already has its own pair: the
+   public key is the one in that file, and the secret is set.)
 
-5. Optionally, the token described in the next section.
-
-Apart from `UPDATE_SIGNING_KEY` and that optional token, only `GITHUB_TOKEN` is used. Permissions
-per job: release-please gets `contents`, `issues` (labels) and `pull-requests` write; the build and
-checksum jobs get `contents: read`, and the checksum job reads the signing key only for a release;
-only the job that attaches files and publishes the release gets `contents: write`, and it runs only
-for a release. If immutable releases are turned on for the repository, the flow still works, because
+`UPDATE_SIGNING_KEY` and `GITHUB_TOKEN` are the only secrets used. Permissions per job: the build
+and checksum jobs get `contents: read`; only the job that attaches the files and publishes the
+release gets `contents: write`, and it runs only for a release. If immutable releases are turned on for the repository, the flow still works, because
 the files are attached while the release is a draft; only replacing the files of an already
 published release then becomes impossible.
 
-## CI on the release pull request
+## Checks before a release
 
-The release pull request is opened and updated with `GITHUB_TOKEN`, as `github-actions[bot]`. For
-the pull request events that token causes, GitHub creates the CI and Package runs but holds them
-until someone with write access approves them: they show as **Action required**. The repository's
-setting for approving workflows from outside contributors does not change this. `main` requires
-the CI jobs, so the release pull request cannot be merged until they have run on it:
-
-- **Simplest:** just before merging, open one of the waiting runs (from the pull request's checks or
-  the Actions tab) and click **Approve and run**. CI and the Package dry run (the pull request
-  changes `.release-please-manifest.json`) then run on the exact release commit. Each later update
-  of the pull request by release-please waits for approval again. Closing and reopening the pull
-  request works too: the reopen is your event, so its runs start without approval.
-- **Every time, automatically:** create a fine-grained personal access token limited to this
-  repository with **Contents**, **Pull requests** and **Issues** set to read and write, and save it
-  as the Actions secret `RELEASE_PLEASE_TOKEN`. release-please then acts as you, so every update of
-  the release pull request (each time its changelog grows) runs CI and the Package dry run without
-  approval, three release builds each time. The job's `permissions` do not limit this token. When
-  it expires the Release job fails: renew it, or delete the secret and the workflow uses
-  `GITHUB_TOKEN` again.
-- **Without the checks:** a repository admin can tick **Merge without waiting for requirements to be
-  met** on the pull request. The release commit then reaches `main` unchecked; CI still runs on
-  `main` after the merge, at the same time as the release is built.
+This fork has no CI workflows, and nothing gates a release commit automatically. Run the checks
+yourself before tagging ([TESTING.md](TESTING.md)): `cargo fmt --check`, `cargo clippy --workspace
+--all-targets --locked -- -D warnings` and `cargo test --workspace --locked`. The tag's Package run
+builds on GitHub's runners and fails the release if a download is missing, so an incomplete build
+is caught there.
 
 ## Dry-running the packaging
 
-- **On pull requests** that change `release.yml`, `package.yml`, `release-please-config.json`,
-  `.release-please-manifest.json` or anything under `assets/icon/`, Package runs as a dry run.
-- **By hand:** Actions → Package → Run workflow, choose the branch, leave **tag** empty. Do this
-  after changing `[profile.release]`, which the path filter does not cover.
+Actions → Package → **Run workflow** on `main` with **tag** `vX.Y.Z` (a version `Cargo.toml`
+already carries) and **dry run** ticked. It builds, writes and signs `SHA256SUMS`, checks the
+signature against `update-keys.txt`, and skips only the job that attaches the files and publishes.
 
-A dry run runs the same build, archive and check steps as a release; it does not sign, and the last
-job (attach and publish) is skipped. Its artifacts are the three downloads and `SHA256SUMS` exactly
-as a release would get them; download them from the run's summary page.
+Use it after any change to `package.yml`, `[profile.release]` or the release steps, and before a
+first release with a new signing key: it is the only way to run those steps without publishing. The
+artifacts of a dry run are the downloads and `SHA256SUMS`, from the run's summary page.
 
 ## When a build fails after the release exists
 
-The tag exists, `main` already has the new version and changelog entry, and the release is still a
-draft with some or none of its files, invisible to users and to the update check.
+The tag exists and the release is still a draft with some or none of its files — invisible to users
+and to the update check.
 
-- **A transient failure** (runner, network): open the failed Release run and use **Re-run failed
-  jobs**. Do not use **Re-run all jobs**: release-please would run again, find nothing to release
-  and skip the build.
+- **A transient failure** (runner, network): open the failed run and use **Re-run failed jobs**.
 - **Signing failed** (the secret is not set, or is not a key in `update-keys.txt` at the tag): set
-  the right secret ([One-time repository settings](#one-time-repository-settings)), then **Re-run
-  failed jobs**. A key missing from `update-keys.txt` is a problem in the code at the tag (below).
+  the right secret ([One-time repository settings](#one-time-repository-settings)) and re-run. A key
+  missing from `update-keys.txt` at the tag is a problem in the code there.
 - **A problem in the workflow or the packaging:** fix it on `main` (as `ci:` or `build:`, which the
-  changelog does not show), then Actions → Package → Run workflow on `main` with **tag** set to
-  `vX.Y.Z`. It builds the tagged code with the fixed workflow, replaces any files already attached
-  and publishes the draft.
-- **A problem in the code at the tag:** land the fix as `fix:` and merge the next release pull
-  request (vX.Y.Z+1). Delete the broken draft on GitHub but keep its tag: release-please finds the
-  previous release through it. That version number is then skipped.
+  changelog does not show), then Actions → Package → Run workflow on `main` with **tag** `vX.Y.Z`.
+  It builds the tagged code with the workflow from `main`, replaces any files already attached and
+  publishes the draft.
+- **A problem in the code at the tag:** land the fix as `fix:` and release the next version. Delete
+  the broken draft on GitHub but keep its tag: the version number is spent.
 
 Never move or delete a release tag.

@@ -2,4 +2,4 @@
 # (32 bytes) per line; `#` starts a comment. The app accepts a release signed by any of them,
 # and the release workflow checks each new signature against this file before publishing.
 # How to make a key, rotate one, and what losing it means: docs/RELEASING.md.
-nD3paGNgK4/JBcJJLyv8zn7HB1t1zjRkTgYz3sbTf04=
+wfyyBgrvBliCnr5Nv/TqLKQhrGHVT3spOOEoVbSLRJM=

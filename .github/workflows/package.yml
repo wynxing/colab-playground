@@ -1,10 +1,18 @@
 # Builds the downloads of a release and attaches them to its GitHub release.
 #
 # Push a vX.Y.Z tag, or run this workflow by hand with that tag: the platform
-# files, SHA256SUMS and — when the UPDATE_SIGNING_KEY secret is set — its signature
-# are attached to the release, which is created as a draft and published only once
-# every file is on it. The version in [workspace.package] must be the tag without
-# its `v`, or the build fails.
+# files, SHA256SUMS and its signature are attached to the release, which is created
+# as a draft and published only once every file is on it. The version in
+# [workspace.package] must be the tag without its `v`, or the build fails.
+#
+# Every release is signed. The signature is made with the UPDATE_SIGNING_KEY secret and
+# checked against the keys in crates/core/update-keys.txt before anything is attached,
+# so a release no installed copy could verify is never published; a missing secret
+# fails the run (docs/RELEASING.md#the-update-signature).
+#
+# A manual run with `dry run` ticked builds the ref it runs on instead of the tag, signs and
+# checks everything, and skips the last job: use it to try a packaging change, or a new
+# signing key, without publishing anything.
 #
 # Windows and Linux must both build; the macOS runner is often never assigned, so it
 # is allowed to miss and the release goes out without that download. Fixing the
@@ -23,6 +31,10 @@ on:
         description: Release tag to build and attach to (for example v0.5.0).
         type: string
         required: true
+      dry_run:
+        description: Build, sign and check the downloads, but do not touch a release.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,8 +84,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # A manual run on `main` builds the tagged code with this workflow file.
-          ref: ${{ inputs.tag || github.ref }}
+          # A manual run on `main` builds the tagged code with this workflow file; a dry
+          # run has no tag yet, so it builds the ref this run is on.
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.98"
@@ -208,6 +221,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # The tagged code, for the trusted keys the new signature is checked against. Before
+      # the downloads: checkout cleans the workspace, which would delete `dist`.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ (inputs.dry_run && github.ref) || inputs.tag || github.ref }}
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
@@ -229,17 +247,18 @@ jobs:
           done
           sha256sum colab-playground-* > SHA256SUMS
           cat SHA256SUMS
-      # Signing is optional here: without the secret the release still goes out, it
-      # just cannot be installed by the app's update check. To turn it on, make the
-      # key pair as docs/RELEASING.md describes, save the private key as the Actions
-      # secret UPDATE_SIGNING_KEY and add the printed public key to
-      # crates/core/update-keys.txt.
+      # A release is always signed: without the signature the app cannot install it, so an
+      # unsigned release would silently break updating for every installed copy. The key
+      # pair and how to rotate it: docs/RELEASING.md#the-update-signature.
       - name: Sign SHA256SUMS
-        if: env.UPDATE_SIGNING_KEY != ''
         working-directory: dist
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::the UPDATE_SIGNING_KEY secret is not set; a release must be signed"
+            exit 1
+          fi
           umask 077
           key="$RUNNER_TEMP/update-signing-key.pem"
           trap 'rm -f "$key"' EXIT
@@ -251,6 +270,36 @@ jobs:
           { printf 'colab-playground %s\n' "$TAG"; cat SHA256SUMS; } > "$signed"
           openssl pkeyutl -sign -rawin -inkey "$key" -in "$signed" -out SHA256SUMS.sig
           ls -l SHA256SUMS.sig
+      # The app accepts a signature only from a key compiled into it, so a release signed
+      # with any other key would publish and then refuse to install. The keys are the raw
+      # 32-byte ones in update-keys.txt; each is wrapped here in the DER header of an
+      # Ed25519 SubjectPublicKeyInfo, which is what openssl reads as a public key.
+      - name: Check the signature against the app's trusted keys
+        working-directory: dist
+        run: |
+          # The message is rebuilt here from the tag, exactly as the app rebuilds it for the
+          # release it downloads from (crates/core/src/updater/verify.rs::signed_message), so
+          # this checks what an installed copy will check.
+          signed="$RUNNER_TEMP/checked"
+          { printf 'colab-playground %s\n' "$TAG"; cat SHA256SUMS; } > "$signed"
+          der="$RUNNER_TEMP/trusted-key.der"
+          found=''
+          while read -r line; do
+            key="$(printf '%s' "${line%%#*}" | tr -d '[:space:]')"
+            [ -n "$key" ] || continue
+            printf 'MCowBQYDK2VwAyEA' | openssl base64 -d -A > "$der"
+            printf '%s' "$key" | openssl base64 -d -A >> "$der"
+            if openssl pkeyutl -verify -rawin -pubin -inkey "$der" \
+                 -in "$signed" -sigfile SHA256SUMS.sig > /dev/null 2>&1; then
+              found="$key"
+              break
+            fi
+          done < "$GITHUB_WORKSPACE/crates/core/update-keys.txt"
+          if [ -z "$found" ]; then
+            echo "::error::SHA256SUMS.sig matches no key in crates/core/update-keys.txt"
+            exit 1
+          fi
+          echo "Signed with one of the keys the app trusts."
       - uses: actions/upload-artifact@v7
         with:
           name: sums
@@ -258,8 +307,7 @@ jobs:
           archive: false
           if-no-files-found: error
           overwrite: true
-      - if: env.UPDATE_SIGNING_KEY != ''
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7
         with:
           name: sums
           path: dist/SHA256SUMS.sig
@@ -274,7 +322,8 @@ jobs:
   publish:
     name: Attach to the release and publish it
     needs: checksums
-    if: ${{ !cancelled() && needs.checksums.result == 'success' }}
+    # A dry run stops after the checks: nothing is attached and nothing is published.
+    if: ${{ !cancelled() && needs.checksums.result == 'success' && inputs.dry_run != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
