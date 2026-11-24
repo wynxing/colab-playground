@@ -196,6 +196,25 @@ print("__CPG_RESULT__ " + json.dumps({{"files": _files}}))
     )
 }
 
+/// The files a listing snippet reported.
+pub fn parse_vm_files(value: &serde_json::Value) -> Vec<crate::backend::VmFile> {
+    value
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|f| {
+                    Some(crate::backend::VmFile {
+                        path: f.get("path")?.as_str()?.to_owned(),
+                        size: f.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -332,5 +351,33 @@ mod tests {
         let p = parse_poll(&serde_json::json!({"status": null, "alive": false})).unwrap();
         assert!(p.status.is_none() && !p.alive);
         assert!(parse_poll(&serde_json::json!({"status": {"state": "bogus"}})).is_err());
+    }
+
+    #[test]
+    fn the_files_of_a_listing_are_read() {
+        let value = serde_json::json!({
+            "files": [
+                {"path": "/content/ComfyUI/output/a.png", "size": 1234},
+                {"path": "/content/ComfyUI/output/b.png", "size": 0},
+            ]
+        });
+        let files = parse_vm_files(&value);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, "/content/ComfyUI/output/a.png");
+        assert_eq!(files[0].size, 1234);
+        assert_eq!(files[1].size, 0);
+    }
+
+    #[test]
+    fn a_listing_without_files_is_empty() {
+        assert!(parse_vm_files(&serde_json::json!({})).is_empty());
+        assert!(parse_vm_files(&serde_json::json!({"files": "no"})).is_empty());
+    }
+
+    #[test]
+    fn the_listing_snippet_asks_for_the_files_of_a_path() {
+        let snippet = vm_ls_snippet("/content/ComfyUI/output");
+        assert!(snippet.contains("/content/ComfyUI/output"));
+        assert!(snippet.contains("os.walk"));
     }
 }

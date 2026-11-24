@@ -1684,20 +1684,7 @@ impl Backend for RealBackend {
             120,
             cancel,
         )?;
-        let files = value
-            .get("files")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        Ok(files
-            .iter()
-            .filter_map(|f| {
-                Some(VmFile {
-                    path: f.get("path")?.as_str()?.to_owned(),
-                    size: f.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
-                })
-            })
-            .collect())
+        Ok(crate::vm::parse_vm_files(&value))
     }
 
     fn vm_download(

@@ -599,6 +599,50 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_downloaded_from_the_runtime() {
+        let state = HostPath::new("/d/accounts/a1/sessions.json");
+        let argv = build_argv(
+            Some(&state),
+            &CliCommand::Download {
+                name: "comfyui-1a2b".into(),
+                remote: "/content/ComfyUI/output/apple.png".into(),
+                local: "/home/u/Downloads/apple.png".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            argv,
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "download",
+                "-s",
+                "comfyui-1a2b",
+                "/content/ComfyUI/output/apple.png",
+                "/home/u/Downloads/apple.png",
+            ]
+        );
+        let bad = build_argv(
+            None,
+            &CliCommand::Download {
+                name: "comfyui-1a2b".into(),
+                remote: String::new(),
+                local: "/tmp/x".into(),
+            },
+        );
+        assert!(bad.is_err(), "a path may not be empty");
+        let bad = build_argv(
+            None,
+            &CliCommand::Download {
+                name: "../evil".into(),
+                remote: "/content/x".into(),
+                local: "/tmp/x".into(),
+            },
+        );
+        assert!(bad.is_err(), "the session name is checked");
+    }
+
+    #[test]
     fn argv_puts_config_first_and_validates() {
         let state = HostPath::new("/d/accounts/a1/sessions.json");
         let argv = build_argv(
