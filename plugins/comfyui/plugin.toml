@@ -193,7 +193,7 @@ id = "ui"
 port_input = "port"
 path = "/"
 health = "/"
-kind = "http"
+kind = "comfyui"
 [endpoints.label]
 en = "ComfyUI web editor"
 zh-CN = "ComfyUI 网页编辑器"

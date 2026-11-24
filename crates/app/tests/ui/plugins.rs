@@ -104,6 +104,28 @@ fn quick_deploy_runs_to_a_ready_endpoint(cx: &mut TestAppContext) {
     );
 }
 
+/// A ComfyUI endpoint says how to point an agent at it.
+#[gpui::test]
+fn a_comfyui_endpoint_shows_how_to_point_an_agent_at_it(cx: &mut TestAppContext) {
+    let mut app = TestApp::with(cx, Options::scenario(MockScenario::single()));
+    app.click(Route::Plugins.nav_selector());
+    assert!(
+        app.shown(&plugin_selector("comfyui")),
+        "the ComfyUI plugin is listed"
+    );
+    app.click("plugin-run comfyui");
+    assert_eq!(app.read(|state, _| state.plugin_view()), PluginView::Form);
+    app.click(RUN_START);
+    let Some(RunPhase::Ready(outcome)) = run_phase(&mut app) else {
+        panic!("expected a ready run, got {:?}", run_phase(&mut app));
+    };
+    let endpoint = &outcome.endpoints[0];
+    assert!(
+        app.shown(&format!("endpoint-mcp {}", endpoint.id)),
+        "the endpoint says how to drive it with an agent"
+    );
+}
+
 /// The run's log as the app keeps it: how many lines, the oldest and the newest.
 fn log_ends(app: &mut TestApp<'_>) -> (usize, String, String) {
     app.read(|state, _| {

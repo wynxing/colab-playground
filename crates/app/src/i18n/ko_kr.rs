@@ -960,6 +960,11 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_CURL_KEY,
         "API 키를 설정했다면 먼저 API_KEY에 넣으십시오.",
     ),
+    (ENDPOINT_MCP, "에이전트로 구동하기"),
+    (
+        ENDPOINT_MCP_NOTE,
+        "내 컴퓨터에 comfy-mcp를 설치하고 이 주소를 COMFYUI_URL로 전달하면, 에이전트가 이 포워딩을 통해 ComfyUI를 구동합니다.",
+    ),
     (HF_SEARCH, "Hugging Face 검색"),
     (HF_SEARCH_PLACEHOLDER, "모델 이름(예: qwen3)"),
     (HF_SEARCH_ACTION, "검색"),

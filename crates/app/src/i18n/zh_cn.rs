@@ -798,6 +798,11 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_CURL_KEY,
         "如果设置了 API 密钥，请先把它填入 API_KEY。",
     ),
+    (ENDPOINT_MCP, "用 agent 驱动它"),
+    (
+        ENDPOINT_MCP_NOTE,
+        "在你自己的电脑上装上 comfy-mcp，把这个地址作为 COMFYUI_URL 交给它，你的 agent 就能通过这个转发驱动 ComfyUI。",
+    ),
     (HF_SEARCH, "搜索 Hugging Face"),
     (HF_SEARCH_PLACEHOLDER, "模型名称，例如 qwen3"),
     (HF_SEARCH_ACTION, "搜索"),

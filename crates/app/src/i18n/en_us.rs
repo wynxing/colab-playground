@@ -954,6 +954,11 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_CURL_KEY,
         "If you set an API key, put it in API_KEY first.",
     ),
+    (ENDPOINT_MCP, "Drive it with an agent"),
+    (
+        ENDPOINT_MCP_NOTE,
+        "Install comfy-mcp on your computer and give it this address as COMFYUI_URL: your agent then drives ComfyUI through the forward.",
+    ),
     (HF_SEARCH, "Search Hugging Face"),
     (HF_SEARCH_PLACEHOLDER, "Model name, e.g. qwen3"),
     (HF_SEARCH_ACTION, "Search"),

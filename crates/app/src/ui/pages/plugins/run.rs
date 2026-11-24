@@ -476,6 +476,36 @@ fn endpoint_card(
                 .children(has_key.then(|| Caption::new(tr(cx, keys::ENDPOINT_CURL_KEY)))),
         );
     }
+    if endpoint.kind == "comfyui" {
+        // The Comfy MCP server runs on the user's computer and drives the
+        // ComfyUI behind this forward; the address is what it needs.
+        let env = format!("COMFYUI_URL={base}");
+        card = card.child(tagged(
+            format!("endpoint-mcp {}", endpoint.id),
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(Caption::new(tr(cx, keys::ENDPOINT_MCP)))
+                        .child(CopyButton::new(
+                            SharedString::from(format!("endpoint-mcp-copy-{}", endpoint.id)),
+                            env.clone(),
+                        )),
+                )
+                .child(
+                    Well::new()
+                        .font_family(theme.mono_family.clone())
+                        .text_size(theme.text_size(TextSize::Xs))
+                        .child(env),
+                )
+                .child(Caption::new(tr(cx, keys::ENDPOINT_MCP_NOTE))),
+        ));
+    }
     tagged(format!("{ENDPOINT_SELECTOR} {}", endpoint.id), card)
         .w_full()
         .into_any_element()

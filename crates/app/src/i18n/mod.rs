@@ -361,6 +361,8 @@ catalog_keys! {
     ENDED_VANISHED => "app.b2.ended_vanished",
     ENDPOINT_CURL => "app.b2.endpoint_curl",
     ENDPOINT_CURL_KEY => "app.b2.endpoint_curl_key",
+    ENDPOINT_MCP => "app.b2.endpoint_mcp",
+    ENDPOINT_MCP_NOTE => "app.b2.endpoint_mcp_note",
     ENDPOINT_FORWARD => "app.b2.endpoint_forward",
     ENDPOINT_HEALTHY => "app.b2.endpoint_healthy",
     ENDPOINT_NOT_FORWARDED => "app.b2.endpoint_not_forwarded",
