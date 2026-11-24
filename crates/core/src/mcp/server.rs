@@ -24,10 +24,10 @@ use std::{
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
@@ -67,7 +67,6 @@ struct Ctx {
     token: String,
     source: Arc<dyn Source>,
     sessions: Mutex<HashSet<String>>,
-    seq: AtomicU64,
     /// The endpoint's own origin, for the check described above.
     origins: Vec<String>,
 }
@@ -80,19 +79,10 @@ impl Ctx {
             .unwrap_or(false)
     }
 
-    /// Hands out an id. It is an opaque marker, not a credential: the token is the credential, and
-    /// this only has to be unlikely to collide with another run.
+    /// Hands out an id. It is an opaque marker, not a credential — the token is the credential —
+    /// so the workspace's own unique string is enough, and nothing here claims to be a secret.
     fn new_session(&self) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::process::id().hash(&mut hasher);
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or(0)
-            .hash(&mut hasher);
-        self.seq.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
-        let id = format!("{:016x}", hasher.finish());
+        let id = crate::accounts::nonce();
         if let Ok(mut set) = self.sessions.lock() {
             set.insert(id.clone());
         }
@@ -132,7 +122,6 @@ impl Endpoint {
             token: config.token,
             source,
             sessions: Mutex::new(HashSet::new()),
-            seq: AtomicU64::new(0),
             origins: vec![
                 format!("http://127.0.0.1:{}", addr.port()),
                 format!("http://localhost:{}", addr.port()),
@@ -385,14 +374,11 @@ pub fn tool_failure(error: &Error) -> Value {
     })
 }
 
-/// How an error is written for a client: the kind and what was wrong, and the next step when the
-/// app has one. Never localised prose — that belongs to the window, not to a protocol.
+/// How an error is written for a client: the app's own machine-readable error — its kind, its
+/// named values, what was wrong and the next step it suggests — because that is what a caller can
+/// act on. Never localised prose: that belongs to the window, not to a protocol.
 pub fn machine_error(error: &Error) -> String {
-    let mut text = format!("{:?}: {}", error.kind, error.detail);
-    for (key, value) in &error.params {
-        text.push_str(&format!(" ({key}={value})"));
-    }
-    text
+    serde_json::to_string(error).unwrap_or_else(|_| format!("{:?}: {}", error.kind, error.detail))
 }
 
 /// Compares two tokens without stopping at the first difference, so the time taken says nothing
@@ -439,7 +425,6 @@ mod tests {
             token: TOKEN.to_owned(),
             source: Arc::new(Empty),
             sessions: Mutex::new(HashSet::new()),
-            seq: AtomicU64::new(0),
             origins: vec!["http://127.0.0.1:8765".to_owned()],
         }
     }
@@ -597,13 +582,10 @@ mod tests {
         );
         let body = body_of(&response);
         assert_eq!(body["result"]["isError"], true, "{body}");
-        assert!(
-            body["result"]["content"][0]["text"]
-                .as_str()
-                .expect("text")
-                .contains("InvalidInput"),
-            "{body}"
-        );
+        let text = body["result"]["content"][0]["text"].as_str().expect("text");
+        let error: Value = serde_json::from_str(text).expect("the error is JSON");
+        assert_eq!(error["kind"], "invalid_input", "{body}");
+        assert_eq!(error["params"]["field"], "all", "{body}");
     }
 
     #[test]
@@ -650,11 +632,23 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_error_names_the_kind_and_what_was_wrong() {
-        let error = Error::invalid("plugin", "no run of comfyui");
+    fn a_machine_error_is_the_apps_own_error_as_json() {
+        let error =
+            Error::invalid("plugin", "no run of comfyui").next(crate::error::NextStep::Refresh);
         let text = machine_error(&error);
-        assert!(text.contains("InvalidInput"), "{text}");
-        assert!(text.contains("no run of comfyui"), "{text}");
-        assert!(text.contains("field=plugin"), "{text}");
+        let value: Value = serde_json::from_str(&text).expect("the error is JSON");
+        assert_eq!(value["kind"], "invalid_input");
+        assert_eq!(value["params"]["field"], "plugin");
+        assert!(
+            value["detail"]
+                .as_str()
+                .expect("a detail")
+                .contains("comfyui"),
+            "{text}"
+        );
+        assert_eq!(
+            value["next_step"], "refresh",
+            "a caller is told what would help next"
+        );
     }
 }

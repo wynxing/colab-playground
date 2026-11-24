@@ -15,10 +15,14 @@
 - **Toolchain.** The workspace wants `rust-version = 1.98`; this machine's `stable` is 1.97, so every command below runs as `rustup run 1.99.0 cargo …`.
 - **No new dependencies.** The endpoint uses `std::net`, `std::io`, `std::sync`, `std::thread` and the `serde`/`serde_json` already in the workspace. `crates/core/Cargo.toml` is not touched.
 - **Errors are core's own.** `crate::error::{Error, ErrorKind, Result}`; `core` produces machine-readable errors and no user-facing prose. A new `ErrorKind` only when no existing one fits.
-- **Every string the window shows** comes from a `keys::` constant through `tr`/`tr_args` and exists in all five catalogs (`i18n/{en_us,ja_jp,ko_kr,zh_cn,zh_tw}.rs`); `crates/app/src/i18n/mod.rs`'s test fails when a key resolves nowhere.
-- **Every new interface element** carries a `tagged(SELECTOR, …)` selector whose constant is defined next to the page, and a test in `crates/app/tests/ui/` registered as a `mod …;` in `crates/app/tests/ui/main.rs`.
+- **Every string the window shows** comes from a `keys::` constant through `tr`/`tr_args`: one line in the `catalog_keys!` block of `crates/app/src/i18n/mod.rs` and one `(KEY, "text")` row in each of the five catalogs. Three tests enforce it — `every_catalog_holds_exactly_the_declared_keys_once`, `every_key_resolves_in_every_language_with_the_same_arguments`, and `app_code_names_keys_only_through_the_constants` (no `"app.` literal outside `i18n/`).
+- **Every new interface element** carries a `tagged(SELECTOR, …)` selector whose constant is defined next to the page, and a test in `crates/app/tests/ui/` registered as a `mod …;` in `crates/app/tests/ui/main.rs`. No bare number: `crates/app/tests/lint.rs`'s `ui_code_names_its_numbers` refuses any literal except 0 and 1, so a size is a `const` or comes from the theme.
+- **No module names an operating system.** `lint.rs`'s `only_the_platform_modules_name_a_target_os` allows `windows`/`unix`/`target_os` only in `platform.rs`, `host.rs` and `paths.rs`; what differs per OS is handled at run time (which is how the accepted-socket fix in task 5 works), never with `cfg`.
 - **Before each commit:** `rustup run 1.99.0 cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`.
-- **Commits:** conventional-commit subjects, one commit per task, no agent-attribution trailer. The changelog is written by hand at release time.
+- **Commits:** conventional-commit subjects, one commit per task, and no attribution trailer that credits an agent — the repository forbids that in `AGENTS.md`. The changelog is written by hand at release time.
+- **Landing:** nothing is pushed to `main` directly (a hard safety rule in `DESIGN.md`). The branch goes up, and the slice lands as one squash-merged pull request whose title becomes the changelog line.
+- **A check is made once:** every failure path this slice can reach is a test, never a screenshot or something a person has to remember (`TESTING.md`).
+- **Comments say why, not what**, and a doc section is named by its heading, never by a number (`DEVELOPMENT.md`).
 - **Nothing in this slice may start, extend, stop or bill anything.** Starting a session, running a plugin and opening a forward are slice 2, and each of those asks in the app's own dialog first.
 
 ---
@@ -94,7 +98,7 @@
 
 **Interfaces:**
 - Consumes: `protocol`, `http`, `tools`, `view::Source`.
-- Produces: `Config { token, port }`, `Endpoint::start(Config, Arc<dyn Source>) -> Result<Endpoint>`, `Endpoint::addr`, `Endpoint::stop`, `PATH`, `SESSION_HEADER`, `SERVER_NAME`, `tool_result`, `tool_failure`, `machine_error`.
+- Produces: `Config { token, port }`, `Endpoint::start(Config, Arc<dyn Source>) -> Result<Endpoint>`, `Endpoint::addr`, `Endpoint::stop`, `PATH`, `SESSION_HEADER`, `SERVER_NAME`, `tool_result`, `tool_failure`, `machine_error` (the app's own `Error`, serialized: `kind`, `params`, `detail`, `next_step`).
 
 - [x] **Step 1: Failing test (in-file) — without a token, or with the wrong one, nothing is served; a foreign `Origin` is refused and the endpoint's own origin is allowed.**
 - [x] **Step 2: Failing test (in-file) — another path is 404, `GET` and `PATCH` are 405, `initialize` answers and hands out a 16-character session id, a session the endpoint never issued is 404, a notification is 202 with an empty body.**
@@ -104,6 +108,7 @@
 - [x] **Step 6: Implement what the socket test found.** Windows hands an accepted socket the listener's non-blocking mode, so `serve` sets it back to blocking before reading; without that, every served request failed its first read with `WSAEWOULDBLOCK`.
 - [x] **Step 7: Run** `--test mcp_endpoint` — 5 tests pass; `--lib mcp` — 40 tests pass.
 - [x] **Step 8: Commit** with task 1's commit.
+- [x] **Step 9: After a pass over the repository's own conventions** (`accounts.rs`, `error.rs`, `lint.rs`): the session id comes from `accounts::nonce()` instead of a duplicated hash, and `machine_error` serializes the app's own `Error` instead of formatting a string, so a caller reads `kind`, `params`, `detail` and `next_step`. The tests above cover both, and `cargo test -p colab-playground --test lint` passes with the new module in place.
 
 ### Task 6: The token, and where the app keeps its endpoint's address
 
@@ -118,8 +123,8 @@
 **The decision this task needs first, and why:** `backend.rs` says app secrets are "never returned to the UI", and no method reads one back — the app passes the *name* of a secret into a plugin run and `core` resolves it. The endpoint's token is different in kind: a person has to read it and type it into an agent. The plan therefore adds exactly these two methods, documented as the one exception; nothing else on the trait gains a read.
 
 - [ ] **Step 1: Failing test** in `crates/core/src/mock.rs`'s tests: `mcp_token` answers the same value twice, `rotate_mcp_token` answers a different one, and neither is empty or shorter than 32 characters.
-- [ ] **Step 2: Implement on the mock** (a `BTreeMap` entry beside the other secrets; the value is a counter plus the name — the test asserts only that it is stable and that rotating changes it).
-- [ ] **Step 3: Implement on the real backend** with the helper's own secret calls, creating the value from the clock plus a hash when it is absent — no new dependency.
+- [ ] **Step 2: Implement on the mock** (a `BTreeMap` entry beside the other secrets, the way `set_secret`/`has_secret` already keep theirs; the value comes from `crate::accounts::nonce()`, the workspace's own unique string, documented there as not cryptographic — the test asserts only that it is stable and that rotating changes it).
+- [ ] **Step 3: Implement on the real backend** with the helper's own secret calls, creating the value from two `nonce()` calls (32 hex characters) when it is absent — no new dependency. The name `mcp_token` satisfies `accounts::validate_secret_name` (lowercase letters, digits and `_`, under 32 characters).
 - [ ] **Step 4: Failing test** in `crates/app/src/settings.rs`'s tests: settings that do not mention the two fields load with `mcp_enabled == false` and `mcp_port == 8765`, and a saved file round-trips them.
 - [ ] **Step 5: Implement the two fields** with `#[serde(default, deserialize_with = "lenient")]`, next to the fields they resemble.
 - [ ] **Step 6: Run** `rustup run 1.99.0 cargo test -p colab-playground-core --locked` and `-p colab-playground` — all pass.
@@ -154,7 +159,7 @@
 
 - [ ] **Step 1: Failing test** in `crates/app/tests/ui/agents.rs` (task 9 registers it): the section is drawn, the address is the one the state reports, the token is not in the window until reveal is pressed, and the copy button puts the client configuration on the clipboard.
 - [ ] **Step 2: Add the keys** — `SETTINGS_AGENTS_TITLE`, `_DESCRIPTION`, `_TOGGLE_TITLE`, `_TOGGLE_DESCRIPTION`, `_ADDRESS_TITLE`, `_TOKEN_TITLE`, `_TOKEN_DESCRIPTION`, `_TOKEN_REVEAL`, `_TOKEN_ROTATE`, `_CONFIG_TITLE`, `_CONFIG_COPY`, `_OFF`, `_PORT_TAKEN` — as constants in `i18n/mod.rs`, each with a line in all five catalogs.
-- [ ] **Step 3: Build the section** the way the page builds its others: `SettingsSection::new(tr(cx, keys::SETTINGS_AGENTS_TITLE)).description(…).row(SettingsRow::new(…).control(tagged(AGENTS_TOGGLE, …)))`.
+- [ ] **Step 3: Build the section** the way the page builds its others — `SettingsSection::new(tr(cx, keys::SETTINGS_AGENTS_TITLE)).description(…).row(SettingsRow::new(…).control(tagged(AGENTS_TOGGLE, …)))` — with the switch following the update row's shape (`Switch::new(AGENTS_TOGGLE, …).on_change(move |on, _, cx| …)`, into a setter that saves and notifies). Unlike `OnByDefault`, which is for a switch that starts on, the endpoint's switch is a plain `bool`: a fresh install is off.
 - [ ] **Step 4: The token row** — hidden until reveal, showing the value the backend just answered and holding it in the state; a rotate button that goes through the secret operation the plugins page already uses; and one plain sentence that this endpoint is local and says what an agent can read through it.
 - [ ] **Step 5: The copy button** writes the configuration an agent needs:
 
@@ -201,3 +206,4 @@
 - **Spec coverage.** The transport, the token, the `Origin` rule, the switch, the nine read tools and the refusal rules are tasks 1–5, and are landed and tested over a real socket. The app's half — the token and the settings, the executor and the endpoint's life, the section, its tests — is tasks 6–9. The run view's card and the roadmap are task 10. Slice 2's tools and its confirmation dialog are deliberately absent, as the spec says.
 - **Two things the spec assumed and the code did not have.** (1) The app cannot read a secret back, so the token needs the two methods in task 6 and the invariant's wording changes with them — the one decision worth the owner's nod before it is written. (2) A `GET` on `/mcp` answers 405 rather than opening an empty event stream: nothing is sent on its own yet, and a client that does not open that stream loses nothing.
 - **Placeholders:** none; every task names its files, its test and the command that proves it.
+- **What the convention pass changed in already-written code:** two things, both landed — the session id uses `accounts::nonce()` rather than a duplicated hash, and a tool's error is the app's own `Error` serialized rather than a hand-made string. The constraints above now carry the rules that pass turned up (`lint.rs`'s two checks, the three i18n tests, the no-direct-push rule, "a check is made once").
