@@ -2030,6 +2030,23 @@ impl Backend for MockBackend {
         Ok(())
     }
 
+    fn mcp_token(&self, _: &CancelToken) -> Result<String> {
+        let name = crate::mcp::TOKEN_SECRET;
+        crate::accounts::validate_secret_name(name)?;
+        let existing = self.w().secrets.get(name).cloned();
+        if let Some(token) = existing {
+            return Ok(token);
+        }
+        let token = crate::mcp::new_token();
+        self.w().secrets.insert(name.to_owned(), token.clone());
+        Ok(token)
+    }
+
+    fn rotate_mcp_token(&self, cancel: &CancelToken) -> Result<String> {
+        self.delete_secret(crate::mcp::TOKEN_SECRET, cancel)?;
+        self.mcp_token(cancel)
+    }
+
     fn hf_search(&self, query: &str, limit: u32, cancel: &CancelToken) -> Result<Vec<HfModel>> {
         self.step(cancel)?;
         let q = query.trim().to_ascii_lowercase();
@@ -2194,6 +2211,30 @@ mod tests {
 
     fn nc() -> CancelToken {
         CancelToken::new()
+    }
+
+    #[test]
+    fn the_endpoint_token_is_made_once_and_can_be_rotated() {
+        let (m, _) = mock(MockScenario::demo());
+        let first = m.mcp_token(&nc()).expect("a token");
+        assert!(first.len() >= 32, "{first}: 128 bits of hex");
+        assert_eq!(
+            m.mcp_token(&nc()).expect("the same token"),
+            first,
+            "made once, so an agent keeps working across restarts"
+        );
+        assert!(
+            m.has_secret(crate::mcp::TOKEN_SECRET, &nc())
+                .expect("stored"),
+            "it is kept in the app's own secret store"
+        );
+        let second = m.rotate_mcp_token(&nc()).expect("a new token");
+        assert_ne!(second, first, "rotating replaces it");
+        assert_eq!(
+            m.mcp_token(&nc()).expect("the new token"),
+            second,
+            "and the new one is what is stored"
+        );
     }
 
     #[test]

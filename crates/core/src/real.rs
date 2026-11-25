@@ -2025,6 +2025,24 @@ impl Backend for RealBackend {
         self.inner.helper()?.secret_delete(name, cancel)
     }
 
+    fn mcp_token(&self, cancel: &CancelToken) -> Result<String> {
+        let helper = self.inner.helper()?;
+        if let Some(token) = helper.secret_get(crate::mcp::TOKEN_SECRET, cancel)? {
+            return Ok(token);
+        }
+        let token = crate::mcp::new_token();
+        helper.secret_set(crate::mcp::TOKEN_SECRET, &token, cancel)?;
+        Ok(token)
+    }
+
+    fn rotate_mcp_token(&self, cancel: &CancelToken) -> Result<String> {
+        let helper = self.inner.helper()?;
+        helper.secret_delete(crate::mcp::TOKEN_SECRET, cancel)?;
+        let token = crate::mcp::new_token();
+        helper.secret_set(crate::mcp::TOKEN_SECRET, &token, cancel)?;
+        Ok(token)
+    }
+
     fn hf_search(&self, query: &str, limit: u32, cancel: &CancelToken) -> Result<Vec<HfModel>> {
         HfClient::new(self.inner.cfg.http.clone(), self.hf_token(cancel)).search(query, limit)
     }

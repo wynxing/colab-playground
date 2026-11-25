@@ -24,3 +24,15 @@ pub use server::{Config, Endpoint, PATH, SESSION_HEADER};
 
 /// What the endpoint calls itself in `initialize`.
 pub const SERVER_NAME: &str = "colab-playground";
+
+/// The secret the endpoint's token is kept under, in the app's own secret store.
+pub const TOKEN_SECRET: &str = "mcp_token";
+
+/// A fresh token: 128 bits of the workspace's unique string.
+///
+/// It is not cryptographic randomness, and the workspace says so about its own helper — a token
+/// guards a loopback endpoint against a page in the user's browser and against a stray process,
+/// which is what the design claims for it and no more.
+pub fn new_token() -> String {
+    format!("{}{}", crate::accounts::nonce(), crate::accounts::nonce())
+}
