@@ -968,6 +968,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "내 컴퓨터에 comfy-mcp를 설치하고 이 주소를 COMFYUI_URL로 전달하면, 에이전트가 이 포워딩을 통해 ComfyUI를 구동합니다.",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "이 앱 자체도 에이전트가 구동할 수 있습니다. 「설정 → 에이전트」에서 스위치를 켜면 여기서 세션을 시작하고 지켜볼 수 있습니다.",
+    ),
     (HF_SEARCH, "Hugging Face 검색"),
     (HF_SEARCH_PLACEHOLDER, "모델 이름(예: qwen3)"),
     (HF_SEARCH_ACTION, "검색"),

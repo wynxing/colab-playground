@@ -1043,6 +1043,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "自分のパソコンに comfy-mcp を入れ、このアドレスを COMFYUI_URL として渡せば、エージェントがこの転送経由で ComfyUI を操作できます。",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "このアプリ自体もエージェントから操作できます。「設定 → エージェント」でスイッチを入れれば、ここからセッションを開始して見守れます。",
+    ),
     (HF_SEARCH, "Hugging Face を検索"),
     (HF_SEARCH_PLACEHOLDER, "モデル名（例：qwen3）"),
     (HF_SEARCH_ACTION, "検索"),

@@ -12,10 +12,11 @@
 
 ## Status
 
-Tasks 1–9 are landed on `feat/agent-mcp-endpoint`: the endpoint, the token and the settings, the
-executor and the endpoint's life, the Settings section and the interface tests. Of task 10, the
-roadmap entry and USAGE's "Point an agent at the app" are written; the run view's card line is not,
-so where a checkbox below disagrees, the code is what happened.
+Tasks 1–10 are landed on `feat/agent-mcp-endpoint`: the endpoint, the token and the settings, the
+executor and the endpoint's life, the Settings section and the interface tests, and the run view's
+card line with the two lines of documentation. The one item that was left when this slice first
+landed — the run view's card line — is done. Where a checkbox below disagrees, the code is what
+happened.
 
 ## Global Constraints
 

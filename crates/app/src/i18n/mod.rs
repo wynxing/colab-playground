@@ -363,6 +363,7 @@ catalog_keys! {
     ENDPOINT_CURL_KEY => "app.b2.endpoint_curl_key",
     ENDPOINT_MCP => "app.b2.endpoint_mcp",
     ENDPOINT_MCP_NOTE => "app.b2.endpoint_mcp_note",
+    ENDPOINT_MCP_APP => "app.b2.endpoint_mcp_app",
     ENDPOINT_FORWARD => "app.b2.endpoint_forward",
     ENDPOINT_HEALTHY => "app.b2.endpoint_healthy",
     ENDPOINT_NOT_FORWARDED => "app.b2.endpoint_not_forwarded",

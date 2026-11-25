@@ -962,6 +962,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "Install comfy-mcp on your computer and give it this address as COMFYUI_URL: your agent then drives ComfyUI through the forward.",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "This app answers an agent too: switch on Settings → Agents, and an agent can start and watch sessions from here.",
+    ),
     (HF_SEARCH, "Search Hugging Face"),
     (HF_SEARCH_PLACEHOLDER, "Model name, e.g. qwen3"),
     (HF_SEARCH_ACTION, "Search"),

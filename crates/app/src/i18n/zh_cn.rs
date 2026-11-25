@@ -806,6 +806,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "在你自己的电脑上装上 comfy-mcp，把这个地址作为 COMFYUI_URL 交给它，你的 agent 就能通过这个转发驱动 ComfyUI。",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "这个 app 本身也能被 agent 驱动：在「设置 → 智能体」里打开开关，agent 就能从这里开会话、看运行。",
+    ),
     (HF_SEARCH, "搜索 Hugging Face"),
     (HF_SEARCH_PLACEHOLDER, "模型名称，例如 qwen3"),
     (HF_SEARCH_ACTION, "搜索"),

@@ -43,6 +43,8 @@ pub const RUN_STOP: &str = "run-stop";
 pub const RUN_SESSION_UNKNOWN_SELECTOR: &str = "run-session-unknown";
 /// Selector around an endpoint card: `endpoint <id>`.
 pub const ENDPOINT_SELECTOR: &str = "endpoint";
+/// The line that says this app answers an agent too, drawn only while the endpoint is on.
+pub const ENDPOINT_MCP_APP_SELECTOR: &str = "endpoint-mcp-app";
 
 pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Page {
     let Some(run) = state.plugin_run() else {
@@ -771,7 +773,14 @@ fn endpoint_card(
                         .text_size(theme.text_size(TextSize::Xs))
                         .child(env),
                 )
-                .child(Caption::new(tr(cx, keys::ENDPOINT_MCP_NOTE))),
+                .child(Caption::new(tr(cx, keys::ENDPOINT_MCP_NOTE)))
+                // The other way to drive a session: this app's own endpoint, when it is on.
+                .children(state.agents_enabled().then(|| {
+                    tagged(
+                        ENDPOINT_MCP_APP_SELECTOR,
+                        Caption::new(tr(cx, keys::ENDPOINT_MCP_APP)),
+                    )
+                })),
         ));
     }
     tagged(format!("{ENDPOINT_SELECTOR} {}", endpoint.id), card)
