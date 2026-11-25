@@ -45,6 +45,9 @@ pub enum Action {
     },
     /// Copy what a run produced down to this computer.
     RunDownload { plugin: String },
+    /// Waits for a run to change and answers with what it is now. The shape a long job is followed
+    /// with: a call that answers on a change is never left past a client's own timeout.
+    RunWatch { plugin: String },
     /// Change the app's settings. Only the app knows which names it has and which values are
     /// legal, so that check happens there.
     SettingsSet { changes: Map<String, Value> },
@@ -74,6 +77,7 @@ impl Action {
             Action::SessionExtend { .. } => "session_extend",
             Action::PluginRun { .. } => "plugin_run",
             Action::RunDownload { .. } => "run_download",
+            Action::RunWatch { .. } => "run_watch",
             Action::SettingsSet { .. } => "settings_set",
             Action::AccountsSwitch { .. } => "accounts_switch",
             Action::PluginEnable { .. } => "plugin_enable",
@@ -111,7 +115,9 @@ impl Action {
                 Some(session) => format!("{plugin} on {session}"),
                 None => plugin.clone(),
             },
-            Action::RunDownload { plugin } | Action::PluginEnable { plugin, .. } => plugin.clone(),
+            Action::RunDownload { plugin }
+            | Action::RunWatch { plugin }
+            | Action::PluginEnable { plugin, .. } => plugin.clone(),
             Action::SettingsSet { changes } => {
                 let names: Vec<&str> = changes.keys().map(String::as_str).collect();
                 names.join(", ")

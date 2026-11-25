@@ -276,6 +276,17 @@ pub(crate) fn run_of(run: &super::runs::PluginRun) -> Run {
     }
 }
 
+/// An agent's `run_watch`: the run as it stands now, and what ended the wait — a new stage, ready,
+/// failed, finished, or `none` when the wait's own deadline passed with nothing to report. The run
+/// is the same view `run_status` answers with, so there is one shape to learn.
+pub(crate) fn watch_answer(state: &AppState, plugin: &str, changed: &str) -> Result<Value> {
+    let run = state
+        .plugin_run()
+        .filter(|run| run.plugin == plugin)
+        .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
+    Ok(json!({ "run": run_of(run), "changed": changed }))
+}
+
 /// The last few lines of a run's log, oldest first. Secrets are already redacted where the lines
 /// were read.
 fn tail_of(run: &super::runs::PluginRun) -> String {
@@ -472,6 +483,8 @@ pub(crate) fn settings_of(state: &AppState) -> AppSettings {
 /// out rather than guessed.
 pub(crate) fn answer_for_action(action: &Action, state: &AppState) -> Result<Value> {
     Ok(match action {
+        // Answered by the window's own events: a watch is still waiting when this would be built.
+        Action::RunWatch { .. } => unreachable!("a watch is answered by the window's events"),
         Action::SessionStart { .. } => session_started(state),
         Action::SessionStop { session } => json!({ "session": session, "stopped": true }),
         Action::SessionExtend { session, minutes } => json!({

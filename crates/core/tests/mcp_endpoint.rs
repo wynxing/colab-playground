@@ -199,7 +199,7 @@ fn a_client_can_name_itself_list_the_tools_and_call_one() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name").to_owned())
         .collect();
-    assert_eq!(names.len(), 20, "{names:?}");
+    assert_eq!(names.len(), 21, "{names:?}");
     assert!(names.contains(&"sessions_list".to_owned()), "{names:?}");
     assert!(names.contains(&"session_start".to_owned()), "{names:?}");
 

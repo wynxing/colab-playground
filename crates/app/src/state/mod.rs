@@ -153,7 +153,12 @@ pub struct AppState {
     /// nothing.
     agent_approvals: u64,
     agent_deadline: Option<Task<()>>,
-    /// The foreground task that takes an agent's calls off the endpoint's queue. Dropped with the
+    /// An agent's `run_watch`: waiting for a run to change, with the number of the wait it belongs
+    /// to. One at a time, like the approval.
+    agent_watch: Option<agents::Watch>,
+    watch_asks: u64,
+    watch_timer: Option<Task<()>>,
+    /// The foreground task that takes an agent's calls off the endpoint's queue.
     /// endpoint, which is what answers a call still waiting then as dismissed.
     agent_drain: Option<Task<()>>,
     /// A call that is between two `Op`s: a plugin's template before its run, a plugin's check
@@ -307,6 +312,9 @@ impl AppState {
                 agent_approval: None,
                 agent_approvals: 0,
                 agent_deadline: None,
+                agent_watch: None,
+                watch_asks: 0,
+                watch_timer: None,
                 agent_drain: None,
                 agent_chain: None,
                 probe: Load::Idle,

@@ -53,6 +53,10 @@ const CALL_WAIT: Duration = Duration::from_secs(3_600);
 /// How long a paid call waits for the user's word before it lapses, as the specification says.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(120);
 
+/// How long a `run_watch` waits before answering that nothing has happened yet. Short enough that
+/// the answer always lands inside a client's own timeout, which is the whole point of the tool.
+const WATCH_WAIT: Duration = Duration::from_secs(120);
+
 /// How often the window looks for calls an agent has made. Short enough that a call feels immediate
 /// and long enough that an idle endpoint costs a wake-up per this and no more.
 const CALL_TICK: Duration = Duration::from_millis(20);
@@ -63,6 +67,15 @@ pub struct Call {
     /// The MCP client's own name, as it introduced itself.
     client: String,
     reply: mpsc::Sender<Result<Value>>,
+}
+
+/// An agent's `run_watch`: waiting for a run to change. Nothing is being done, so no `Op` belongs
+/// to it — the answer comes from the window's own events, or from the wait's own deadline.
+pub(super) struct Watch {
+    /// Which wait this is, so a deadline an answer overtook does nothing.
+    asked: u64,
+    plugin: String,
+    call: Call,
 }
 
 impl Call {
@@ -220,6 +233,13 @@ impl AppState {
             call.action.name(),
             call.client()
         );
+        // A watch does no work and costs nothing: nobody is asked to allow it, no `Op` is filed,
+        // and the window's own events answer it.
+        if let Action::RunWatch { plugin } = &call.action {
+            let plugin = plugin.clone();
+            self.begin_agent_watch(call, plugin, cx);
+            return;
+        }
         if let Err(error) = self.resolvable_op(&call.action) {
             call.answer(Err(error));
             return;
@@ -239,9 +259,79 @@ impl AppState {
         match action {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
-            | Action::PluginRun { .. } => Ok(None),
+            | Action::PluginRun { .. }
+            | Action::RunWatch { .. } => Ok(None),
             other => self.agent_op(other).map(Some),
         }
+    }
+
+    /// Files an agent's watch: one at a time, and only for a plugin that has a run.
+    fn begin_agent_watch(&mut self, call: Call, plugin: String, cx: &mut Context<Self>) {
+        if self.plugin_run().is_none_or(|run| run.plugin != plugin) {
+            call.answer(Err(
+                Error::new(ErrorKind::PluginNotFound).with("plugin", plugin)
+            ));
+            return;
+        }
+        if self.agent_watch.is_some() {
+            call.answer(Err(Error::denied("run_watch", Denial::Busy)));
+            return;
+        }
+        self.watch_asks += 1;
+        let asked = self.watch_asks;
+        log::info!("agent: run_watch on {plugin} is waiting");
+        self.agent_watch = Some(Watch {
+            asked,
+            plugin,
+            call,
+        });
+        self.watch_timer(asked, cx);
+    }
+
+    /// Sets the wait's own deadline, so its answer never depends on something happening.
+    fn watch_timer(&mut self, asked: u64, cx: &mut Context<Self>) {
+        let previous = self.watch_timer.take();
+        self.watch_timer = Some(cx.spawn(async move |this, cx| {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            cx.background_executor().timer(WATCH_WAIT).await;
+            this.update(cx, |state, cx| state.lapse_agent_watch(asked, cx))
+                .ok();
+        }));
+    }
+
+    fn lapse_agent_watch(&mut self, asked: u64, cx: &mut Context<Self>) {
+        if self
+            .agent_watch
+            .as_ref()
+            .is_some_and(|watch| watch.asked == asked)
+        {
+            self.answer_agent_watch("none", cx);
+        }
+    }
+
+    /// Answers the waiting watch — on a change, or on its deadline — with the run as it stands.
+    pub(super) fn answer_agent_watch(&mut self, changed: &str, cx: &mut Context<Self>) {
+        let Some(watch) = self.agent_watch.take() else {
+            return;
+        };
+        let answer = super::mcp::watch_answer(self, &watch.plugin, changed);
+        if let Err(error) = &answer {
+            log::warn!(
+                "agent: run_watch on {} could not be answered: {error}",
+                watch.plugin
+            );
+        } else {
+            log::info!("agent: run_watch on {} answered ({changed})", watch.plugin);
+        }
+        watch.call.answer(answer);
+        cx.notify();
+    }
+
+    /// Whether an agent is waiting on a `run_watch` right now.
+    pub fn agent_is_watching(&self) -> bool {
+        self.agent_watch.is_some()
     }
 
     /// What a paid call is asking the user about, while it waits.
@@ -537,8 +627,9 @@ impl AppState {
             }
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
-            | Action::PluginRun { .. } => {
-                unreachable!("handled before an Op is chosen")
+            | Action::PluginRun { .. }
+            | Action::RunWatch { .. } => {
+                unreachable!("answered from the window's own events")
             }
         })
     }
@@ -608,8 +699,9 @@ impl AppState {
             }
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
-            | Action::PluginRun { .. } => {
-                unreachable!("handled before an Op is chosen")
+            | Action::PluginRun { .. }
+            | Action::RunWatch { .. } => {
+                unreachable!("answered from the window's own events")
             }
         }
         Ok(())

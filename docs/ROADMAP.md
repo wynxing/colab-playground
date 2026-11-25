@@ -25,9 +25,12 @@ A call takes the path a click takes — the same `Op`, the same busy state, the 
 the app's own dialog, the call waits for the answer, and a refusal is final
 ([Product principle](DESIGN.md#product-principle-the-tie-breaker)).
 
-- **What is left (slice 3):** `run_watch`, a call that answers when a run's stage moves, over the
-  endpoint's `GET` stream, instead of an agent asking `run_status` again — and reattaching to a run
-  after the app restarts, the same work [Plugin runs](#plugin-runs) records.
+- **Slice 3, first piece landed:** `run_watch` answers when a run reports anything — a new stage,
+  ready, failed, or the runtime gone — and after about two minutes with the run as it stands, so the
+  answer always lands inside a client's own timeout. The wait is held by the window and answered by
+  the same events the run page draws from. Still open: reattaching to a run after the app restarts
+  (the same work [Plugin runs](#plugin-runs) records), watching a session's guard or a forward, and
+  pushing those events as notifications to a client that has a call open.
 - **Not covered by a test:** a real third-party client driving a paid tool. The socket tests are
   the app's own, and lighting up a real Colab runtime from a test would bill the owner.
 

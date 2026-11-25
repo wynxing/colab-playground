@@ -524,7 +524,9 @@ impl AppState {
             }
         }
         if published_stage {
+            // A waiting `run_watch` hears about it too: the same event, told to whoever asked.
             self.answer_agent_run_stage(cx);
+            self.answer_agent_watch(if became_ready { "ready" } else { "stage" }, cx);
         }
         if became_ready {
             self.run_became_ready(cx);
@@ -536,6 +538,8 @@ impl AppState {
         result: colab_playground_core::Result<PluginRunOutcome>,
         cx: &mut Context<Self>,
     ) {
+        // A watch waiting on this run is answered with how it ended, before the run is borrowed.
+        self.answer_agent_watch(if result.is_ok() { "finished" } else { "failed" }, cx);
         let Some(run) = &mut self.plugin_run else {
             return;
         };

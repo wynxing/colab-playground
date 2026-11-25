@@ -187,6 +187,11 @@ plugin, copy a run's files down to this computer, open and close a port forward,
 a plugin, switch the active account, and change the settings. A call takes the same path a click
 takes, so the work shows up in the window the way your own click would.
 
+A long job does not have to be asked about again and again: `run_watch` answers as soon as the run
+reports something — a new stage, ready, failed, or the runtime gone — and at the latest after about
+two minutes with whatever it is doing now. A deploy that takes five minutes is therefore a handful
+of short calls, and a client's own timeout is never reached.
+
 **Anything that spends money asks you first.** Starting, stopping, extending and running a plugin
 open a dialog naming the action, its target, the rate per hour where the app knows it, and the
 client that asked. Allowing it carries the work out. Refusing it, closing the dialog or not
