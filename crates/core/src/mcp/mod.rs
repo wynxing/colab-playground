@@ -7,12 +7,14 @@
 //!
 //! The split this module is built around: the protocol, the transport and the tool table live here
 //! in `core`, where a test can drive them against a mock, while the app supplies a
-//! [`view::Source`] — the snapshot of its own state. Nothing in this module reaches into the app,
-//! and nothing in slice 1 changes state, spends money or starts a session: the tools are read-only
-//! until the app can ask the user first.
+//! [`view::Source`] — the snapshot of its own state — and the
+//! [`actions::Actions`] that carries out what an agent asks for. Nothing in this module reaches
+//! into the app; what changes state is decided by the app, which is also where the user is asked
+//! before anything is spent.
 //!
 //! The design and the later slices: `docs/superpowers/specs/2026-11-24-agent-mcp-endpoint-design.md`.
 
+pub mod actions;
 pub mod http;
 pub mod protocol;
 pub mod tools;
@@ -20,7 +22,7 @@ pub mod view;
 
 mod server;
 
-pub use server::{Config, Endpoint, PATH, SESSION_HEADER};
+pub use server::{Client, Config, Endpoint, PATH, SESSION_HEADER};
 
 /// What the endpoint calls itself in `initialize`.
 pub const SERVER_NAME: &str = "colab-playground";

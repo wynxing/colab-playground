@@ -12,12 +12,40 @@ use std::{
     time::Duration,
 };
 
-use colab_playground_core::mcp::{
-    Config, Endpoint, PATH, SESSION_HEADER,
-    view::{Session, Snapshot, Source},
+use colab_playground_core::{
+    Result,
+    mcp::{
+        Config, Endpoint, PATH, SESSION_HEADER,
+        actions::{Action, Actions},
+        protocol,
+        view::{Session, Snapshot, Source},
+    },
 };
 
 const TOKEN: &str = "a-token-only-this-test-knows";
+
+/// An executor that answers the way the app would, and remembers what it was asked — including
+/// which client asked, which is what the app's dialog shows.
+#[derive(Default)]
+struct Recorder {
+    asked: std::sync::Mutex<Vec<(Action, String)>>,
+}
+
+impl Recorder {
+    fn asked(&self) -> Vec<(Action, String)> {
+        self.asked.lock().expect("not poisoned").clone()
+    }
+}
+
+impl Actions for Recorder {
+    fn perform(&self, action: Action, client: &str) -> Result<serde_json::Value> {
+        self.asked
+            .lock()
+            .expect("not poisoned")
+            .push((action.clone(), client.to_owned()));
+        Ok(serde_json::json!({ "done": action.name() }))
+    }
+}
 
 /// A source with one runtime, so a tool has something to answer with.
 struct Demo;
@@ -39,11 +67,16 @@ impl Source for Demo {
 }
 
 fn endpoint() -> Endpoint {
+    endpoint_with(Arc::new(Recorder::default()))
+}
+
+fn endpoint_with(actions: Arc<dyn Actions>) -> Endpoint {
     Endpoint::start(
         Config {
             token: TOKEN.to_owned(),
             // Let the system pick a free port: two runs of this test must not collide.
             port: 0,
+            actions,
         },
         Arc::new(Demo),
     )
@@ -166,8 +199,9 @@ fn a_client_can_name_itself_list_the_tools_and_call_one() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name").to_owned())
         .collect();
-    assert_eq!(names.len(), 9, "{names:?}");
+    assert_eq!(names.len(), 20, "{names:?}");
     assert!(names.contains(&"sessions_list".to_owned()), "{names:?}");
+    assert!(names.contains(&"session_start".to_owned()), "{names:?}");
 
     let called = post(
         &mut client,
@@ -182,6 +216,64 @@ fn a_client_can_name_itself_list_the_tools_and_call_one() {
     assert_eq!(answer["sessions"][0]["name"], "playground-1");
     assert_eq!(answer["sessions"][0]["hardware"], "T4");
     assert!(!text.contains(TOKEN), "a tool never echoes the token");
+}
+
+#[test]
+fn an_agent_drives_the_app_over_a_socket() {
+    let recorder = Arc::new(Recorder::default());
+    let endpoint = endpoint_with(Arc::clone(&recorder) as Arc<dyn Actions>);
+    let mut client = connect(endpoint.addr());
+
+    let hello = post(
+        &mut client,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"a-driving-agent","version":"9"}}}"#,
+    );
+    let session = hello
+        .headers
+        .get(&SESSION_HEADER.to_ascii_lowercase())
+        .expect("the session id comes back in a header")
+        .clone();
+
+    let called = send(
+        &mut client,
+        "POST",
+        PATH,
+        TOKEN,
+        None,
+        Some(&session),
+        Some(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_stop","arguments":{"session":"playground-1"}}}"#,
+        ),
+    );
+    let called = called.json();
+    assert_eq!(called["result"]["isError"], false, "{called}");
+    let text = called["result"]["content"][0]["text"]
+        .as_str()
+        .expect("a text block");
+    let answer: serde_json::Value = serde_json::from_str(text).expect("the tool's JSON");
+    assert_eq!(answer["done"], "session_stop");
+    assert_eq!(
+        recorder.asked(),
+        [(
+            Action::SessionStop {
+                session: "playground-1".to_owned()
+            },
+            "a-driving-agent".to_owned()
+        )],
+        "the app was asked, and told which client asked"
+    );
+
+    // A tool that is not in the table stays a protocol fault rather than becoming a result.
+    let unknown = post(
+        &mut client,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_launch"}}"#,
+    );
+    assert_eq!(
+        unknown.json()["error"]["code"],
+        protocol::METHOD_NOT_FOUND,
+        "{}",
+        unknown.body
+    );
 }
 
 #[test]

@@ -14,12 +14,13 @@
 //!   status, a tool that fails is a tool result marked `isError`, and an unknown method is a
 //!   JSON-RPC fault.
 //!
-//! Slice 1 keeps no session state that matters: a session id is handed out because clients expect
-//! one and refused once closed, but nothing hangs on it. The confirmation flow in slice 2 needs
-//! real per-session state, and will extend this file rather than replace it.
+//! Slice 1 kept no session state that mattered: a session id was handed out because clients expect
+//! one and refused once closed. A session now also remembers **who opened it**, which is what lets
+//! the app's dialog say which client is asking — the app is where an action is carried out and
+//! where the user is asked, and this file only makes sure the name gets there.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     io::BufReader,
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
@@ -35,6 +36,7 @@ use serde_json::{Value, json};
 use crate::error::{Error, ErrorKind, Result};
 
 use super::{
+    actions::Actions,
     http,
     protocol::{self, Fault, Incoming},
     tools,
@@ -54,19 +56,63 @@ const IDLE: Duration = Duration::from_secs(120);
 const TICK: Duration = Duration::from_millis(50);
 
 /// What the endpoint is started with.
-#[derive(Debug, Clone)]
 pub struct Config {
     /// What a client must send as `Authorization: Bearer …`.
     pub token: String,
     /// The loopback port. Zero lets the system pick one, which is what a test wants.
     pub port: u16,
+    /// Carries out what an agent asks for. The app's own, because only the app can do it — and
+    /// only the app can ask the user first.
+    pub actions: Arc<dyn Actions>,
+}
+
+/// Who is asking: what the client called itself when it opened its session, and the version it
+/// gave, when it gave one.
+///
+/// It is the app's dialog that shows this, so the name is kept as the client wrote it and nothing
+/// here tries to make it nicer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Client {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+impl Client {
+    /// What a request that named no session, or a session this endpoint never issued, is served
+    /// for. Serving it is deliberate — a stateless client is legal — and it still gets to say who
+    /// it is.
+    fn unnamed() -> Self {
+        Client {
+            name: "an unnamed client".to_owned(),
+            version: None,
+        }
+    }
+
+    /// The client as `initialize` introduced it.
+    fn introduced(params: &Value) -> Self {
+        let info = params.get("clientInfo");
+        let text = |field: &str| {
+            info.and_then(|info| info.get(field))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        match text("name") {
+            Some(name) => Client {
+                name,
+                version: text("version"),
+            },
+            None => Client::unnamed(),
+        }
+    }
 }
 
 /// Everything a request is answered from.
 struct Ctx {
     token: String,
     source: Arc<dyn Source>,
-    sessions: Mutex<HashSet<String>>,
+    actions: Arc<dyn Actions>,
+    /// The sessions handed out, each with the client that opened it.
+    sessions: Mutex<HashMap<String, Client>>,
     /// The endpoint's own origin, for the check described above.
     origins: Vec<String>,
 }
@@ -75,16 +121,24 @@ impl Ctx {
     fn holds(&self, id: &str) -> bool {
         self.sessions
             .lock()
-            .map(|set| set.contains(id))
+            .map(|held| held.contains_key(id))
             .unwrap_or(false)
+    }
+
+    /// Who opened the session `id`, if this endpoint issued it.
+    fn client_of(&self, id: &str) -> Option<Client> {
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|held| held.get(id).cloned())
     }
 
     /// Hands out an id. It is an opaque marker, not a credential — the token is the credential —
     /// so the workspace's own unique string is enough, and nothing here claims to be a secret.
-    fn new_session(&self) -> String {
+    fn new_session(&self, client: Client) -> String {
         let id = crate::accounts::nonce();
-        if let Ok(mut set) = self.sessions.lock() {
-            set.insert(id.clone());
+        if let Ok(mut held) = self.sessions.lock() {
+            held.insert(id.clone(), client);
         }
         id
     }
@@ -121,7 +175,8 @@ impl Endpoint {
         let ctx = Arc::new(Ctx {
             token: config.token,
             source,
-            sessions: Mutex::new(HashSet::new()),
+            actions: config.actions,
+            sessions: Mutex::new(HashMap::new()),
             origins: vec![
                 format!("http://127.0.0.1:{}", addr.port()),
                 format!("http://localhost:{}", addr.port()),
@@ -297,7 +352,13 @@ fn post(request: &http::Request, ctx: &Ctx) -> http::Response {
     match incoming {
         Incoming::Notification { .. } => http::Response::text(202, ""),
         Incoming::Request { id, method, params } => {
-            let (body, session) = dispatch(ctx, &method, &params, &id);
+            // Who is asking: the session says, and a request that names none is served as an
+            // unnamed client rather than refused, since a stateless client is legal.
+            let client = request
+                .header(SESSION_HEADER)
+                .and_then(|id| ctx.client_of(id))
+                .unwrap_or_else(Client::unnamed);
+            let (body, session) = dispatch(ctx, &client, &method, &params, &id);
             let mut response = http::Response::json(200, body.to_string());
             if let Some(id) = session {
                 response = response.with(SESSION_HEADER, id);
@@ -309,7 +370,13 @@ fn post(request: &http::Request, ctx: &Ctx) -> http::Response {
 
 /// The answer to one request, and the session id to hand back when the client should start using
 /// one.
-fn dispatch(ctx: &Ctx, method: &str, params: &Value, id: &Value) -> (Value, Option<String>) {
+fn dispatch(
+    ctx: &Ctx,
+    client: &Client,
+    method: &str,
+    params: &Value,
+    id: &Value,
+) -> (Value, Option<String>) {
     match method {
         "initialize" => {
             let requested = params.get("protocolVersion").and_then(Value::as_str);
@@ -318,7 +385,10 @@ fn dispatch(ctx: &Ctx, method: &str, params: &Value, id: &Value) -> (Value, Opti
                 env!("CARGO_PKG_VERSION"),
                 requested,
             );
-            (protocol::result(id, result), Some(ctx.new_session()))
+            (
+                protocol::result(id, result),
+                Some(ctx.new_session(Client::introduced(params))),
+            )
         }
         "ping" => (protocol::result(id, json!({})), None),
         "tools/list" => (protocol::result(id, tools::descriptors()), None),
@@ -340,7 +410,13 @@ fn dispatch(ctx: &Ctx, method: &str, params: &Value, id: &Value) -> (Value, Opti
                 );
             }
             let snapshot = ctx.source.snapshot();
-            match tools::call(&snapshot, name, params.get("arguments")) {
+            match tools::call(
+                &snapshot,
+                &*ctx.actions,
+                name,
+                params.get("arguments"),
+                &client.name,
+            ) {
                 Ok(answer) => (protocol::result(id, tool_result(&answer)), None),
                 Err(error) => (protocol::result(id, tool_failure(&error)), None),
             }
@@ -398,7 +474,10 @@ fn token_matches(expected: &str, offered: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::view::{Empty, Session, Snapshot};
+    use crate::mcp::{
+        actions::Action,
+        view::{Empty, Session, Snapshot},
+    };
 
     const TOKEN: &str = "test-token";
 
@@ -420,11 +499,39 @@ mod tests {
         }
     }
 
+    /// An executor that records what it was asked and answers the way the app would. A start is
+    /// the one it refuses, standing in for a person who says no.
+    #[derive(Default)]
+    struct Recorder {
+        asked: Mutex<Vec<(Action, String)>>,
+    }
+
+    impl Recorder {
+        fn asked(&self) -> Vec<(Action, String)> {
+            self.asked.lock().expect("not poisoned").clone()
+        }
+    }
+
+    impl Actions for Recorder {
+        fn perform(&self, action: Action, client: &str) -> Result<Value> {
+            let refusing = matches!(action, Action::SessionStart { .. });
+            self.asked
+                .lock()
+                .expect("not poisoned")
+                .push((action.clone(), client.to_owned()));
+            if refusing {
+                return Err(Error::denied(action.name(), crate::error::Denial::Refused));
+            }
+            Ok(json!({ "done": action.name() }))
+        }
+    }
+
     fn ctx() -> Ctx {
         Ctx {
             token: TOKEN.to_owned(),
             source: Arc::new(Empty),
-            sessions: Mutex::new(HashSet::new()),
+            actions: Arc::new(Recorder::default()),
+            sessions: Mutex::new(HashMap::new()),
             origins: vec!["http://127.0.0.1:8765".to_owned()],
         }
     }
@@ -593,7 +700,7 @@ mod tests {
         let response = handle(
             &request(
                 "POST",
-                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"session_start"}}"#,
+                r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"session_launch"}}"#,
             ),
             &ctx(),
         );
@@ -613,7 +720,7 @@ mod tests {
     #[test]
     fn closing_a_session_is_acknowledged() {
         let ctx = ctx();
-        let session = ctx.new_session();
+        let session = ctx.new_session(Client::unnamed());
         let mut req = request("DELETE", "");
         req.headers
             .push((SESSION_HEADER.to_owned(), session.clone()));
@@ -649,6 +756,89 @@ mod tests {
         assert_eq!(
             value["next_step"], "refresh",
             "a caller is told what would help next"
+        );
+    }
+
+    #[test]
+    fn the_client_that_asked_is_named_with_the_action() {
+        let recorder = Arc::new(Recorder::default());
+        let ctx = Ctx {
+            actions: Arc::clone(&recorder) as Arc<dyn Actions>,
+            ..ctx()
+        };
+        let opened = handle(
+            &request(
+                "POST",
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Claude Code","version":"1.2.3"}}}"#,
+            ),
+            &ctx,
+        );
+        let session = opened
+            .extra
+            .iter()
+            .find(|(name, _)| *name == SESSION_HEADER)
+            .map(|(_, value)| value.clone())
+            .expect("a session id");
+
+        let mut call = request(
+            "POST",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"session_stop","arguments":{"session":"run-1"}}}"#,
+        );
+        call.headers.push((SESSION_HEADER.to_owned(), session));
+        let answered = handle(&call, &ctx);
+        assert_eq!(body_of(&answered)["result"]["isError"], false);
+        assert_eq!(
+            recorder.asked(),
+            [(
+                Action::SessionStop {
+                    session: "run-1".to_owned()
+                },
+                "Claude Code".to_owned()
+            )],
+            "the app is told which client is asking, in that client's own words"
+        );
+    }
+
+    #[test]
+    fn a_request_that_names_no_session_is_served_as_an_unnamed_client() {
+        let recorder = Arc::new(Recorder::default());
+        let ctx = Ctx {
+            actions: Arc::clone(&recorder) as Arc<dyn Actions>,
+            ..ctx()
+        };
+        handle(
+            &request(
+                "POST",
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"session_stop","arguments":{"session":"run-1"}}}"#,
+            ),
+            &ctx,
+        );
+        assert_eq!(
+            recorder.asked()[0].1,
+            "an unnamed client",
+            "a stateless client is legal, and its call still says who asked"
+        );
+    }
+
+    #[test]
+    fn a_refused_action_is_a_result_marked_as_an_error() {
+        let response = handle(
+            &request(
+                "POST",
+                r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_start","arguments":{}}}"#,
+            ),
+            &ctx(),
+        );
+        let body = body_of(&response);
+        assert_eq!(body["result"]["isError"], true, "{body}");
+        let text = body["result"]["content"][0]["text"].as_str().expect("text");
+        let error: Value = serde_json::from_str(text).expect("the error is JSON");
+        assert_eq!(error["kind"], "denied", "{body}");
+        assert_eq!(error["params"]["action"], "session_start", "{body}");
+        assert_eq!(error["params"]["reason"], "refused", "{body}");
+        assert_eq!(
+            error["next_step"], "none",
+            "a refusal is final: the client must not call again"
         );
     }
 }

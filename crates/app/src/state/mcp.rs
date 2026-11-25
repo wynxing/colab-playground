@@ -19,6 +19,7 @@ use colab_playground_core::{
     backend::BackendKind,
     mcp::{
         Config, Endpoint,
+        actions::Unavailable,
         view::{
             Account, AppSettings, Forward, Node, Output, Plugin, Run, Session, Snapshot, Source,
             Usage, Workflow,
@@ -84,6 +85,11 @@ impl Agents {
             Config {
                 token: token.clone(),
                 port,
+                // The app's own executor — the thing that carries an agent's call out through the
+                // same path a click takes — is not written yet: until it is, an agent can read
+                // everything and change nothing, and a call that would change something is
+                // refused rather than quietly dropped.
+                actions: Arc::new(Unavailable),
             },
             Arc::clone(&self.source) as Arc<dyn Source>,
         ) {

@@ -116,6 +116,10 @@ pub enum ErrorKind {
     UpdateUnverified,
     /// The release has no download for this computer, or it is gone.
     UpdateUnavailable,
+    /// An agent asked for something and was told no: a person refused it, let it lapse, or
+    /// another call already had the window's attention. Nothing here is worth trying again.
+    /// Params: `action`, `reason`.
+    Denied,
     /// Anything else; see `detail`.
     Other,
 }
@@ -159,10 +163,12 @@ impl ErrorKind {
                 NextStep::CheckNetwork
             }
             // For the update kinds another attempt would fetch the same files; the app offers
-            // what is left itself.
-            K::PluginExists | K::Cancelled | K::UpdateUnverified | K::UpdateUnavailable => {
-                NextStep::None
-            }
+            // what is left itself. A denial is final by definition: a person already answered.
+            K::PluginExists
+            | K::Cancelled
+            | K::UpdateUnverified
+            | K::UpdateUnavailable
+            | K::Denied => NextStep::None,
             K::Unsupported | K::CommandTooLong | K::Parse | K::Io | K::Other => {
                 NextStep::ReportProblem
             }
@@ -310,6 +316,43 @@ impl fmt::Display for ErrorKind {
     }
 }
 
+/// Why an agent's call was not carried out.
+///
+/// The four are different facts for the person looking at the window, and the same one for the
+/// agent: the answer is final and the call is not repeated. Naming them apart is what lets the
+/// window say "you refused it" where it would otherwise have to say "it failed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Denial {
+    /// The user said no.
+    Refused,
+    /// The dialog was closed without an answer.
+    Dismissed,
+    /// Nobody answered before the wait ran out.
+    TimedOut,
+    /// Another call was already waiting for the window's attention: the window asks about one
+    /// thing at a time, and this is the second one.
+    Busy,
+}
+
+impl Denial {
+    /// The stable identifier the error carries as its `reason`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Denial::Refused => "refused",
+            Denial::Dismissed => "dismissed",
+            Denial::TimedOut => "timed_out",
+            Denial::Busy => "busy",
+        }
+    }
+}
+
+impl fmt::Display for Denial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// An error with a machine-readable kind, named parameters and a log detail.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, thiserror::Error)]
 pub struct Error {
@@ -363,6 +406,17 @@ impl Error {
 
     pub fn cancelled() -> Self {
         Error::new(ErrorKind::Cancelled)
+    }
+
+    /// An agent's call the app will not carry out.
+    ///
+    /// It carries the tool's name, so a client with more than one call in flight can tell which
+    /// was answered, and the reason, which the window says in its own words.
+    pub fn denied(action: &str, reason: Denial) -> Self {
+        Error::new(ErrorKind::Denied)
+            .with("action", action)
+            .with("reason", reason.as_str())
+            .detail(format!("{action} was {reason}"))
     }
 
     pub fn param(&self, key: &str) -> Option<&str> {
@@ -472,5 +526,31 @@ mod tests {
             .detail("bind failed");
         assert_eq!(e.to_string(), "port_in_use (port=8000): bind failed");
         assert_eq!(e.param("port"), Some("8000"));
+    }
+
+    #[test]
+    fn a_denial_says_which_call_and_why_and_offers_no_next_step() {
+        let denied = Error::denied("session_start", Denial::TimedOut);
+        assert_eq!(denied.kind, ErrorKind::Denied);
+        assert_eq!(denied.kind.as_str(), "denied");
+        assert_eq!(denied.param("action"), Some("session_start"));
+        assert_eq!(denied.param("reason"), Some("timed_out"));
+        assert_eq!(
+            denied.next_step,
+            NextStep::None,
+            "the answer is final: asking again is wrong"
+        );
+        // The reason travels as a stable name, not as prose.
+        let json = serde_json::to_value(&denied).unwrap();
+        assert_eq!(json["params"]["reason"], "timed_out");
+        for (denial, name) in [
+            (Denial::Refused, "refused"),
+            (Denial::Dismissed, "dismissed"),
+            (Denial::TimedOut, "timed_out"),
+            (Denial::Busy, "busy"),
+        ] {
+            assert_eq!(denial.as_str(), name);
+            assert_eq!(serde_json::to_value(denial).unwrap(), name);
+        }
     }
 }
