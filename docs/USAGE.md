@@ -180,8 +180,19 @@ the app knows about your Colab sessions. It is off by default.
 
 What it can read: the runtimes and what each costs per hour, compute-unit balances, the plugin run
 the app is watching (its stage, the tail of its log, its workflow, and the files it produced), the
-installed plugins, the settings, the signed-in accounts and the open forwards. Nothing it can call
-starts, stops or extends a session, runs a plugin, or spends anything.
+installed plugins, the settings, the signed-in accounts and the open forwards.
+
+What it can do: start and stop a runtime, move or cancel a runtime's auto-stop, deploy and run a
+plugin, copy a run's files down to this computer, open and close a port forward, enable or install
+a plugin, switch the active account, and change the settings. A call takes the same path a click
+takes, so the work shows up in the window the way your own click would.
+
+**Anything that spends money asks you first.** Starting, stopping, extending and running a plugin
+open a dialog naming the action, its target, the rate per hour where the app knows it, and the
+client that asked. Allowing it carries the work out. Refusing it, closing the dialog or not
+answering within two minutes fails the call, and the agent is told not to ask again — a refusal is
+final. One such question stands at a time: a second call that spends money is turned down while one
+waits.
 
 The endpoint listens on this computer only, and it refuses a request whose `Origin` is not its own
 window, so a page in a browser cannot reach it. The token is the only way in: anyone who has it can

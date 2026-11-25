@@ -14,16 +14,35 @@
 
 ## Status
 
-Tasks 1–3 are landed on `feat/agent-mcp-endpoint`: the action vocabulary, the eleven write tools with
-their argument checks, and the endpoint's half of a call — a session remembers which client opened
-it, and an action travels to the app with that client's name on it. `ErrorKind::Denied` (task 4)
-landed with them, because a refusal is one of the things the endpoint has to report and the
+**Landed.** Tasks 1–3 are on `main` (slice 1's pull request): the action vocabulary, the eleven write
+tools with their argument checks, and the endpoint's half of a call — a session remembers which
+client opened it, and an action travels to the app with that client's name on it. `ErrorKind::Denied`
+(task 4) landed with them, because a refusal is one of the things the endpoint has to report and the
 vocabulary was not finished without it.
 
-The app's half — the bridge, the dialog, the tools' own work and the window's tests — is not
-written. The app starts the endpoint with an executor that refuses everything and says so, so an
-agent can read everything and change nothing. Where a checkbox below disagrees with the code, the
-code is what happened.
+Tasks 5–10 are the app's half, on `feat/agent-mcp-driving` (a pull request apart from slice 1):
+`state/agents.rs` holds the bridge (a queue the endpoint puts calls on and waits on), the dispatch
+that turns an action into the `Op` a click starts, the answers built from the state the window
+shows, and `Overlay::Approval` — the dialog a call that spends money waits on. Where a checkbox
+below disagrees with the code, the code is what happened.
+
+Four things this plan did not say, and the code does:
+
+- **A settings change has no `Op`.** `settings_set` is a file write with nothing to wait for, so it
+  is answered in the same turn rather than filed against an `Op` that never starts.
+- **A call is filed after the work starts.** A call filed before a `perform` that then decided not
+  to start would wait for an `Op` that is never coming; the guard right after answers the agent
+  instead of leaving it to the backstop.
+- **`plugin_install` is not gated by the approval dialog.** The design gates what spends money, and
+  an install spends none: what an agent gets is the app's own manifest check first, whose complaint
+  is the answer, so nothing is installed that the window's own dialog would have refused.
+- **The dialog's tests are the window's** (`crates/app/tests/ui/agents.rs`), not the state module's
+  as task 7 said: a dialog is a frame, and only the harness that draws one can click its buttons.
+  `state/agents.rs` keeps the unit tests that need no window — the bridge refusing, the answers'
+  parsers, the forward's key.
+- **`session_extend` carries the minutes it was asked for.** The Extend button adds the app's own
+  duration, which is why one shared `extend_runtime` takes the duration as an argument; the agent
+  gets the number it named and the `Op` is the same either way.
 
 ## Global Constraints
 
@@ -139,11 +158,11 @@ Three rules are new, and they are what this slice is made of:
   `Error::denied(action: &str, reason: Denial) -> Error` with `Denial::{Refused, Dismissed,
   TimedOut, Busy}` as its `reason` param.
 
-- [ ] **Step 1: Failing test** in `error.rs`'s tests: a denial carries the action and the reason,
+- [x] **Step 1: Failing test** in `error.rs`'s tests: a denial carries the action and the reason,
   its kind is `denied`, and its next step is none — there is nothing for the agent to try.
-- [ ] **Step 2: Implement** the kind, the helper and the `Denial` reason.
-- [ ] **Step 3: Run** `cargo test -p colab-playground-core --lib error`.
-- [ ] **Step 4: Commit** `feat(core): refuse an agent's call in the app's own words`.
+- [x] **Step 2: Implement** the kind, the helper and the `Denial` reason.
+- [x] **Step 3: Run** `cargo test -p colab-playground-core --lib error`.
+- [x] **Step 4: Commit** `feat(core): refuse an agent's call in the app's own words`.
 
 ### Task 5: The app's bridge — what an agent's call travels on
 
@@ -157,20 +176,20 @@ Three rules are new, and they are what this slice is made of:
   answer), `struct Call { action, client, reply }`, `AppState::agent_calls` (the drain), and
   `AppState::wait_for_agent_call(op, call, cx)` / `AppState::settle_agent_call(op, cx)`.
 
-- [ ] **Step 1: Failing test** in `agents.rs`'s tests over the mock backend: a call made while no
+- [x] **Step 1: Failing test** in `agents.rs`'s tests over the mock backend: a call made while no
   window is draining it is refused rather than hanging (`the_bridge_refuses_when_the_app_is_not
   _listening`), and a call that is answered comes back with its answer
   (`a_call_comes_back_with_the_foreground_answer`).
-- [ ] **Step 2: Implement `Bridge`** — a `Sender<Call>` and a generous ceiling (`CALL_WAIT`,
+- [x] **Step 2: Implement `Bridge`** — a `Sender<Call>` and a generous ceiling (`CALL_WAIT`,
   documented as a backstop: the app's own timeouts are the real ones, and a dropped receiver
   answers at once).
-- [ ] **Step 3: Implement the drain** — a foreground task started with the endpoint and dropped
+- [x] **Step 3: Implement the drain** — a foreground task started with the endpoint and dropped
   with it, which takes each waiting call and begins it on the foreground. A call that outlives its
   own deadline is answered as a timeout.
-- [ ] **Step 4: Wire it into the endpoint's life** (`mcp::Agents::sync` starts the endpoint with the
+- [x] **Step 4: Wire it into the endpoint's life** (`mcp::Agents::sync` starts the endpoint with the
   bridge), and stop the drain when the endpoint stops.
-- [ ] **Step 5: Run** `cargo test -p colab-playground --locked`.
-- [ ] **Step 6: Commit** `feat: let the endpoint ask the window to do the work`.
+- [x] **Step 5: Run** `cargo test -p colab-playground --locked`.
+- [x] **Step 6: Commit** `feat: let the endpoint ask the window to do the work`.
 
 ### Task 6: One call per `Op`, and the answer when it lands
 
@@ -185,25 +204,25 @@ Three rules are new, and they are what this slice is made of:
   starts), `AppState::settle_agent_call(op, cx)` called from `run_backend`'s and
   `run_backend_streaming`'s completion, `answers::for_action(action, state) -> Result<Value>`.
 
-- [ ] **Step 1: Failing test** — an action whose `Op` is already running is answered `Busy` at once
+- [x] **Step 1: Failing test** — an action whose `Op` is already running is answered `Busy` at once
   and starts nothing (`a_second_call_about_the_same_thing_is_busy_not_queued`).
-- [ ] **Step 2: Failing test** — an action that runs leaves the same traces a click leaves: the op
+- [x] **Step 2: Failing test** — an action that runs leaves the same traces a click leaves: the op
   is running while it runs (`is_busy`), and the state it changed is the state the window shows
   (`a_call_takes_the_same_path_a_click_takes`).
-- [ ] **Step 3: Implement the dispatch** for the non-paid tools, each naming the `Op` it starts:
+- [x] **Step 3: Implement the dispatch** for the non-paid tools, each naming the `Op` it starts:
   `run_download` → `Op::DownloadOutputs(key_of(path))` via `save_run_outputs`,
   `settings_set` → the settings save (answered at once, no `Op`),
   `accounts_switch` → `Op::Switch` via `request_switch` + `confirm_switch`,
   `plugin_enable` → `Op::PluginChange(key_of(id))` via `set_plugin_enabled`,
   `forward_open` → `Op::Forward(key_of(spec))` via `open_tunnel`,
   `forward_close` → `Op::CloseForward(key_of(id))` via `close_forward`.
-- [ ] **Step 4: Implement `answers::for_action`** — the answer to each action is built from the
+- [x] **Step 4: Implement `answers::for_action`** — the answer to each action is built from the
   state the action changed: the local paths a download wrote, the settings after a save, the
   plugin list, the forward, the runtime. The rule is the snapshot's: what the window shows.
-- [ ] **Step 5: Implement the settlement hook** in `ops.rs` after `done(...)`, so a call's answer is
+- [x] **Step 5: Implement the settlement hook** in `ops.rs` after `done(...)`, so a call's answer is
   the state as it stands once the call it waited for has landed.
-- [ ] **Step 6: Run** `cargo test --workspace --locked`.
-- [ ] **Step 7: Commit** `feat: let an agent do what a click does`.
+- [x] **Step 6: Run** `cargo test --workspace --locked`.
+- [x] **Step 7: Commit** `feat: let an agent do what a click does`.
 
 ### Task 7: The paid tools, and the dialog that gates them
 
@@ -219,21 +238,21 @@ Three rules are new, and they are what this slice is made of:
   and the keys `APPROVAL_TITLE`, `APPROVAL_BODY`, `APPROVAL_CLIENT`, `APPROVAL_RATE`,
   `APPROVAL_ALLOW`, `APPROVAL_REFUSE`, `APPROVAL_REFUSED`, `APPROVAL_CLOSED`.
 
-- [ ] **Step 1: Failing test** in `agents.rs`: a paid call opens the dialog and starts nothing; the
+- [x] **Step 1: Failing test** in `agents.rs`: a paid call opens the dialog and starts nothing; the
   rate the hardware would burn is on it (`a_paid_call_asks_first_and_names_what_it_costs`).
-- [ ] **Step 2: Failing test**: a second paid call while one waits is refused at once
+- [x] **Step 2: Failing test**: a second paid call while one waits is refused at once
   (`a_second_paid_call_is_refused_while_one_waits`).
-- [ ] **Step 3: Failing test**: refusing answers the agent with a denial, dismisses the dialog and
+- [x] **Step 3: Failing test**: refusing answers the agent with a denial, dismisses the dialog and
   leaves the state untouched; letting the deadline pass does the same with `TimedOut`
   (`refusing_and_timing_out_are_final`).
-- [ ] **Step 4: Build the dialog** the way `stop.rs` builds its own, with the client's own name and
+- [x] **Step 4: Build the dialog** the way `stop.rs` builds its own, with the client's own name and
   the hourly rate where there is one, naming the action and its target.
-- [ ] **Step 5: Implement the four paid actions** — `session_start` → `Op::Provision`,
+- [x] **Step 5: Implement the four paid actions** — `session_start` → `Op::Provision`,
   `session_stop` → `Op::Stop(key_of(target))`, `session_extend` → `Op::Extend(key_of(target))`,
   `plugin_run` → `Op::PluginRun`.
-- [ ] **Step 6: Add the keys** in all five catalogs.
-- [ ] **Step 7: Run** `cargo test --workspace --locked` (including the i18n tests).
-- [ ] **Step 8: Commit** `feat(app): ask before an agent spends money`.
+- [x] **Step 6: Add the keys** in all five catalogs.
+- [x] **Step 7: Run** `cargo test --workspace --locked` (including the i18n tests).
+- [x] **Step 8: Commit** `feat(app): ask before an agent spends money`.
 
 ### Task 8: `plugin_install`, which asks once and then checks before it installs
 
@@ -246,13 +265,13 @@ Three rules are new, and they are what this slice is made of:
   install, so the inspect prompt is not shown a second time — the manifest's own confirmation
   dialog belongs to that install once and this is it).
 
-- [ ] **Step 1: Failing test** — an approved `plugin_install` runs `Op::InspectPlugin`, then the
+- [x] **Step 1: Failing test** — an approved `plugin_install` runs `Op::InspectPlugin`, then the
   install, and answers with the plugin list; a manifest the app refuses is answered with that
   error and installs nothing (`an_approved_install_checks_before_it_installs`).
-- [ ] **Step 2: Implement** the two stages, with the second only entered when the first found a
+- [x] **Step 2: Implement** the two stages, with the second only entered when the first found a
   plugin to install.
-- [ ] **Step 3: Run** `cargo test -p colab-playground --locked`.
-- [ ] **Step 4: Commit** `feat(app): install a plugin for an agent after one question`.
+- [x] **Step 3: Run** `cargo test -p colab-playground --locked`.
+- [x] **Step 4: Commit** `feat(app): install a plugin for an agent after one question`.
 
 ### Task 9: The window's own tests of a driving agent
 
@@ -262,16 +281,16 @@ Three rules are new, and they are what this slice is made of:
 **Interfaces:**
 - Consumes: `support::TestApp`, the endpoint's address and token, and a plain `TcpStream`.
 
-- [ ] **Step 1: Test — a read tool over a real socket answers while the window is fine**, and the
+- [x] **Step 1: Test — a read tool over a real socket answers while the window is fine**, and the
   tool call shows as the busy state a click makes (`an_agent_reads_over_a_socket`).
-- [ ] **Step 2: Test — a paid call parks the window with the dialog up, and letting it through runs
+- [x] **Step 2: Test — a paid call parks the window with the dialog up, and letting it through runs
   it** (`an_agent_is_answered_when_the_user_allows_it`).
-- [ ] **Step 3: Test — refusing ends it**: the agent's answer is a denial, the dialog is gone and
+- [x] **Step 3: Test — refusing ends it**: the agent's answer is a denial, the dialog is gone and
   nothing was started (`a_refused_call_starts_nothing`).
-- [ ] **Step 4: Test — the agent's own name is on the dialog**, and a second paid call is refused
+- [x] **Step 4: Test — the agent's own name is on the dialog**, and a second paid call is refused
   while one waits.
-- [ ] **Step 5: Run** `cargo test -p colab-playground --locked`.
-- [ ] **Step 6: Commit** `test(app): cover an agent driving the window`.
+- [x] **Step 5: Run** `cargo test -p colab-playground --locked`.
+- [x] **Step 6: Commit** `test(app): cover an agent driving the window`.
 
 ### Task 10: What the window and the docs say about a driving agent
 
@@ -279,14 +298,14 @@ Three rules are new, and they are what this slice is made of:
 - Modify: `crates/app/src/ui/pages/settings.rs` (the section's description), `docs/USAGE.md`,
   `docs/ROADMAP.md`
 
-- [ ] **Step 1: The Settings section** says what an agent can *do* now, not only what it can read:
+- [x] **Step 1: The Settings section** says what an agent can *do* now, not only what it can read:
   the sentence that said "read" gains the actions, and the paid ones are named as asking here.
-- [ ] **Step 2: USAGE** — a short "Let an agent drive it": what it can do, that the app asks before
+- [x] **Step 2: USAGE** — a short "Let an agent drive it": what it can do, that the app asks before
   anything is spent, and what a refusal means.
-- [ ] **Step 3: ROADMAP** — slice 3 (`run_watch` over the `GET` stream, reattaching after a
+- [x] **Step 3: ROADMAP** — slice 3 (`run_watch` over the `GET` stream, reattaching after a
   restart) is what is left.
-- [ ] **Step 4: Run** `cargo test --workspace --locked`.
-- [ ] **Step 5: Commit** `docs: what an agent can drive`.
+- [x] **Step 4: Run** `cargo test --workspace --locked`.
+- [x] **Step 5: Commit** `docs: what an agent can drive`.
 
 ---
 
