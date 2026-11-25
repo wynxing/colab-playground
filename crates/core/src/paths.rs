@@ -108,6 +108,31 @@ impl DataLayout {
     }
 }
 
+/// The path the `colab` CLI has to be given for a file on this computer.
+///
+/// The CLI runs inside a Linux namespace on Windows: a Windows path handed to it as-is is one long
+/// file name, and the file lands in the CLI's working directory instead of where it was asked for.
+/// On Linux and macOS the app and the CLI share a file system, so the path stands as it is. `None`
+/// for a path the CLI cannot write at all (a Windows share), which the caller reports rather than
+/// writing somewhere no one will look.
+pub fn host_path_for_local(local: &Path) -> Option<HostPath> {
+    let text = local.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        match text.split_once(':') {
+            Some((drive, rest)) if drive.len() == 1 && rest.starts_with('/') => Some(
+                HostPath::new(format!("/mnt/{}{rest}", drive.to_ascii_lowercase())),
+            ),
+            // A share (`//server/...`) or a path with no drive has no place in the CLI's namespace.
+            _ => None,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Some(HostPath::new(text.into_owned()))
+    }
+}
+
 /// The default app-side data directory (`<OS data dir>/colab-playground`).
 /// Only used by the real app; tests always pass explicit directories.
 pub fn default_local_data_dir() -> Option<PathBuf> {
@@ -140,6 +165,33 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The CLI writes a downloaded file, so it has to be told where in its own namespace: a
+    /// Windows path reaches it as one long file name and the file lands in its working directory.
+    #[test]
+    fn a_local_path_is_given_to_the_cli_in_its_own_namespace() {
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                host_path_for_local(Path::new(r"E:\Users\wynn\a file.png"))
+                    .expect("a drive path")
+                    .as_str(),
+                "/mnt/e/Users/wynn/a file.png"
+            );
+            assert!(
+                host_path_for_local(Path::new(r"\\server\share\a.png")).is_none(),
+                "a share has no place in the CLI's namespace"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                host_path_for_local(Path::new("/home/u/a file.png"))
+                    .expect("a path")
+                    .as_str(),
+                "/home/u/a file.png"
+            );
+        }
+    }
     #[test]
     fn host_paths_join_with_slashes() {
         let h = HostPath::new("/home/u/.local/share/colab-playground");
