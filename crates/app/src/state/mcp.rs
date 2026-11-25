@@ -121,11 +121,10 @@ impl Agents {
 
     /// What an agent reads until the state publishes again.
     pub(crate) fn publish(&self, snapshot: Snapshot) {
-        match self.source.0.lock() {
-            Ok(mut held) => *held = snapshot,
-            // A poisoned lock means a publisher panicked; the endpoint keeps answering the last
-            // snapshot rather than going silent.
-            Err(_) => {}
+        // A poisoned lock means a publisher panicked; the endpoint keeps answering the last
+        // snapshot rather than going silent, so the failure is the only thing to ignore.
+        if let Ok(mut held) = self.source.0.lock() {
+            *held = snapshot;
         }
     }
 
