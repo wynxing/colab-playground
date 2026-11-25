@@ -189,7 +189,19 @@ pub fn call(snapshot: &Snapshot, name: &str, arguments: Option<&Value>) -> Resul
     let tool =
         find(name).ok_or_else(|| Error::invalid("name", format!("no tool called {name}")))?;
     let args = Args::parse(arguments)?;
-    (tool.read)(snapshot, &args)
+    let answer = (tool.read)(snapshot, &args)?;
+    Ok(with_notes(snapshot, answer))
+}
+
+/// Adds what the app could not tell to an answer that has any. An empty list and "the app has not
+/// looked" are different facts, and only one of them means nothing is running.
+fn with_notes(snapshot: &Snapshot, mut answer: Value) -> Value {
+    if !snapshot.notes.is_empty()
+        && let Some(object) = answer.as_object_mut()
+    {
+        object.insert("notes".to_owned(), json!(snapshot.notes));
+    }
+    answer
 }
 
 fn sessions_list(snapshot: &Snapshot, args: &Args) -> Result<Value> {
@@ -415,6 +427,23 @@ mod tests {
         );
         // Arguments that are not an object at all.
         assert!(call(&snapshot, "sessions_list", Some(&json!([1, 2]))).is_err());
+    }
+
+    #[test]
+    fn an_empty_list_says_so_when_the_app_has_not_looked_yet() {
+        let snapshot = Snapshot {
+            notes: vec!["the runtimes have not been listed yet".to_owned()],
+            ..Snapshot::default()
+        };
+        let answer = call(&snapshot, "sessions_list", None).expect("answers");
+        assert!(answer["sessions"].as_array().expect("a list").is_empty());
+        assert_eq!(
+            answer["notes"][0], "the runtimes have not been listed yet",
+            "an agent must not read nothing-is-running out of not-looked"
+        );
+        // Nothing to say, nothing added: a tool result stays the shape it promises.
+        let quiet = call(&Snapshot::default(), "sessions_list", None).expect("answers");
+        assert!(quiet.get("notes").is_none());
     }
 
     #[test]

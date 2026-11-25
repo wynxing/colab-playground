@@ -26,6 +26,10 @@ pub struct Snapshot {
     pub accounts: Vec<Account>,
     pub forwards: Vec<Forward>,
     pub settings: AppSettings,
+    /// What the app could not tell: a listing that has not come back, an account it could not
+    /// read. A tool that answers an empty list says so here, because an agent must never read
+    /// "nothing is running" out of "the app has not looked yet".
+    pub notes: Vec<String>,
 }
 
 /// One runtime on one account.
@@ -49,8 +53,11 @@ pub struct Session {
 pub struct Usage {
     pub account: String,
     pub balance_units: Option<f64>,
-    /// Units burned per hour right now, when the app is measuring.
+    /// Units per hour, as the app last read them. `None` when it has never read them, which is
+    /// not the same as zero.
     pub burn_units_per_hour: Option<f64>,
+    /// The numbers are the last known ones: a later reading failed.
+    pub stale: bool,
 }
 
 /// A plugin run the app knows about.

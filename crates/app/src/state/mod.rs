@@ -9,6 +9,7 @@ mod accounts;
 mod defaults;
 mod environment;
 mod feedback;
+mod mcp;
 mod ops;
 mod plugins;
 mod provision;
@@ -47,6 +48,7 @@ pub use environment::{
     install_methods,
 };
 pub use feedback::{ASK_AGAIN_AFTER, MOST_ASKS, PROJECT_PAGE, READY_BEFORE_ASKING, feedback_page};
+pub use mcp::Agents;
 pub use ops::{Op, key_of};
 pub use plugins::{HF_TOKEN, InstallPrompt, RemovePrompt, is_git_source};
 pub use provision::{LimitReached, NewSession, ProvisionPhase, ProvisionProgress};
@@ -137,6 +139,8 @@ pub struct AppState {
     source: BackendSource,
     backend: Result<Arc<dyn Backend>, Error>,
     pub(crate) ops: ops::Ops,
+    /// The local agent endpoint: what it is doing, and the snapshot it answers from.
+    agents: mcp::Agents,
     probe: Load<ProbeReport>,
     install: InstallState,
     accounts: Load<AccountsView>,
@@ -276,6 +280,7 @@ impl AppState {
                 source: options.source,
                 backend,
                 ops: ops::Ops::default(),
+                agents: mcp::Agents::default(),
                 probe: Load::Idle,
                 install: InstallState::default(),
                 accounts: Load::Idle,
@@ -313,6 +318,9 @@ impl AppState {
             state._poller = Some(usage::start_poller(cx));
             state.check_environment(cx);
             state.prepare_updates(cx);
+            // An endpoint the user switched on earlier comes back up with the app.
+            state.publish_snapshot();
+            state.sync_agents(cx);
             state
         });
         log::info!(
@@ -545,9 +553,81 @@ impl AppState {
         }
     }
 
+    /// The local agent endpoint: where it listens, the token an agent has to send, and why it is
+    /// not running when the settings ask it to be.
+    pub fn agents(&self) -> &Agents {
+        &self.agents
+    }
+
+    /// Hands the endpoint what it answers from, taken from the state the pages read. Called
+    /// wherever the state changes, so an agent and the window never disagree.
+    pub(crate) fn publish_snapshot(&mut self) {
+        let snapshot = mcp::snapshot_of(self);
+        self.agents.publish(snapshot);
+    }
+
+    /// Follows the settings: starts, stops or restarts the endpoint when what it asks for changed,
+    /// and does nothing when it already is what they ask for.
+    pub(crate) fn sync_agents(&mut self, cx: &mut Context<Self>) {
+        let wanted = self
+            .settings
+            .mcp_enabled
+            .then_some(self.settings.mcp_port.0);
+        if self.agents.matches(wanted) {
+            return;
+        }
+        let Some(port) = wanted else {
+            self.agents.sync(None);
+            self.publish_snapshot();
+            cx.notify();
+            return;
+        };
+        self.run_backend(
+            Op::Mcp,
+            cx,
+            |backend, cancel| backend.mcp_token(cancel),
+            move |state, result, cx| {
+                match result {
+                    Ok(token) => state.agents.sync(Some((port, token))),
+                    // Without a token there is no endpoint: an unauthenticated one would be a way
+                    // into this app for any program on the machine.
+                    Err(error) => state.agents.failed(error),
+                }
+                state.publish_snapshot();
+                cx.notify();
+            },
+        );
+    }
+
+    /// Replaces the endpoint's token and restarts it, so an agent that should no longer have the
+    /// old one stops working.
+    pub(crate) fn rotate_agents_token(&mut self, cx: &mut Context<Self>) {
+        self.run_backend(
+            Op::Mcp,
+            cx,
+            |backend, cancel| backend.rotate_mcp_token(cancel),
+            |state, result, cx| {
+                match result {
+                    Ok(token) if state.settings.mcp_enabled => {
+                        let port = state.settings.mcp_port.0;
+                        state.agents.sync(Some((port, token)));
+                    }
+                    Ok(_) => {}
+                    Err(error) => state.agents.failed(error),
+                }
+                state.publish_snapshot();
+                cx.notify();
+            },
+        );
+    }
+
     /// Writes the settings on the background executor. Saves run one after another, so the
     /// file always ends with the latest settings; a failure shows a toast.
     pub(crate) fn persist_settings(&mut self, cx: &mut Context<Self>) {
+        // The settings are part of what an agent reads, and switching the endpoint on or off is a
+        // settings change like any other: both follow from here.
+        self.publish_snapshot();
+        self.sync_agents(cx);
         let store = self.store.clone();
         let settings = self.settings.clone();
         let previous = self.save.take();

@@ -68,6 +68,8 @@ pub enum Op {
     RunTemplate,
     /// Reading, saving or deleting a stored secret.
     Secret,
+    /// The agent endpoint's token: asking for it, or replacing it.
+    Mcp,
     /// Listing a Hugging Face repo's files (keyed by repo).
     HfFiles(u64),
     /// Saving what a run produced on the VM (keyed by the path).
