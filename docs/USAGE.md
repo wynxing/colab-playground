@@ -165,3 +165,25 @@ another folder to keep experiments apart.
 
 Extending, forwarding and deploying need the runtime's account to be active; stopping works on
 any saved account.
+
+## Point an agent at the app
+
+An agent on this computer — Claude Code, an OpenBot agent, anything that speaks MCP — can read what
+the app knows about your Colab sessions. It is off by default.
+
+1. Settings → **Agents**: switch **Serve the agent endpoint** on.
+2. Press **Show** beside the token, then the copy button on **Agent configuration**.
+3. Paste that into the agent's MCP configuration. The address it needs is
+   `http://127.0.0.1:<port>/mcp`, and the token goes in an `Authorization: Bearer …` header.
+4. **Replace** makes a new token. An agent still holding the old one stops working, which is how a
+   machine you no longer want reading the app is cut off.
+
+What it can read: the runtimes and what each costs per hour, compute-unit balances, the plugin run
+the app is watching (its stage, the tail of its log, its workflow, and the files it produced), the
+installed plugins, the settings, the signed-in accounts and the open forwards. Nothing it can call
+starts, stops or extends a session, runs a plugin, or spends anything.
+
+The endpoint listens on this computer only, and it refuses a request whose `Origin` is not its own
+window, so a page in a browser cannot reach it. The token is the only way in: anyone who has it can
+read what is listed above, and it is stored in the operating system's keyring.
+

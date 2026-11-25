@@ -10,6 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-24-agent-mcp-endpoint-design.md`
 
+## Status
+
+Tasks 1–9 are landed on `feat/agent-mcp-endpoint`: the endpoint, the token and the settings, the
+executor and the endpoint's life, the Settings section and the interface tests. Of task 10, the
+roadmap entry and USAGE's "Point an agent at the app" are written; the run view's card line is not,
+so where a checkbox below disagrees, the code is what happened.
+
 ## Global Constraints
 
 - **Toolchain.** The workspace wants `rust-version = 1.98`; this machine's `stable` is 1.97, so every command below runs as `rustup run 1.99.0 cargo …`.
