@@ -244,6 +244,22 @@ impl AppState {
         cx.notify();
     }
 
+    /// Provisions without the form: an agent asked for a runtime, the window asked the user, and
+    /// what follows is the same progress the new-session dialog shows. The spec has been checked
+    /// already — a bad one is an answer to the agent, not a dialog for the user.
+    pub(crate) fn provision_for_agent(&mut self, spec: ProvisionSpec, cx: &mut Context<Self>) {
+        let name = spec.name.clone();
+        self.new_session = Some(NewSession {
+            suggested_name: name.clone(),
+            spec,
+            phase: ProvisionPhase::Editing,
+            progress: ProvisionProgress::default(),
+            scroll: ScrollHandle::new(),
+        });
+        self.overlay = Some(Overlay::NewSession);
+        self.start_provision(name, cx);
+    }
+
     /// Asks provisioning to stop; it releases any VM it allocated before returning.
     pub fn cancel_provision(&mut self, cx: &mut Context<Self>) {
         self.ops.cancel(Op::Provision);

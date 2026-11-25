@@ -15,20 +15,26 @@ use std::{
 };
 
 use colab_playground_core::{
-    Error,
+    Error, ErrorKind, Result,
     backend::BackendKind,
     mcp::{
         Config, Endpoint,
-        actions::Unavailable,
+        actions::Action,
         view::{
             Account, AppSettings, Forward, Node, Output, Plugin, Run, Session, Snapshot, Source,
             Usage, Workflow,
         },
     },
     plugins::PluginSource,
+    usage::published_rate,
 };
+use serde_json::{Value, json};
 
-use super::{AppState, Load, runs::RunPhase};
+use super::{
+    AppState, Load, ProvisionPhase,
+    agents::Bridge,
+    runs::{RunPhase, outputs_dir},
+};
 
 /// How many lines of a run's log a tool answers with. Enough to see what a build is doing, short
 /// enough that a tool result stays a result.
@@ -43,6 +49,9 @@ pub struct Agents {
     address: Option<SocketAddr>,
     /// The token the running endpoint demands, so rotating it restarts the endpoint.
     token: Option<String>,
+    /// The executor the running endpoint puts calls on, so stopping it can answer the calls still
+    /// waiting rather than leave them.
+    bridge: Option<Arc<Bridge>>,
     error: Option<Error>,
 }
 
@@ -66,7 +75,9 @@ impl Agents {
     /// Brings the endpoint in line with what the settings ask for: `Some((port, token))` to run,
     /// `None` to stop. Called with what is already true, it does nothing — which is why it is safe
     /// to call after every settings save.
-    pub fn sync(&mut self, wanted: Option<(u16, String)>) {
+    /// Answers the executor the window has to read, when the endpoint started. `None` means it did
+    /// not: either the settings ask for it to be off, or it could not start.
+    pub fn sync(&mut self, wanted: Option<(u16, String)>) -> Option<Arc<Bridge>> {
         let running_as_asked = match (&self.endpoint, &wanted) {
             (Some(endpoint), Some((port, token))) => {
                 endpoint.addr().port() == *port && self.token.as_deref() == Some(token.as_str())
@@ -75,21 +86,19 @@ impl Agents {
             _ => false,
         };
         if running_as_asked {
-            return;
+            return None;
         }
         self.stop();
-        let Some((port, token)) = wanted else {
-            return;
-        };
+        let (port, token) = wanted?;
+        // The app's own executor — the thing that carries an agent's call out through the same
+        // path a click takes — is the endpoint's other half. The window drains its queue on the
+        // foreground and answers there, which is what makes a tool result mean "it is done".
+        let bridge = Bridge::new();
         match Endpoint::start(
             Config {
                 token: token.clone(),
                 port,
-                // The app's own executor — the thing that carries an agent's call out through the
-                // same path a click takes — is not written yet: until it is, an agent can read
-                // everything and change nothing, and a call that would change something is
-                // refused rather than quietly dropped.
-                actions: Arc::new(Unavailable),
+                actions: bridge.clone(),
             },
             Arc::clone(&self.source) as Arc<dyn Source>,
         ) {
@@ -97,7 +106,9 @@ impl Agents {
                 self.address = Some(endpoint.addr());
                 self.token = Some(token);
                 self.endpoint = Some(endpoint);
+                self.bridge = Some(Arc::clone(&bridge));
                 self.error = None;
+                Some(bridge)
             }
             // The port is taken, or the listener could not start: the window says so instead of
             // the app refusing to run.
@@ -105,6 +116,7 @@ impl Agents {
                 self.address = None;
                 self.token = Some(token);
                 self.error = Some(error);
+                None
             }
         }
     }
@@ -137,6 +149,11 @@ impl Agents {
     fn stop(&mut self) {
         self.endpoint = None;
         self.address = None;
+        // A call still waiting on the window is answered as dismissed rather than left to the
+        // backstop: the endpoint it was made to is gone.
+        if let Some(bridge) = self.bridge.take() {
+            bridge.close();
+        }
     }
 }
 
@@ -185,7 +202,7 @@ fn notes_of(state: &AppState) -> Vec<String> {
 /// The runtimes a listing returned. Every one of them is live — that is what a listing is — so the
 /// state says so; the app's finer states (a stop in flight, one that ended while it watched) are
 /// not part of this snapshot yet.
-fn sessions_of(state: &AppState) -> Vec<Session> {
+pub(crate) fn sessions_of(state: &AppState) -> Vec<Session> {
     let Load::Ready(view) = &state.sessions.runtimes else {
         return Vec::new();
     };
@@ -224,11 +241,11 @@ fn usage_of(state: &AppState) -> Vec<Usage> {
 }
 
 /// The run the app is watching, if any.
-fn runs_of(state: &AppState) -> Vec<Run> {
+pub(crate) fn runs_of(state: &AppState) -> Vec<Run> {
     state.plugin_run.iter().map(run_of).collect()
 }
 
-fn run_of(run: &super::runs::PluginRun) -> Run {
+pub(crate) fn run_of(run: &super::runs::PluginRun) -> Run {
     let status = run.status.as_ref();
     Run {
         plugin: run.plugin.clone(),
@@ -347,7 +364,7 @@ fn collect_paths(value: &serde_json::Value, found: &mut Vec<Output>) {
     }
 }
 
-fn plugins_of(state: &AppState) -> Vec<Plugin> {
+pub(crate) fn plugins_of(state: &AppState) -> Vec<Plugin> {
     let Load::Ready(list) = &state.plugins.list else {
         return Vec::new();
     };
@@ -368,7 +385,7 @@ fn plugins_of(state: &AppState) -> Vec<Plugin> {
         .collect()
 }
 
-fn accounts_of(state: &AppState) -> Vec<Account> {
+pub(crate) fn accounts_of(state: &AppState) -> Vec<Account> {
     let Load::Ready(view) = &state.accounts else {
         return Vec::new();
     };
@@ -381,7 +398,7 @@ fn accounts_of(state: &AppState) -> Vec<Account> {
         .collect()
 }
 
-fn forwards_of(state: &AppState) -> Vec<Forward> {
+pub(crate) fn forwards_of(state: &AppState) -> Vec<Forward> {
     state
         .sessions
         .tunnels
@@ -394,7 +411,7 @@ fn forwards_of(state: &AppState) -> Vec<Forward> {
         .collect()
 }
 
-fn settings_of(state: &AppState) -> AppSettings {
+pub(crate) fn settings_of(state: &AppState) -> AppSettings {
     let defaults = &state.settings.defaults;
     AppSettings {
         language: state.settings.language.value().to_owned(),
@@ -411,6 +428,112 @@ fn settings_of(state: &AppState) -> AppSettings {
             Ok(BackendKind::Mock)
         ),
     }
+}
+
+/// What an agent is answered with once an action has landed: the state the window now shows, in
+/// the shape a read tool reads it. The rule is the snapshot's — nothing here is invented, and a
+/// part the app does not have (a runtime that went away between the call and its answer) is left
+/// out rather than guessed.
+pub(crate) fn answer_for_action(action: &Action, state: &AppState) -> Result<Value> {
+    Ok(match action {
+        Action::SessionStart { .. } => session_started(state),
+        Action::SessionStop { session } => json!({ "session": session, "stopped": true }),
+        Action::SessionExtend { session, minutes } => json!({
+            "session": session,
+            "minutes": minutes,
+            "auto_stop": if *minutes == 0 { "cancelled" } else { "scheduled" },
+        }),
+        Action::PluginRun { plugin, .. } => {
+            let run = state
+                .plugin_run()
+                .filter(|run| &run.plugin == plugin)
+                .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
+            json!({ "run": run_of(run) })
+        }
+        Action::RunDownload { plugin } => {
+            let dir = outputs_dir(plugin);
+            json!({
+                "plugin": plugin,
+                "directory": dir.to_string_lossy(),
+                "files": files_in(&dir),
+            })
+        }
+        Action::SettingsSet { .. } => json!({ "settings": settings_of(state) }),
+        Action::AccountsSwitch { .. } => json!({
+            "accounts": accounts_of(state),
+            "active": state
+                .accounts()
+                .ready()
+                .and_then(|view| view.active_email.clone()),
+        }),
+        Action::PluginEnable { plugin, enabled } => json!({
+            "plugin": plugin,
+            "enabled": enabled,
+            "plugins": plugins_of(state),
+        }),
+        Action::PluginInstall { .. } => json!({ "plugins": plugins_of(state) }),
+        Action::ForwardOpen {
+            session,
+            remote_port,
+            ..
+        } => {
+            let opened = forwards_of(state)
+                .into_iter()
+                .find(|forward| forward.session == *session && forward.remote_port == *remote_port);
+            match opened {
+                Some(forward) => json!(forward),
+                // It was asked for and is not there: the runtime went away, or the forward was
+                // closed again before this answer was built.
+                None => {
+                    return Err(Error::new(ErrorKind::PortInUse)
+                        .with("remote_port", remote_port)
+                        .detail("the forward is not open"));
+                }
+            }
+        }
+        Action::ForwardClose {
+            session,
+            local_port,
+        } => json!({ "session": session, "local_port": local_port, "closed": true }),
+    })
+}
+
+/// The runtime an agent's `session_start` left: what it is called, on what hardware, and what
+/// that hardware burns. The figure is the published one for the hardware, which is the same one
+/// the new-session form shows for a runtime that has not been measured yet.
+fn session_started(state: &AppState) -> Value {
+    let Some(session) = state.new_session() else {
+        return json!({ "session": Value::Null });
+    };
+    let accelerator = session.spec.accelerator;
+    let name = match &session.phase {
+        ProvisionPhase::Ready(outcome) => outcome.name.clone(),
+        _ => session.spec.name.clone(),
+    };
+    json!({
+        "session": name,
+        "hardware": format!("{accelerator:?}"),
+        "units_per_hour": published_rate(accelerator, session.spec.high_mem),
+        "auto_stop_minutes": session
+            .spec
+            .guard
+            .max_runtime
+            .map(|limit| limit.as_secs() / 60),
+    })
+}
+
+/// The files a download left, named as this computer has them.
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.path().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    files
 }
 
 #[cfg(test)]

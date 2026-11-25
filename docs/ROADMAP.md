@@ -9,22 +9,27 @@ ideas and the reasoning are not lost.
 
 ### An agent driving the app
 
-An agent on this computer can read what the app knows, through a local MCP endpoint it turns on in
-Settings → Agents: `sessions_list`, `session_usage`, `runs_list`, `run_status`, `run_outputs`,
-`plugin_list`, `settings_get`, `accounts_list` and `forwards_list` — the read-only half of what the
-window shows. It listens on `127.0.0.1` only, refuses a request that did not come from its own
-window, and wants the token that section shows. Pointing an agent at it: [USAGE.md](USAGE.md#point-an-agent-at-the-app).
+An agent on this computer can drive the app, through a local MCP endpoint it turns on in
+Settings → Agents. It reads what the window knows — `sessions_list`, `session_usage`, `runs_list`,
+`run_status`, `run_outputs`, `plugin_list`, `settings_get`, `accounts_list`, `forwards_list` — and
+it does the app's own jobs: `session_start`, `session_stop`, `session_extend`, `plugin_run`,
+`run_download`, `settings_set`, `accounts_switch`, `plugin_enable`, `plugin_install`,
+`forward_open` and `forward_close`. It listens on `127.0.0.1` only, refuses a request that did not
+come from its own window, and wants the token that section shows. Pointing an agent at it:
+[USAGE.md](USAGE.md#point-an-agent-at-the-app).
 
 The design, including what each later slice adds: [2026-11-24-agent-mcp-endpoint-design.md](superpowers/specs/2026-11-24-agent-mcp-endpoint-design.md).
 
-- **What it cannot do yet, and why that matters:** nothing it can call spends money or changes a
-  session. The tools that start a runtime, run a plugin or move an auto-stop need the confirmation
-  the interface already asks for, and that is the next slice
-  ([Product principle](DESIGN.md#product-principle-the-tie-breaker)).
-- **Watching a run:** today an agent asks `run_status` again; a call that answers when a run's stage
-  moves would be one request instead of many.
-- **Reattaching after a restart:** the same work
-  [Plugin runs](#plugin-runs) already records, so an agent can pick a run back up.
+A call takes the path a click takes — the same `Op`, the same busy state, the same result — and
+**the window gates what spends money**: starting, stopping, extending and running a plugin ask in
+the app's own dialog, the call waits for the answer, and a refusal is final
+([Product principle](DESIGN.md#product-principle-the-tie-breaker)).
+
+- **What is left (slice 3):** `run_watch`, a call that answers when a run's stage moves, over the
+  endpoint's `GET` stream, instead of an agent asking `run_status` again — and reattaching to a run
+  after the app restarts, the same work [Plugin runs](#plugin-runs) records.
+- **Not covered by a test:** a real third-party client driving a paid tool. The socket tests are
+  the app's own, and lighting up a real Colab runtime from a test would bill the owner.
 
 ### Keeping data that must survive the runtime
 

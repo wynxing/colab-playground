@@ -1100,7 +1100,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "智慧代理"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "讓這台電腦上的智慧代理驅動本應用程式：它可以讀取正在執行什麼、一次執行產出了什麼，以及各項設定。",
+        "讓這台電腦上的智慧代理驅動本應用程式：可以啟動與停止執行環境、執行外掛、讀取一次執行產出了什麼、修改各項設定。任何花錢的操作都會先在這裡問你。",
     ),
     (SETTINGS_AGENTS_TOGGLE, "提供智慧代理端點"),
     (
@@ -1126,4 +1126,18 @@ pub(super) const MESSAGES: Messages = &[
         SETTINGS_AGENTS_PORT_TAKEN,
         "連接埠 {port} 被別的程式佔用，所以端點沒有執行。",
     ),
+    (APPROVAL_TITLE, "有 agent 要求花錢的操作"),
+    (
+        APPROVAL_BODY,
+        "要求執行「{action}」，對象是 {target}。允許後就會開始計費。",
+    ),
+    (APPROVAL_CLIENT, "由 {client} 提出。"),
+    (APPROVAL_RATE, "執行期間大約消耗 {rate}。"),
+    (APPROVAL_ALLOW, "允許"),
+    (APPROVAL_REFUSE, "拒絕"),
+    (
+        APPROVAL_REFUSED,
+        "拒絕是最終答覆：agent 會被告知不行，也不會再問。",
+    ),
+    (APPROVAL_CLOSED, "一直沒有回答，已按拒絕告知 agent。"),
 ];

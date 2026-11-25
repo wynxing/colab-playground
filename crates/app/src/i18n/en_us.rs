@@ -1278,8 +1278,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "Agents"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "Let an agent on this computer drive the app: it can read what is running, what a run \
-         produced, and the settings.",
+        "Let an agent on this computer drive the app: start and stop runtimes, run plugins, read what a run produced, change the settings. Anything that spends money asks you here first.",
     ),
     (SETTINGS_AGENTS_TOGGLE, "Serve the agent endpoint"),
     (
@@ -1308,5 +1307,22 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_AGENTS_PORT_TAKEN,
         "Port {port} is taken by another program, so the endpoint is not running.",
+    ),
+    (APPROVAL_TITLE, "An agent asks to spend money"),
+    (
+        APPROVAL_BODY,
+        "“{action}” was asked for on {target}. Allowing it starts work that bills.",
+    ),
+    (APPROVAL_CLIENT, "Asked by {client}."),
+    (APPROVAL_RATE, "It burns about {rate} while it runs."),
+    (APPROVAL_ALLOW, "Allow"),
+    (APPROVAL_REFUSE, "Refuse"),
+    (
+        APPROVAL_REFUSED,
+        "Refusing is final: the agent is told no and does not ask again.",
+    ),
+    (
+        APPROVAL_CLOSED,
+        "No answer came in time, so the agent was told no.",
     ),
 ];

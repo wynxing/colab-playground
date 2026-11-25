@@ -1,6 +1,8 @@
 # A local MCP endpoint, so an agent can drive the app
 
-Status: **design, nothing built.** The plan and the implementation follow this document.
+Status: **slices 1 and 2 are built** — the endpoint with its read tools is on `main`, and the
+driving half (the write and paid tools, the approval dialog) is on `feat/agent-mcp-driving`.
+Slice 3 is not. The plans and the implementation follow this document.
 
 An agent can already drive ComfyUI through a session's port forward (the run view's
 "drive it with an agent" card points the official `comfy-mcp` at `localhost:8188`). It cannot

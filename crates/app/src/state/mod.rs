@@ -6,6 +6,7 @@
 //! with a `CancelToken`, and applies the result on the foreground.
 
 mod accounts;
+mod agents;
 mod defaults;
 mod environment;
 mod feedback;
@@ -20,7 +21,7 @@ mod tunnels;
 mod updates;
 mod usage;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use colab_playground_core::{
     Error, ErrorKind,
@@ -28,6 +29,7 @@ use colab_playground_core::{
     backend::Backend,
     backend::BackendKind as Flavor,
     backend::LoginFlow,
+    error::Denial,
     host::ProbeReport,
     updater::{Installed, SelfUpdate},
 };
@@ -42,6 +44,7 @@ use gpui::{App, AppContext, Context, Entity, FontFallbacks, Global, Task};
 pub use accounts::{
     AccountDialog, AccountRow, AddPhase, RemoveBlock, SignInStatus, account_row, sign_in_status,
 };
+pub use agents::{APPROVAL_WAIT, ApprovalPrompt};
 pub use defaults::{MIN_DURATION, sanitize};
 pub use environment::{
     Checklist, EnvironmentStep, InstallPhase, InstallState, Step, StepState, checklist,
@@ -141,6 +144,21 @@ pub struct AppState {
     pub(crate) ops: ops::Ops,
     /// The local agent endpoint: what it is doing, and the snapshot it answers from.
     agents: mcp::Agents,
+    /// The calls from agents that are waiting for a foreground answer, by the `Op` their work
+    /// started (see `agents`).
+    agent_calls: HashMap<Op, agents::Call>,
+    /// A paid call waiting for the user's word, with the number of the approval it belongs to.
+    agent_approval: Option<(u64, agents::Call)>,
+    /// How many paid calls have been put to the user, so a deadline an answer overtook does
+    /// nothing.
+    agent_approvals: u64,
+    agent_deadline: Option<Task<()>>,
+    /// The foreground task that takes an agent's calls off the endpoint's queue. Dropped with the
+    /// endpoint, which is what answers a call still waiting then as dismissed.
+    agent_drain: Option<Task<()>>,
+    /// A call that is between two `Op`s: a plugin's template before its run, a plugin's check
+    /// before its install.
+    agent_chain: Option<agents::Chain>,
     probe: Load<ProbeReport>,
     install: InstallState,
     accounts: Load<AccountsView>,
@@ -194,6 +212,8 @@ pub enum Overlay {
     Update(UpdatePrompt),
     /// Asking for a star or feedback (see `feedback`).
     Feedback,
+    /// An agent asked for something that spends money: allowed or refused here (see `agents`).
+    Approval(ApprovalPrompt),
 }
 
 /// A text the root view still has to put into a field it owns.
@@ -283,6 +303,12 @@ impl AppState {
                 backend,
                 ops: ops::Ops::default(),
                 agents: mcp::Agents::default(),
+                agent_calls: HashMap::new(),
+                agent_approval: None,
+                agent_approvals: 0,
+                agent_deadline: None,
+                agent_drain: None,
+                agent_chain: None,
                 probe: Load::Idle,
                 install: InstallState::default(),
                 accounts: Load::Idle,
@@ -371,6 +397,9 @@ impl AppState {
             Some(Overlay::NewSession) => self.close_new_session(cx),
             Some(Overlay::Update(_)) => self.close_update_dialog(cx),
             Some(Overlay::InstallPlugin(_)) => self.close_install_plugin(cx),
+            // Closing the question an agent's call is waiting on is a refusal: the agent is told
+            // so, and that answer is final.
+            Some(Overlay::Approval(_)) => self.refuse_agent_call(Denial::Dismissed, cx),
             Some(_) => {
                 self.overlay = None;
                 cx.notify();
@@ -606,7 +635,7 @@ impl AppState {
             return;
         }
         let Some(port) = wanted else {
-            self.agents.sync(None);
+            self.run_agents(None, cx);
             self.publish_snapshot();
             cx.notify();
             return;
@@ -617,7 +646,7 @@ impl AppState {
             |backend, cancel| backend.mcp_token(cancel),
             move |state, result, cx| {
                 match result {
-                    Ok(token) => state.agents.sync(Some((port, token))),
+                    Ok(token) => state.run_agents(Some((port, token)), cx),
                     // Without a token there is no endpoint: an unauthenticated one would be a way
                     // into this app for any program on the machine.
                     Err(error) => state.agents.failed(error),
@@ -626,6 +655,18 @@ impl AppState {
                 cx.notify();
             },
         );
+    }
+
+    /// Starts, restarts or stops the endpoint and puts the task that drains an agent's calls in
+    /// place beside it. Dropping that task is what answers a call still waiting as dismissed.
+    fn run_agents(&mut self, wanted: Option<(u16, String)>, cx: &mut Context<Self>) {
+        if let Some(bridge) = self.agents.sync(wanted) {
+            self.agent_drain = Some(agents::start_drain(bridge, cx));
+        } else if self.agents.address().is_none() {
+            // Nothing is listening, so nothing is left to read a call off: the drain goes with the
+            // endpoint it was reading for.
+            self.agent_drain = None;
+        }
     }
 
     /// Replaces the endpoint's token and restarts it, so an agent that should no longer have the
@@ -639,7 +680,7 @@ impl AppState {
                 match result {
                     Ok(token) if state.settings.mcp_enabled => {
                         let port = state.settings.mcp_port.0;
-                        state.agents.sync(Some((port, token)));
+                        state.run_agents(Some((port, token)), cx);
                     }
                     Ok(_) => {}
                     Err(error) => state.agents.failed(error),
