@@ -386,6 +386,38 @@ fn a_start_with_no_name_is_named_by_the_app(cx: &mut TestAppContext) {
         "the runtime the app started is the one it answered with: {answer}"
     );
 }
+/// A plugin that keeps a server running never finishes, so an answer held until it does would
+/// never come: the agent is answered at the first stage the plugin publishes, and the run carries
+/// on. Without this the client times out at 300s with the run working perfectly.
+#[gpui::test]
+fn a_run_is_answered_at_its_first_stage_and_keeps_running(cx: &mut TestAppContext) {
+    let mut app = with_agents(cx, MockScenario::demo());
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call(
+        "plugin_run",
+        json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
+    );
+    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
+    app.click(APPROVAL_ALLOW);
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.plugin_run().is_some_and(|run| run.status.is_some()))
+    });
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert!(
+        answer["run"]["stage"].is_string(),
+        "the answer names the stage the run reached: {answer}"
+    );
+    // The last stage of ComfyUI's run is `warmup`: an answer that only came when the run was over
+    // would name that one, and a client waiting for it would time out first.
+    assert_ne!(
+        answer["run"]["stage"], "warmup",
+        "the answer is the first stage the plugin published, not the last: {answer}"
+    );
+}
 
 #[gpui::test]
 fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {

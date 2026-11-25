@@ -508,18 +508,23 @@ impl AppState {
             return;
         };
         let mut became_ready = false;
+        let mut published_stage = false;
         match event {
             PluginRunEvent::Provision(event) => run.provision.push(event, at),
             PluginRunEvent::Launched { session, .. } => run.session = Some(session),
             PluginRunEvent::Status(status) => {
                 became_ready = status.state == RunState::Ready;
                 run.status = Some(status);
+                published_stage = true;
             }
             PluginRunEvent::Log { lines } => run.log.extend(lines),
             PluginRunEvent::LogSkipped { path } => {
                 run.log
                     .extend([tr_args(cx, keys::RUN_LOG_SKIPPED, &[("path", &path)]).into()])
             }
+        }
+        if published_stage {
+            self.answer_agent_run_stage(cx);
         }
         if became_ready {
             self.run_became_ready(cx);

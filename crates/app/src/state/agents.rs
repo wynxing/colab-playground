@@ -454,6 +454,26 @@ impl AppState {
         cx.notify();
     }
 
+    /// Answers an agent's waiting `plugin_run` at the first stage the plugin publishes. A plugin
+    /// that keeps a server running — ComfyUI does — never settles on its own, so an answer held
+    /// until the end would never come: the client times out while the run is working perfectly.
+    /// The tool's description promises a stage, and reading `run_status` is what it points to for
+    /// the rest.
+    pub(super) fn answer_agent_run_stage(&mut self, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .agent_calls
+            .get(&Op::PluginRun)
+            .map(|call| call.action.clone())
+        else {
+            return;
+        };
+        let answer = super::mcp::answer_for_action(&action, self);
+        if let Some(call) = self.agent_calls.remove(&Op::PluginRun) {
+            call.answer(answer);
+        }
+        cx.notify();
+    }
+
     /// The `Op` an action starts — the very one the button for it starts, so the busy state and
     /// the one-call-per-`Op` rule are the window's own. A target the app does not have is refused
     /// here, before anything is filed.
