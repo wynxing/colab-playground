@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use colab_playground_core::{CancelToken, Result, backend::Backend};
+use colab_playground_core::{CancelToken, Error, ErrorKind, Result, backend::Backend};
 use futures::future::{Either, select};
 use gpui::{AppContext, Context};
 
@@ -228,6 +228,10 @@ impl AppState {
             }
         };
         let Some(token) = self.ops.start(op) else {
+            // Nothing started — the `Op` was refused, or one for it is already in flight — and an
+            // agent's call waiting on it would wait forever: it is told, rather than left hanging
+            // until its client gives up.
+            self.settle_agent_call(op, Some(Error::new(ErrorKind::Busy).with("op", "busy")), cx);
             return;
         };
         log::debug!("ops: {op:?} started");
@@ -275,6 +279,10 @@ impl AppState {
             }
         };
         let Some(token) = self.ops.start(op) else {
+            // Nothing started — the `Op` was refused, or one for it is already in flight — and an
+            // agent's call waiting on it would wait forever: it is told, rather than left hanging
+            // until its client gives up.
+            self.settle_agent_call(op, Some(Error::new(ErrorKind::Busy).with("op", "busy")), cx);
             return;
         };
         log::debug!("ops: {op:?} started (streaming)");

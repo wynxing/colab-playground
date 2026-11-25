@@ -490,6 +490,9 @@ pub(crate) fn answer_for_action(action: &Action, state: &AppState) -> Result<Val
             let dir = outputs_dir(plugin);
             json!({
                 "plugin": plugin,
+                // Which directory on the runtime it copied from: the answer is only useful if it
+                // says what was looked at.
+                "from": keep_path(state, plugin).unwrap_or_default(),
                 "directory": dir.to_string_lossy(),
                 "files": files_in(&dir),
             })

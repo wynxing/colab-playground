@@ -21,7 +21,7 @@ use colab_playground::{
         },
     },
 };
-use colab_playground_core::mock::MockScenario;
+use colab_playground_core::mock::{MockFailures, MockScenario};
 use gpui::TestAppContext;
 use serde_json::{Value, json};
 
@@ -51,8 +51,18 @@ fn with_settings<'a>(cx: &'a mut TestAppContext, text: &str) -> TestApp<'a> {
 
 /// The endpoint on, and whatever `scenario` puts on the accounts and their runtimes.
 fn with_agents<'a>(cx: &'a mut TestAppContext, scenario: MockScenario) -> TestApp<'a> {
+    with_agents_and(cx, scenario, MockFailures::default())
+}
+
+/// The same, with the backend's failures switched on before the app starts.
+fn with_agents_and<'a>(
+    cx: &'a mut TestAppContext,
+    scenario: MockScenario,
+    failures: MockFailures,
+) -> TestApp<'a> {
     let options = Options {
         config: ConfigDir::TempWith(ON.to_owned()),
+        failures,
         ..Options::scenario(scenario)
     };
     open_settings(cx, options)
@@ -418,7 +428,6 @@ fn a_run_is_answered_at_its_first_stage_and_keeps_running(cx: &mut TestAppContex
         "the answer is the first stage the plugin published, not the last: {answer}"
     );
 }
-
 #[gpui::test]
 fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {
     let mut app = with_agents(cx, MockScenario::demo());

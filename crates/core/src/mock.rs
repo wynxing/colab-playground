@@ -55,6 +55,8 @@ pub struct MockFailures {
     /// `colab` is not installed (until `install_cli` succeeds).
     pub cli_missing: bool,
     pub install_fails: bool,
+    /// A runtime whose directory listing comes back empty, so a save has nothing to copy.
+    pub vm_listing_empty: bool,
     pub keyring_unavailable: bool,
     pub login: Option<MockLoginFailure>,
     /// Accelerators the accounts are not entitled to.
@@ -119,6 +121,7 @@ impl Default for MockFailures {
         MockFailures {
             cli_missing: false,
             install_fails: false,
+            vm_listing_empty: false,
             keyring_unavailable: false,
             login: None,
             not_entitled: vec![],
@@ -1589,6 +1592,9 @@ impl Backend for MockBackend {
     fn vm_ls(&self, _target: &RuntimeRef, path: &str, cancel: &CancelToken) -> Result<Vec<VmFile>> {
         self.ready()?;
         self.step(cancel)?;
+        if self.w().failures.vm_listing_empty {
+            return Ok(Vec::new());
+        }
         Ok(vec![
             VmFile {
                 path: format!("{path}/image.png"),
