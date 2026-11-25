@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.0](https://github.com/wynxing/colab-playground/compare/v0.5.1...v0.6.0) (2026-11-25)
+## [0.6.1](https://github.com/wynxing/colab-playground/compare/v0.5.1...v0.6.1) (2026-11-25)
 
 
 ### Added
@@ -17,6 +17,7 @@
 * **app:** answer an agent's plugin_run at a stage, not at the end of the run ([43efbb9](https://github.com/wynxing/colab-playground/commit/43efbb9755481906256e827abc0245342db68a73))
 * **app:** say where a save looked, and never leave a call unanswered ([279017e](https://github.com/wynxing/colab-playground/commit/279017ed933c086a1affa186557146932930ffa8))
 * **core:** hand the CLI a path it can write, so a download lands where it is asked ([14c5a21](https://github.com/wynxing/colab-playground/commit/14c5a21f7a9b25106dbffac084dc5dced71c6a65))
+* **core:** build on Linux, where the CLI's path is a string ([5a0eb02](https://github.com/wynxing/colab-playground/commit/5a0eb024c8339919629782ab78264553a4de5108))
 
 
 ## [0.5.1](https://github.com/wynxing/colab-playground/compare/v0.5.0...v0.5.1) (2026-11-24)
