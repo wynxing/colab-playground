@@ -1080,7 +1080,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "智能体"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "让这台电脑上的智能体驱动本应用：它可以读取正在运行什么、一次运行产出了什么，以及各项设置。",
+        "让这台电脑上的智能体驱动本应用：可以启动和停止运行环境、运行插件、读取一次运行产出了什么、修改各项设置。任何花钱的操作都会先在这里问你。",
     ),
     (SETTINGS_AGENTS_TOGGLE, "提供智能体端点"),
     (
@@ -1106,4 +1106,18 @@ pub(super) const MESSAGES: Messages = &[
         SETTINGS_AGENTS_PORT_TAKEN,
         "端口 {port} 被别的程序占用，所以端点没有运行。",
     ),
+    (APPROVAL_TITLE, "有 agent 请求花钱的操作"),
+    (
+        APPROVAL_BODY,
+        "请求执行“{action}”，对象是 {target}。允许后会开始计费。",
+    ),
+    (APPROVAL_CLIENT, "由 {client} 提出。"),
+    (APPROVAL_RATE, "运行期间大约消耗 {rate}。"),
+    (APPROVAL_ALLOW, "允许"),
+    (APPROVAL_REFUSE, "拒绝"),
+    (
+        APPROVAL_REFUSED,
+        "拒绝是最终答复：agent 会被告知不行，也不会再问。",
+    ),
+    (APPROVAL_CLOSED, "一直没有回答，已按拒绝告知 agent。"),
 ];

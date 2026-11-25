@@ -1392,7 +1392,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "エージェント"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "このパソコン上のエージェントにアプリを操作させます。何が動いているか、実行が何を出力したか、設定を読み取れます。",
+        "このパソコン上のエージェントにアプリを操作させます。ランタイムの起動と停止、プラグインの実行、実行が何を出力したかの読み取り、設定の変更ができます。お金がかかる操作は、まずここで確認します。",
     ),
     (
         SETTINGS_AGENTS_TOGGLE,
@@ -1423,5 +1423,22 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_AGENTS_PORT_TAKEN,
         "ポート {port} は別のプログラムが使用中のため、エンドポイントは動いていません。",
+    ),
+    (APPROVAL_TITLE, "エージェントが課金される操作を求めています"),
+    (
+        APPROVAL_BODY,
+        "「{action}」を {target} に対して実行しようとしています。許可すると課金が始まります。",
+    ),
+    (APPROVAL_CLIENT, "要求元: {client}"),
+    (APPROVAL_RATE, "実行中はおよそ {rate} を消費します。"),
+    (APPROVAL_ALLOW, "許可"),
+    (APPROVAL_REFUSE, "拒否"),
+    (
+        APPROVAL_REFUSED,
+        "拒否は最終回答です。エージェントには「不可」が伝わり、再び尋ねることはありません。",
+    ),
+    (
+        APPROVAL_CLOSED,
+        "時間内に回答がなかったため、「不可」として伝えました。",
     ),
 ];

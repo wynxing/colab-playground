@@ -113,7 +113,7 @@ pub const RUN_LOG_LINES_KEPT: usize = 2_000;
 
 /// Where the files a run produced are saved: a folder of the plugin's own in the
 /// user's downloads, or in the app's own directory when there is none.
-fn outputs_dir(plugin: &str) -> std::path::PathBuf {
+pub(crate) fn outputs_dir(plugin: &str) -> std::path::PathBuf {
     let base = dirs::download_dir()
         .or_else(colab_playground_core::paths::default_local_data_dir)
         .unwrap_or_else(|| std::path::PathBuf::from("."));

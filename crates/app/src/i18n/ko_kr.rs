@@ -1293,7 +1293,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "에이전트"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "이 컴퓨터의 에이전트가 앱을 다루게 합니다. 무엇이 실행 중인지, 실행이 무엇을 만들었는지, 설정을 읽을 수 있습니다.",
+        "이 컴퓨터의 에이전트가 앱을 다루게 합니다. 런타임 시작과 중지, 플러그인 실행, 실행이 무엇을 만들었는지 읽기, 설정 변경을 할 수 있습니다. 비용이 드는 작업은 먼저 여기에서 묻습니다.",
     ),
     (SETTINGS_AGENTS_TOGGLE, "에이전트 엔드포인트 제공"),
     (
@@ -1322,4 +1322,18 @@ pub(super) const MESSAGES: Messages = &[
         SETTINGS_AGENTS_PORT_TAKEN,
         "포트 {port} 을(를) 다른 프로그램이 쓰고 있어 엔드포인트가 실행되지 않습니다.",
     ),
+    (APPROVAL_TITLE, "에이전트가 비용이 드는 작업을 요청했습니다"),
+    (
+        APPROVAL_BODY,
+        "{target} 에 대해 \"{action}\" 을(를) 요청했습니다. 허용하면 과금이 시작됩니다.",
+    ),
+    (APPROVAL_CLIENT, "요청한 클라이언트: {client}"),
+    (APPROVAL_RATE, "실행하는 동안 약 {rate} 를 소모합니다."),
+    (APPROVAL_ALLOW, "허용"),
+    (APPROVAL_REFUSE, "거부"),
+    (
+        APPROVAL_REFUSED,
+        "거부는 최종 답변입니다. 에이전트는 거절을 듣고 다시 묻지 않습니다.",
+    ),
+    (APPROVAL_CLOSED, "제때 답이 없어 거절로 전달했습니다."),
 ];

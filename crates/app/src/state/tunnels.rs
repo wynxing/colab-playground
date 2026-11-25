@@ -11,6 +11,7 @@ use std::{
 
 use colab_playground_core::{
     Error,
+    accounts::AccountId,
     backend::RuntimeRef,
     tunnel::{TunnelEvent, TunnelId, TunnelInfo, TunnelSpec, TunnelState},
 };
@@ -136,7 +137,11 @@ impl AppState {
 
     /// Whether a forward to `spec`'s runtime and remote port is being opened.
     pub fn is_opening_forward(&self, spec: &TunnelSpec) -> bool {
-        self.ops.is_running(Op::Forward(forward_key(spec)))
+        self.ops.is_running(Op::Forward(forward_key(
+            &spec.account,
+            &spec.session,
+            spec.remote_port,
+        )))
     }
 
     /// Opens a forward. `from_dialog`: the forward dialog shows the outcome.
@@ -148,7 +153,7 @@ impl AppState {
     ) {
         let work_spec = spec.clone();
         self.run_backend(
-            Op::Forward(forward_key(&spec)),
+            Op::Forward(forward_key(&spec.account, &spec.session, spec.remote_port)),
             cx,
             move |backend, _| {
                 let (events, received) = std::sync::mpsc::channel();
@@ -281,8 +286,10 @@ impl AppState {
 }
 
 /// The key of the call that opens a forward to `spec`'s runtime and remote port.
-pub fn forward_key(spec: &TunnelSpec) -> u64 {
-    key_of(&(&spec.account, &spec.session, spec.remote_port))
+/// The key a forward's `Op` carries: one call per runtime and remote port, whatever local port it
+/// lands on — the port on this computer is picked rather than named when an agent asks for one.
+pub fn forward_key(account: &AccountId, session: &str, remote_port: u16) -> u64 {
+    key_of(&(account, session, remote_port))
 }
 
 struct Drained {

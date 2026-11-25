@@ -220,7 +220,10 @@ impl AppState {
             Ok(backend) => backend.clone(),
             Err(error) => {
                 let error = error.clone();
-                done(self, Err(error), cx);
+                done(self, Err(error.clone()), cx);
+                // An agent's call is answered rather than left waiting: without a backend there
+                // is no call coming that could settle it.
+                self.settle_agent_call(op, Some(error), cx);
                 return;
             }
         };
@@ -234,8 +237,12 @@ impl AppState {
                 .await;
             this.update(cx, |state, cx| {
                 state.ops.finish(op);
+                let failure = result.as_ref().err().cloned();
                 log::debug!("ops: {op:?} finished ({})", outcome(&result));
                 done(state, result, cx);
+                // An agent's call that was waiting for this one is answered with what it now
+                // sees — after `done`, so the answer is the state this call left.
+                state.settle_agent_call(op, failure, cx);
                 // What this call found may settle a quit prompt waiting on the check.
                 state.settle_waiting_quit(cx);
                 // An installed update restarts once no call it waits for is running.
@@ -262,7 +269,8 @@ impl AppState {
             Ok(backend) => backend.clone(),
             Err(error) => {
                 let error = error.clone();
-                done(self, Err(error), cx);
+                done(self, Err(error.clone()), cx);
+                self.settle_agent_call(op, Some(error), cx);
                 return;
             }
         };
@@ -296,8 +304,10 @@ impl AppState {
             drain(cx);
             this.update(cx, |state, cx| {
                 state.ops.finish(op);
+                let failure = result.as_ref().err().cloned();
                 log::debug!("ops: {op:?} finished ({})", outcome(&result));
                 done(state, result, cx);
+                state.settle_agent_call(op, failure, cx);
                 state.settle_pending_restart(cx);
                 cx.notify();
             })

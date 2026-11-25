@@ -709,6 +709,14 @@ catalog_keys! {
     SETTINGS_AGENTS_CONFIG_HINT => "app.b14.settings_agents_config_hint",
     SETTINGS_AGENTS_OFF => "app.b14.settings_agents_off",
     SETTINGS_AGENTS_PORT_TAKEN => "app.b14.settings_agents_port_taken",
+    APPROVAL_TITLE => "app.b15.approval_title",
+    APPROVAL_BODY => "app.b15.approval_body",
+    APPROVAL_CLIENT => "app.b15.approval_client",
+    APPROVAL_RATE => "app.b15.approval_rate",
+    APPROVAL_ALLOW => "app.b15.approval_allow",
+    APPROVAL_REFUSE => "app.b15.approval_refuse",
+    APPROVAL_REFUSED => "app.b15.approval_refused",
+    APPROVAL_CLOSED => "app.b15.approval_closed",
 }
 
 /// A message table: `(key, message)` pairs; `{name}` marks an argument.

@@ -273,12 +273,23 @@ impl AppState {
     /// the time still left inside the call, not from the listing here, which can be older than
     /// the last extension. A runtime without an auto-stop gets one that far from now.
     pub fn extend_session(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
-        if self.runtime(&target).is_none() {
-            return;
-        }
         let Some(by) = self.rearm_duration() else {
             return;
         };
+        self.extend_runtime(target, by, cx);
+    }
+
+    /// Adds `by` to `target`'s auto-stop — what the Extend button asks for with the app's own
+    /// duration, and what an agent asks for with the minutes it named.
+    pub(crate) fn extend_runtime(
+        &mut self,
+        target: RuntimeRef,
+        by: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if self.runtime(&target).is_none() {
+            return;
+        }
         let work_target = target.clone();
         self.run_backend(
             Op::Extend(key_of(&target)),

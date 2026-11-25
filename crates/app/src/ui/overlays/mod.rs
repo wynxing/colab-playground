@@ -3,6 +3,7 @@
 //! updating the app, and asking for a star or feedback. Every button carries a selector
 //! (`overlay-cancel` for the dismissing one).
 
+mod approval;
 mod feedback;
 mod forward;
 mod new_session;
@@ -22,6 +23,7 @@ use crate::{
     ui::{Inputs, metrics, tagged},
 };
 
+pub use approval::{APPROVAL_ALLOW, APPROVAL_REFUSE};
 pub use feedback::{FEEDBACK_GIVE, FEEDBACK_PROMPT, FEEDBACK_STAR};
 pub use forward::{FORWARD_BODY, FORWARD_SUBMIT, RESERVED_NOTE};
 pub use new_session::{
@@ -55,6 +57,7 @@ pub fn render(
         Overlay::Quit(prompt) => quit::render(prompt, state, handle, cx),
         Overlay::Update(prompt) => update::render(prompt, state, handle, cx),
         Overlay::Feedback => feedback::render(state, handle, cx),
+        Overlay::Approval(prompt) => approval::render(prompt, handle, cx),
     })
 }
 
