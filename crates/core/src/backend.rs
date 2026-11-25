@@ -416,6 +416,17 @@ pub trait Backend: Send + Sync {
     fn has_secret(&self, name: &str, cancel: &CancelToken) -> Result<bool>;
     fn delete_secret(&self, name: &str, cancel: &CancelToken) -> Result<()>;
 
+    // ---- the local agent endpoint
+    /// The token the agent endpoint requires, created on first use.
+    ///
+    /// This is the one secret the app reads back, and it has to be: a person copies it into an
+    /// agent, which cannot be done with a stored name alone. It is not a third party's
+    /// credential and it never leaves this machine.
+    fn mcp_token(&self, cancel: &CancelToken) -> Result<String>;
+    /// Replaces the token and answers the new one, so an agent that should no longer have it
+    /// stops working.
+    fn rotate_mcp_token(&self, cancel: &CancelToken) -> Result<String>;
+
     // ---- Hugging Face
     fn hf_search(&self, query: &str, limit: u32, cancel: &CancelToken) -> Result<Vec<HfModel>>;
     fn hf_files(&self, repo: &str, cancel: &CancelToken) -> Result<GgufListing>;

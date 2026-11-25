@@ -1043,6 +1043,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "自分のパソコンに comfy-mcp を入れ、このアドレスを COMFYUI_URL として渡せば、エージェントがこの転送経由で ComfyUI を操作できます。",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "このアプリ自体もエージェントから操作できます。「設定 → エージェント」でスイッチを入れれば、ここからセッションを開始して見守れます。",
+    ),
     (HF_SEARCH, "Hugging Face を検索"),
     (HF_SEARCH_PLACEHOLDER, "モデル名（例：qwen3）"),
     (HF_SEARCH_ACTION, "検索"),
@@ -1384,5 +1388,40 @@ pub(super) const MESSAGES: Messages = &[
     (
         PROV_RATE_PUBLISHED,
         "ほかのユーザーが公開した値です。アプリが測定すると置き換わります。",
+    ),
+    (SETTINGS_AGENTS_TITLE, "エージェント"),
+    (
+        SETTINGS_AGENTS_DESCRIPTION,
+        "このパソコン上のエージェントにアプリを操作させます。何が動いているか、実行が何を出力したか、設定を読み取れます。",
+    ),
+    (
+        SETTINGS_AGENTS_TOGGLE,
+        "エージェントのエンドポイントを提供する",
+    ),
+    (
+        SETTINGS_AGENTS_TOGGLE_HINT,
+        "このパソコン内（127.0.0.1）だけを待ち受け、下のトークンを要求します。ネットワークからは届きません。",
+    ),
+    (SETTINGS_AGENTS_ADDRESS_TITLE, "アドレス"),
+    (SETTINGS_AGENTS_TOKEN_TITLE, "トークン"),
+    (
+        SETTINGS_AGENTS_TOKEN_HINT,
+        "これをエージェントに渡します。置き換えると、古いトークンを持つエージェントは使えなくなります。",
+    ),
+    (SETTINGS_AGENTS_TOKEN_REVEAL, "表示"),
+    (SETTINGS_AGENTS_TOKEN_HIDE, "隠す"),
+    (SETTINGS_AGENTS_TOKEN_ROTATE, "置き換える"),
+    (SETTINGS_AGENTS_CONFIG_TITLE, "エージェントの設定"),
+    (
+        SETTINGS_AGENTS_CONFIG_HINT,
+        "エージェントの MCP 設定に貼り付けます。",
+    ),
+    (
+        SETTINGS_AGENTS_OFF,
+        "エンドポイントはオフで、何も待ち受けていません。",
+    ),
+    (
+        SETTINGS_AGENTS_PORT_TAKEN,
+        "ポート {port} は別のプログラムが使用中のため、エンドポイントは動いていません。",
     ),
 ];

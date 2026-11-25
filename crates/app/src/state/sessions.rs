@@ -189,6 +189,8 @@ impl AppState {
                 if std::mem::take(&mut state.sessions.relist) {
                     state.load_runtimes(cx);
                 }
+                // The listing just landed: what an agent reads about sessions is now current.
+                state.publish_snapshot();
                 state.listed_for_feedback(cx);
                 cx.notify();
             },

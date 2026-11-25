@@ -806,6 +806,10 @@ pub(super) const MESSAGES: Messages = &[
         ENDPOINT_MCP_NOTE,
         "在你自己的电脑上装上 comfy-mcp，把这个地址作为 COMFYUI_URL 交给它，你的 agent 就能通过这个转发驱动 ComfyUI。",
     ),
+    (
+        ENDPOINT_MCP_APP,
+        "这个 app 本身也能被 agent 驱动：在「设置 → 智能体」里打开开关，agent 就能从这里开会话、看运行。",
+    ),
     (HF_SEARCH, "搜索 Hugging Face"),
     (HF_SEARCH_PLACEHOLDER, "模型名称，例如 qwen3"),
     (HF_SEARCH_ACTION, "搜索"),
@@ -1072,5 +1076,34 @@ pub(super) const MESSAGES: Messages = &[
     (
         PROV_RATE_PUBLISHED,
         "其他用户公布的数值，本应用测得后会替换。",
+    ),
+    (SETTINGS_AGENTS_TITLE, "智能体"),
+    (
+        SETTINGS_AGENTS_DESCRIPTION,
+        "让这台电脑上的智能体驱动本应用：它可以读取正在运行什么、一次运行产出了什么，以及各项设置。",
+    ),
+    (SETTINGS_AGENTS_TOGGLE, "提供智能体端点"),
+    (
+        SETTINGS_AGENTS_TOGGLE_HINT,
+        "只在本机监听（127.0.0.1），并要求下面这个令牌，所以网络上的程序访问不到它。",
+    ),
+    (SETTINGS_AGENTS_ADDRESS_TITLE, "地址"),
+    (SETTINGS_AGENTS_TOKEN_TITLE, "令牌"),
+    (
+        SETTINGS_AGENTS_TOKEN_HINT,
+        "把这个交给智能体。替换它会让仍持有旧令牌的智能体失效。",
+    ),
+    (SETTINGS_AGENTS_TOKEN_REVEAL, "显示"),
+    (SETTINGS_AGENTS_TOKEN_HIDE, "隐藏"),
+    (SETTINGS_AGENTS_TOKEN_ROTATE, "替换"),
+    (SETTINGS_AGENTS_CONFIG_TITLE, "智能体配置"),
+    (
+        SETTINGS_AGENTS_CONFIG_HINT,
+        "把它粘贴到智能体的 MCP 配置里。",
+    ),
+    (SETTINGS_AGENTS_OFF, "端点已关闭，没有在监听。"),
+    (
+        SETTINGS_AGENTS_PORT_TAKEN,
+        "端口 {port} 被别的程序占用，所以端点没有运行。",
     ),
 ];

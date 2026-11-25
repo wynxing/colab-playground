@@ -7,6 +7,25 @@ ideas and the reasoning are not lost.
 
 ## Recorded for later
 
+### An agent driving the app
+
+An agent on this computer can read what the app knows, through a local MCP endpoint it turns on in
+Settings → Agents: `sessions_list`, `session_usage`, `runs_list`, `run_status`, `run_outputs`,
+`plugin_list`, `settings_get`, `accounts_list` and `forwards_list` — the read-only half of what the
+window shows. It listens on `127.0.0.1` only, refuses a request that did not come from its own
+window, and wants the token that section shows. Pointing an agent at it: [USAGE.md](USAGE.md#point-an-agent-at-the-app).
+
+The design, including what each later slice adds: [2026-11-24-agent-mcp-endpoint-design.md](superpowers/specs/2026-11-24-agent-mcp-endpoint-design.md).
+
+- **What it cannot do yet, and why that matters:** nothing it can call spends money or changes a
+  session. The tools that start a runtime, run a plugin or move an auto-stop need the confirmation
+  the interface already asks for, and that is the next slice
+  ([Product principle](DESIGN.md#product-principle-the-tie-breaker)).
+- **Watching a run:** today an agent asks `run_status` again; a call that answers when a run's stage
+  moves would be one request instead of many.
+- **Reattaching after a restart:** the same work
+  [Plugin runs](#plugin-runs) already records, so an agent can pick a run back up.
+
 ### Keeping data that must survive the runtime
 
 A stopped runtime is wiped, and the guards stop runtimes on their own. A session could carry a

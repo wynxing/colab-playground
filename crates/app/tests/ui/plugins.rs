@@ -15,8 +15,8 @@ use colab_playground::{
         pages::{
             overview::{INSTALL_SELECTOR, deploy_selector},
             plugins::{
-                ENDPOINT_SELECTOR, INSTALL_CHECK, RUN_START, RUN_STOP, hf_result_selector,
-                plugin_selector,
+                ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, INSTALL_CHECK, RUN_START, RUN_STOP,
+                hf_result_selector, plugin_selector,
             },
         },
     },
@@ -30,7 +30,7 @@ use colab_playground_core::{
 };
 use gpui::TestAppContext;
 
-use crate::support::{Options, TestApp};
+use crate::support::{ConfigDir, Options, TestApp};
 
 const REPO: &str = "unsloth/Qwen3-0.6B-GGUF";
 
@@ -124,12 +124,40 @@ fn a_comfyui_endpoint_shows_how_to_point_an_agent_at_it(cx: &mut TestAppContext)
         app.shown(&format!("endpoint-mcp {}", endpoint.id)),
         "the endpoint says how to drive it with an agent"
     );
+    assert!(
+        !app.shown(ENDPOINT_MCP_APP_SELECTOR),
+        "with the app's own endpoint off there is nothing to point at"
+    );
     app.reveal("run-save-/content/ComfyUI/output");
     assert!(
         app.shown("run-save-/content/ComfyUI/output"),
         "the files the run produced can be saved to this computer"
     );
 }
+
+/// The same card points at this app's own endpoint, and says so only while it is on.
+#[gpui::test]
+fn a_ready_run_points_at_the_apps_own_endpoint_only_while_it_is_on(cx: &mut TestAppContext) {
+    let options = Options {
+        config: ConfigDir::TempWith(ENDPOINT_ON.to_owned()),
+        ..Options::scenario(MockScenario::single())
+    };
+    let mut app = TestApp::with(cx, options);
+    assert!(app.read(|state, _| state.agents_enabled()));
+    app.click(Route::Plugins.nav_selector());
+    app.click("plugin-run comfyui");
+    app.click(RUN_START);
+    assert!(matches!(run_phase(&mut app), Some(RunPhase::Ready(_))));
+    app.reveal(ENDPOINT_MCP_APP_SELECTOR);
+    assert!(
+        app.shown(ENDPOINT_MCP_APP_SELECTOR),
+        "an endpoint that is on is worth pointing at beside the comfy-mcp instructions"
+    );
+}
+
+/// Settings that switch this app's endpoint on, on a port the system picks, so two runs of these
+/// tests cannot collide on a fixed one.
+const ENDPOINT_ON: &str = r#"{"mcp_enabled":true,"mcp_port":0}"#;
 
 /// The run's log as the app keeps it: how many lines, the oldest and the newest.
 fn log_ends(app: &mut TestApp<'_>) -> (usize, String, String) {

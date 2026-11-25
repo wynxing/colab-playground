@@ -363,6 +363,7 @@ catalog_keys! {
     ENDPOINT_CURL_KEY => "app.b2.endpoint_curl_key",
     ENDPOINT_MCP => "app.b2.endpoint_mcp",
     ENDPOINT_MCP_NOTE => "app.b2.endpoint_mcp_note",
+    ENDPOINT_MCP_APP => "app.b2.endpoint_mcp_app",
     ENDPOINT_FORWARD => "app.b2.endpoint_forward",
     ENDPOINT_HEALTHY => "app.b2.endpoint_healthy",
     ENDPOINT_NOT_FORWARDED => "app.b2.endpoint_not_forwarded",
@@ -694,6 +695,20 @@ catalog_keys! {
     SETTINGS_FEEDBACK_DESCRIPTION => "app.b12.settings_feedback_description",
     PROV_RATE_MEASURED => "app.b13.prov_rate_measured",
     PROV_RATE_PUBLISHED => "app.b13.prov_rate_published",
+    SETTINGS_AGENTS_TITLE => "app.b14.settings_agents_title",
+    SETTINGS_AGENTS_DESCRIPTION => "app.b14.settings_agents_description",
+    SETTINGS_AGENTS_TOGGLE => "app.b14.settings_agents_toggle",
+    SETTINGS_AGENTS_TOGGLE_HINT => "app.b14.settings_agents_toggle_hint",
+    SETTINGS_AGENTS_ADDRESS_TITLE => "app.b14.settings_agents_address_title",
+    SETTINGS_AGENTS_TOKEN_TITLE => "app.b14.settings_agents_token_title",
+    SETTINGS_AGENTS_TOKEN_HINT => "app.b14.settings_agents_token_hint",
+    SETTINGS_AGENTS_TOKEN_REVEAL => "app.b14.settings_agents_token_reveal",
+    SETTINGS_AGENTS_TOKEN_HIDE => "app.b14.settings_agents_token_hide",
+    SETTINGS_AGENTS_TOKEN_ROTATE => "app.b14.settings_agents_token_rotate",
+    SETTINGS_AGENTS_CONFIG_TITLE => "app.b14.settings_agents_config_title",
+    SETTINGS_AGENTS_CONFIG_HINT => "app.b14.settings_agents_config_hint",
+    SETTINGS_AGENTS_OFF => "app.b14.settings_agents_off",
+    SETTINGS_AGENTS_PORT_TAKEN => "app.b14.settings_agents_port_taken",
 }
 
 /// A message table: `(key, message)` pairs; `{name}` marks an argument.

@@ -159,6 +159,25 @@ pub struct Settings {
     /// again.
     #[serde(default, deserialize_with = "lenient")]
     pub feedback_answered: bool,
+    /// Whether the local agent endpoint answers at all. Off unless the user turns it on: it is a
+    /// way into this app from another program.
+    #[serde(default, deserialize_with = "lenient")]
+    pub mcp_enabled: bool,
+    /// The loopback port it listens on.
+    #[serde(default, deserialize_with = "lenient")]
+    pub mcp_port: McpPort,
+}
+
+/// The port the agent endpoint listens on unless the user changed it. A port of its own type so a
+/// file that does not mention it keeps the default, the way [`OnByDefault`] keeps a switch on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct McpPort(pub u16);
+
+impl Default for McpPort {
+    fn default() -> Self {
+        McpPort(8765)
+    }
 }
 
 /// A switch that is on unless the user turned it off.
@@ -394,7 +413,7 @@ mod tests {
     use std::fs;
 
     use super::{
-        AppearancePref, LanguagePref, LoadOutcome, SETTINGS_FILE, Settings, SettingsStore,
+        AppearancePref, LanguagePref, LoadOutcome, McpPort, SETTINGS_FILE, Settings, SettingsStore,
         config_dir,
     };
 
@@ -402,6 +421,23 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = SettingsStore::new(Some(dir.path().join("nested")));
         (dir, store)
+    }
+
+    #[test]
+    fn the_agent_endpoint_starts_off_on_its_own_port() {
+        let plain = Settings::from_json(r#"{"language":"zh-CN"}"#).expect("loads");
+        assert!(!plain.mcp_enabled, "off until the user asks for it");
+        assert_eq!(plain.mcp_port, McpPort(8765));
+        let asked = Settings::from_json(r#"{"mcp_enabled":true,"mcp_port":9000}"#).expect("loads");
+        assert!(asked.mcp_enabled);
+        assert_eq!(asked.mcp_port, McpPort(9000));
+        let broken =
+            Settings::from_json(r#"{"mcp_enabled":"yes","mcp_port":"nine"}"#).expect("loads");
+        assert!(
+            !broken.mcp_enabled,
+            "a value the field cannot hold resets that field only"
+        );
+        assert_eq!(broken.mcp_port, McpPort(8765));
     }
 
     #[test]
