@@ -129,7 +129,7 @@ pub fn host_path_for_local(local: &Path) -> Option<HostPath> {
     }
     #[cfg(not(windows))]
     {
-        Some(HostPath::new(text.into_owned()))
+        Some(HostPath::new(text))
     }
 }
 
