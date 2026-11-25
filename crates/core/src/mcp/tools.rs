@@ -382,6 +382,16 @@ pub fn all() -> &'static [Tool] {
             kind: Kind::Read(run_status),
         },
         Tool {
+            name: "run_watch",
+            description: "Waits until the run changes — a new stage, ready, failed, or the runtime \
+                          gone — and answers with the run as it is then. It answers anyway after \
+                          about two minutes with whatever it is still doing, so a long job is a \
+                          series of short calls rather than one call a client may abandon. Call it \
+                          again to keep watching. It changes nothing.",
+            input: plugin_schema,
+            kind: Kind::Write(run_watch),
+        },
+        Tool {
             name: "run_outputs",
             description: "What one plugin run published: the workflow's nodes and links, and the \
                           paths of the files it produced on the runtime. Read-only; run_download \
@@ -674,6 +684,13 @@ fn plugin_run(args: &Args) -> Result<Action> {
     })
 }
 
+fn run_watch(args: &Args) -> Result<Action> {
+    args.only(&["plugin"])?;
+    Ok(Action::RunWatch {
+        plugin: args.string("plugin")?.to_owned(),
+    })
+}
+
 fn run_download(args: &Args) -> Result<Action> {
     args.only(&["plugin"])?;
     Ok(Action::RunDownload {
@@ -806,7 +823,9 @@ mod tests {
     /// Arguments every tool accepts, so a rule can be checked over the whole table.
     fn arguments(name: &str) -> Option<Value> {
         Some(match name {
-            "run_status" | "run_outputs" | "run_download" => json!({ "plugin": "comfyui" }),
+            "run_status" | "run_outputs" | "run_download" | "run_watch" => {
+                json!({ "plugin": "comfyui" })
+            }
             "plugin_enable" => json!({ "plugin": "comfyui", "enabled": false }),
             "plugin_install" => json!({ "source": "/home/someone/plugins/comfyui" }),
             "plugin_run" => {
@@ -830,6 +849,9 @@ mod tests {
     /// What each write tool's arguments come to.
     fn expected(name: &str) -> Action {
         match name {
+            "run_watch" => Action::RunWatch {
+                plugin: "comfyui".to_owned(),
+            },
             "session_start" => Action::SessionStart {
                 name: Some("run-2".to_owned()),
                 hardware: Some("T4".to_owned()),
@@ -890,7 +912,7 @@ mod tests {
         assert_eq!(reads, 9, "the read tools of slice 1");
         assert_eq!(
             count - reads,
-            11,
+            12,
             "the tools that ask the app to do something"
         );
         for tool in all() {
@@ -910,7 +932,7 @@ mod tests {
     #[test]
     fn tools_list_reports_what_the_table_holds() {
         let listed = descriptors();
-        assert_eq!(listed["tools"].as_array().expect("tools").len(), 20);
+        assert_eq!(listed["tools"].as_array().expect("tools").len(), 21);
         let names: Vec<&str> = listed["tools"]
             .as_array()
             .expect("tools")

@@ -54,6 +54,20 @@ fn with_agents<'a>(cx: &'a mut TestAppContext, scenario: MockScenario) -> TestAp
     with_agents_and(cx, scenario, MockFailures::default())
 }
 
+/// The same, on a port of its own: a port the system picks is resolved again while the app runs and
+/// the endpoint is bound again, which is fine for the app but awkward for a test that holds a
+/// connection across a run starting.
+fn with_agents_on<'a>(
+    cx: &'a mut TestAppContext,
+    scenario: MockScenario,
+    port: u16,
+) -> TestApp<'a> {
+    let options = Options {
+        config: ConfigDir::TempWith(format!("{{\"mcp_enabled\":true,\"mcp_port\":{port}}}")),
+        ..Options::scenario(scenario)
+    };
+    open_settings(cx, options)
+}
 /// The same, with the backend's failures switched on before the app starts.
 fn with_agents_and<'a>(
     cx: &'a mut TestAppContext,
@@ -401,7 +415,7 @@ fn a_start_with_no_name_is_named_by_the_app(cx: &mut TestAppContext) {
 /// on. Without this the client times out at 300s with the run working perfectly.
 #[gpui::test]
 fn a_run_is_answered_at_its_first_stage_and_keeps_running(cx: &mut TestAppContext) {
-    let mut app = with_agents(cx, MockScenario::demo());
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8799);
     let (address, token) = endpoint(&mut app);
 
     let mut agent = Agent::connect(address, &token);
@@ -427,6 +441,91 @@ fn a_run_is_answered_at_its_first_stage_and_keeps_running(cx: &mut TestAppContex
         answer["run"]["stage"], "warmup",
         "the answer is the first stage the plugin published, not the last: {answer}"
     );
+}
+/// A watch with nothing to report answers anyway: the wait is always inside a client's own
+/// timeout, which is the whole point of it.
+#[gpui::test]
+fn a_watch_answers_with_the_run_as_it_stands_when_nothing_happens(cx: &mut TestAppContext) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8800);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call(
+        "plugin_run",
+        json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
+    );
+    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
+    app.click(APPROVAL_ALLOW);
+    let _ = agent.result();
+
+    agent.call("run_watch", json!({ "plugin": "comfyui" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching())
+    });
+    app.advance(Duration::from_secs(121));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching())
+    });
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["changed"], "none", "{answer}");
+    assert!(answer["run"]["stage"].is_string(), "{answer}");
+}
+
+/// One watch at a time: a second client asking while the first waits is told so, and the first
+/// keeps waiting.
+#[gpui::test]
+fn a_second_watch_is_told_to_wait_its_turn(cx: &mut TestAppContext) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8803);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call(
+        "plugin_run",
+        json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
+    );
+    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
+    app.click(APPROVAL_ALLOW);
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.plugin_run().is_some())
+    });
+    let _ = agent.result();
+
+    let mut first = Agent::connect(address, &token);
+    first.call("run_watch", json!({ "plugin": "comfyui" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching())
+    });
+
+    let mut second = Agent::connect(address, &token);
+    second.call("run_watch", json!({ "plugin": "comfyui" }));
+    settle_a_while(&mut app);
+
+    let (is_error, answer) = second.result();
+    assert!(is_error, "{answer}");
+    assert_eq!(answer["kind"], "denied");
+    assert_eq!(answer["params"]["reason"], "busy");
+    assert!(
+        app.read(|state, _| state.agent_is_watching()),
+        "the first watch is still waiting"
+    );
+}
+/// A watch on a plugin that is not running is answered rather than waited on.
+#[gpui::test]
+fn a_watch_on_a_plugin_with_no_run_is_answered(cx: &mut TestAppContext) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8802);
+    let (address, token) = endpoint(&mut app);
+    settle_a_while(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call("run_watch", json!({ "plugin": "llama-cpp" }));
+    // The window takes a call off the endpoint's queue on its own tick, which a test drives.
+    settle_a_while(&mut app);
+
+    let (is_error, answer) = agent.result();
+    assert!(is_error, "nothing is running it: {answer}");
+    assert_eq!(answer["kind"], "plugin_not_found");
 }
 #[gpui::test]
 fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {
