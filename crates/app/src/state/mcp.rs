@@ -223,6 +223,17 @@ pub(crate) fn sessions_of(state: &AppState) -> Vec<Session> {
         .collect()
 }
 
+/// What the runtime the app last listed says it burns per hour, if the runtime is in that list.
+fn live_rate(state: &AppState, name: &str) -> Option<f64> {
+    let Load::Ready(view) = &state.sessions.runtimes else {
+        return None;
+    };
+    view.runtimes
+        .iter()
+        .find(|runtime| runtime.id.name.as_deref() == Some(name))
+        .and_then(|runtime| runtime.estimated_rate_cu_per_hour)
+}
+
 /// Each account's balance and burn rate as the app last read them. An account the app has never
 /// read is an account with no numbers, never an account burning zero.
 fn usage_of(state: &AppState) -> Vec<Usage> {
@@ -535,10 +546,14 @@ fn session_started(state: &AppState) -> Value {
         ProvisionPhase::Ready(outcome) => outcome.name.clone(),
         _ => session.spec.name.clone(),
     };
+    // The rate the runtime itself reports once the app has listed it — the same number
+    // `sessions_list` answers with — and the published table's rate only before that.
+    let rate = live_rate(state, &name)
+        .unwrap_or_else(|| published_rate(accelerator, session.spec.high_mem));
     json!({
         "session": name,
         "hardware": format!("{accelerator:?}"),
-        "units_per_hour": published_rate(accelerator, session.spec.high_mem),
+        "units_per_hour": rate,
         "auto_stop_minutes": session
             .spec
             .guard
