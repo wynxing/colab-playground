@@ -664,6 +664,15 @@ impl AppState {
             cx,
             move |backend, cancel| {
                 let files = backend.vm_ls(&target, &path, cancel)?;
+                if files.is_empty() {
+                    // Say where it looked. "Nothing to save" and "I looked in the wrong place" are
+                    // the same answer otherwise — which is how a save copies nothing and still
+                    // reads like it worked.
+                    return Err(Error::new(ErrorKind::Io)
+                        .with("path", &path)
+                        .with("session", target.name.clone().unwrap_or_default())
+                        .detail("the runtime has no files there"));
+                }
                 let dir = outputs_dir(&plugin);
                 std::fs::create_dir_all(&dir)?;
                 for file in &files {
