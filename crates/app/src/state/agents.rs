@@ -26,7 +26,7 @@ use std::{
 use colab_playground_core::{
     Error, ErrorKind, Result,
     accounts::AccountId,
-    backend::{PluginRunSpec, RunTarget, RuntimeRef},
+    backend::{PluginRunSpec, RunTarget, RuntimeRef, accelerator_prefix},
     error::Denial,
     mcp::actions::{Action, Actions},
     plugins::{InputKind, InputValue, PluginInfo, PluginPreview},
@@ -188,6 +188,12 @@ pub(super) enum Chain {
     Install {
         call: Call,
     },
+    /// `session_start` with no name: the app names the session first, the way its own form does,
+    /// and provisions second.
+    Start {
+        spec: ProvisionSpec,
+        call: Call,
+    },
 }
 
 impl AppState {
@@ -342,6 +348,18 @@ impl AppState {
                 self.run_plugin_for_agent(call, plugin, session, inputs, cx);
                 return;
             }
+            // A session the agent did not name is named by the app, the way its own new-session
+            // form names one: that is a call of its own before any provisioning starts, so it
+            // cannot be the single `Op` the rest of this method files.
+            Action::SessionStart {
+                name: None,
+                hardware,
+                auto_stop_minutes,
+            } => {
+                let (hardware, minutes) = (hardware.clone(), *auto_stop_minutes);
+                self.start_session_for_agent(call, hardware, minutes, cx);
+                return;
+            }
             _ => {}
         }
         let op = match self.agent_op(&action) {
@@ -372,6 +390,66 @@ impl AppState {
             call.answer(Err(Error::new(ErrorKind::Busy)
                 .with("action", name)
                 .detail(format!("{name} did not start"))));
+        }
+        cx.notify();
+    }
+
+    /// `session_start` with no name: the app asks the backend for a name the way its own form
+    /// does, then provisions with it. Two stages, so the call is carried across them and answered
+    /// once the runtime is there.
+    fn start_session_for_agent(
+        &mut self,
+        call: Call,
+        hardware: Option<String>,
+        auto_stop_minutes: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let spec = match self.provision_spec_for_agent(&None, &hardware, auto_stop_minutes) {
+            Ok(spec) => spec,
+            Err(error) => {
+                call.answer(Err(error));
+                return;
+            }
+        };
+        if self.ops.is_running(Op::Provision) || self.ops.is_running(Op::SessionName) {
+            call.answer(Err(Error::denied("session_start", Denial::Busy)));
+            return;
+        }
+        let prefix = accelerator_prefix(spec.accelerator);
+        self.agent_chain = Some(Chain::Start { spec, call });
+        self.run_backend(
+            Op::SessionName,
+            cx,
+            move |backend, _| Ok(backend.new_session_name(Some(&prefix))),
+            |state, result, cx| state.provision_named_for_agent(result, cx),
+        );
+    }
+
+    /// The naming call came back: check the spec and provision, with the agent's call filed so
+    /// that its answer is what the window shows once the runtime is there.
+    fn provision_named_for_agent(&mut self, result: Result<String>, cx: &mut Context<Self>) {
+        let Some(Chain::Start { mut spec, call }) = self.agent_chain.take() else {
+            return;
+        };
+        match result {
+            Ok(name) => spec.name = name,
+            Err(error) => {
+                call.answer(Err(error));
+                return;
+            }
+        }
+        if let Err(error) = spec.validate() {
+            call.answer(Err(error));
+            return;
+        }
+        self.agent_calls.insert(Op::Provision, call);
+        self.provision_for_agent(spec, cx);
+        if !self.ops.is_running(Op::Provision)
+            && let Some(call) = self.agent_calls.remove(&Op::Provision)
+        {
+            call.answer(Err(Error::new(ErrorKind::Busy)
+                .with("action", "session_start")
+                .detail("session_start did not start")));
         }
         cx.notify();
     }
@@ -843,18 +921,18 @@ impl AppState {
 
     /// The directory on the runtime a run's files are read from: the folder the run published.
     fn download_path(&self, plugin: &str) -> Result<String> {
-        let run = self
-            .plugin_run()
+        self.plugin_run()
             .filter(|run| run.plugin == plugin)
             .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
-        run.status
-            .as_ref()
-            .and_then(|status| first_output_dir(&status.outputs))
-            .ok_or_else(|| {
-                Error::new(ErrorKind::SessionGone)
-                    .with("plugin", plugin)
-                    .detail("the run published no files to save")
-            })
+        // The path the plugin's own manifest declares as worth keeping — the one the run page's
+        // save button copies — not the run's published outputs: what a plugin publishes there is
+        // written for people to read (a ComfyUI run publishes its preset, its checkpoint, the GPU
+        // and view URLs), so it is not a list of files.
+        super::mcp::keep_path(self, plugin).ok_or_else(|| {
+            Error::new(ErrorKind::SessionGone)
+                .with("plugin", plugin)
+                .detail("the plugin declares no files to save")
+        })
     }
 
     /// The provisioning spec an agent's `session_start` asks for: the app's own defaults for
@@ -942,21 +1020,6 @@ fn free_local_port() -> u16 {
         .unwrap_or(start)
 }
 
-/// The directory a run's files live in, from the paths it published: one folder holds what a run
-/// produced, and reading that folder is how the window's own "save" rows get their files.
-fn first_output_dir(outputs: &Map<String, Value>) -> Option<String> {
-    fn path(value: &Value) -> Option<&str> {
-        match value {
-            Value::String(text) if text.starts_with('/') => Some(text),
-            Value::Object(map) => map.values().find_map(path),
-            Value::Array(items) => items.iter().find_map(path),
-            _ => None,
-        }
-    }
-    let file = outputs.values().find_map(path)?;
-    file.rsplit_once('/').map(|(dir, _)| dir.to_owned())
-}
-
 /// The plugin's inputs as the agent gave them, read as the manifest's declared kind says, so a
 /// number stays a number and a switch a switch.
 fn inputs_for_agent(
@@ -1004,7 +1067,7 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{Bridge, accelerator_named, auto_stop_minutes, first_output_dir, forward_key};
+    use super::{Bridge, accelerator_named, auto_stop_minutes, forward_key};
 
     /// An executor with no window behind it: a call is refused at once rather than waiting out the
     /// backstop for an answer that cannot come.
@@ -1109,16 +1172,6 @@ mod tests {
         assert_eq!(auto_stop_minutes(&json!(null)).unwrap(), None);
         assert_eq!(auto_stop_minutes(&json!(0)).unwrap(), None);
         assert!(auto_stop_minutes(&json!("soon")).is_err());
-    }
-
-    #[test]
-    fn a_runs_files_are_read_from_the_folder_it_published_them_in() {
-        let outputs = json!({ "image": "/content/ComfyUI/output/image.png" });
-        assert_eq!(
-            first_output_dir(outputs.as_object().expect("an object")).as_deref(),
-            Some("/content/ComfyUI/output")
-        );
-        assert_eq!(first_output_dir(&serde_json::Map::new()), None);
     }
 
     /// The key ignores the local port, so the `Op` an agent names and the `Op` the dialog opens

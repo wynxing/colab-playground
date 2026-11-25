@@ -346,7 +346,7 @@ fn outputs_of(outputs: &serde_json::Map<String, serde_json::Value>) -> Vec<Outpu
 
 fn collect_paths(value: &serde_json::Value, found: &mut Vec<Output>) {
     match value {
-        serde_json::Value::String(path) if path.starts_with('/') => found.push(Output {
+        serde_json::Value::String(path) if is_file_path(path) => found.push(Output {
             name: path.rsplit('/').next().unwrap_or(path).to_owned(),
             path: path.clone(),
         }),
@@ -362,6 +362,31 @@ fn collect_paths(value: &serde_json::Value, found: &mut Vec<Output>) {
         }
         _ => {}
     }
+}
+
+/// Whether a string a run published names a file on the runtime: an absolute path whose last
+/// segment looks like a file name. What a plugin publishes is written for people to read, so it
+/// also carries directories, view URLs and plain labels, and calling those produced files sends an
+/// agent after something that is not there.
+fn is_file_path(path: &str) -> bool {
+    !path.contains('?')
+        && path.starts_with('/')
+        && path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.contains('.'))
+}
+
+/// The first path a plugin's own manifest declares as worth keeping — what the run page's save
+/// button copies to this computer.
+pub(crate) fn keep_path(state: &AppState, plugin: &str) -> Option<String> {
+    let Load::Ready(list) = &state.plugins.list else {
+        return None;
+    };
+    list.iter()
+        .find(|info| info.manifest.id == plugin)
+        .and_then(|info| info.manifest.keep.first())
+        .map(|keep| keep.path.clone())
 }
 
 pub(crate) fn plugins_of(state: &AppState) -> Vec<Plugin> {

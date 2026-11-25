@@ -9,7 +9,7 @@
 //! use saved (vault) credentials — usage, listing and releasing runtimes of any
 //! account — need no lock.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -451,6 +451,8 @@ struct Inner {
     login_active: AtomicBool,
     /// Keeps WSL up between commands, so its keyring stays unlocked (see [`HostKeepalive`]).
     keepalive: HostKeepalive,
+    /// Accounts whose host-side state directory this run has already made sure of.
+    state_dirs: Mutex<HashSet<AccountId>>,
 }
 
 #[derive(Clone)]
@@ -505,6 +507,7 @@ impl RealBackend {
                 state: Mutex::new(state),
                 tunnels: TunnelManager::new(),
                 login_active: AtomicBool::new(false),
+                state_dirs: Mutex::new(HashSet::new()),
             }),
         })
     }
@@ -620,7 +623,35 @@ impl Inner {
             }
         }
         let state = self.layout(cancel)?.account_state(account);
+        self.ensure_state_dir(account, &state, cancel)?;
         Ok((guard, self.cli()?, state))
+    }
+
+    /// The `colab` CLI keeps its state file inside the account's directory but never makes that
+    /// directory: where it is missing — a machine that has never run the CLI, which therefore has
+    /// no default state to copy either — every command fails on a missing lock file. One check per
+    /// account is enough for a run.
+    fn ensure_state_dir(
+        &self,
+        account: &AccountId,
+        state: &HostPath,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        {
+            let mut seen = self.state_dirs.lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.insert(account.clone()) {
+                return Ok(());
+            }
+        }
+        let made =
+            HostFs::new(&self.cfg.host, &self.cfg.base_env).create_dir(&state.parent(), cancel);
+        if made.is_err() {
+            self.state_dirs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(account);
+        }
+        made
     }
 
     fn active_cli(&self, cancel: &CancelToken) -> Result<(ReadGuard, Cli, HostPath, AccountId)> {
