@@ -12,7 +12,7 @@ use ely_gpui_component::{
     typography::{Caption, MiddleEllipsis},
 };
 use gpui::{
-    App, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, App, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div,
 };
 
@@ -34,6 +34,16 @@ pub const APPEARANCE_SELECTOR: &str = "settings-appearance";
 pub const FILE_SELECTOR: &str = "settings-file";
 pub const FILE_PATH_SELECTOR: &str = "settings-file-path";
 pub const OPEN_FOLDER_SELECTOR: &str = "settings-file-open";
+/// The agent endpoint's own selectors. The token has one for each state, so a test can tell
+/// "hidden" from "shown" without the token itself ever being in a selector.
+pub const AGENTS_TOGGLE_SELECTOR: &str = "settings-agents-toggle";
+pub const AGENTS_ADDRESS_SELECTOR: &str = "settings-agents-address";
+pub const AGENTS_TOKEN_SELECTOR: &str = "settings-agents-token";
+pub const AGENTS_TOKEN_HIDDEN_SELECTOR: &str = "settings-agents-token-hidden";
+pub const AGENTS_TOKEN_SHOWN_SELECTOR: &str = "settings-agents-token-shown";
+pub const AGENTS_TOKEN_REVEAL_SELECTOR: &str = "settings-agents-token-reveal";
+pub const AGENTS_TOKEN_ROTATE_SELECTOR: &str = "settings-agents-token-rotate";
+pub const AGENTS_CONFIG_SELECTOR: &str = "settings-agents-config";
 
 /// The label of a language choice in the shown language.
 pub fn language_label(pref: LanguagePref, state: &AppState, cx: &App) -> SharedString {
@@ -126,6 +136,7 @@ fn about(state: &AppState, handle: &Entity<AppState>, cx: &App) -> impl IntoElem
         .row(feedback_row(cx))
         .row(updates_row(state, handle, cx))
         .row(auto_check_row(state, handle, cx))
+        .child(agents_section(state, handle, cx))
         .row(
             SettingsRow::new(tr(cx, keys::SETTINGS_BACKEND_TITLE))
                 .description(tr(cx, keys::SETTINGS_BACKEND_DESCRIPTION))
@@ -296,6 +307,138 @@ fn auto_check_row(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Sett
                     toggle.update(cx, |state, cx| state.set_check_updates(on, cx))
                 }),
         ))
+}
+
+/// The local agent endpoint: what an agent on this computer may read through it, where it answers
+/// and the token it has to bring. Off unless the user turns it on, and the address and token are
+/// only shown while there is something to connect to.
+fn agents_section(state: &AppState, handle: &Entity<AppState>, cx: &App) -> SettingsSection {
+    let theme = cx.theme();
+    let agents = state.agents();
+    let shown = state.agents_revealed();
+    let (toggle, reveal, rotate) = (handle.clone(), handle.clone(), handle.clone());
+
+    let mut section = SettingsSection::new(tr(cx, keys::SETTINGS_AGENTS_TITLE))
+        .description(tr(cx, keys::SETTINGS_AGENTS_DESCRIPTION))
+        .row(
+            SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_TOGGLE))
+                .description(tr(cx, keys::SETTINGS_AGENTS_TOGGLE_HINT))
+                .control(tagged(
+                    AGENTS_TOGGLE_SELECTOR,
+                    Switch::new(AGENTS_TOGGLE_SELECTOR, state.agents_enabled())
+                        .name(tr(cx, keys::SETTINGS_AGENTS_TOGGLE))
+                        .on_change(move |on, _, cx| {
+                            toggle.update(cx, |state, cx| state.set_agents_enabled(on, cx))
+                        }),
+                )),
+        );
+
+    // Where it answers — or why it is not answering, which the user has to be able to see: a port
+    // another copy of the app holds is the usual reason.
+    section =
+        match (agents.address(), agents.error()) {
+            (Some(address), _) => section.row(
+                SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_ADDRESS_TITLE)).control(tagged(
+                    AGENTS_ADDRESS_SELECTOR,
+                    div()
+                        .font_family(theme.mono_family.clone())
+                        .child(format!("http://{address}/mcp")),
+                )),
+            ),
+            (None, Some(error)) => {
+                let port = error.param("port").unwrap_or_default().to_owned();
+                section.row(
+                    SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_ADDRESS_TITLE)).description(
+                        tr_args(cx, keys::SETTINGS_AGENTS_PORT_TAKEN, &[("port", &port)]),
+                    ),
+                )
+            }
+            (None, None) => section.row(
+                SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_ADDRESS_TITLE))
+                    .description(tr(cx, keys::SETTINGS_AGENTS_OFF)),
+            ),
+        };
+
+    let token: AnyElement = match (agents.token(), shown) {
+        (Some(token), true) => tagged(AGENTS_TOKEN_SHOWN_SELECTOR, div().child(token.to_owned()))
+            .font_family(theme.mono_family.clone())
+            .into_any_element(),
+        (Some(_), false) => {
+            tagged(AGENTS_TOKEN_HIDDEN_SELECTOR, div().child("••••••••")).into_any_element()
+        }
+        (None, _) => Caption::new(tr(cx, keys::SETTINGS_AGENTS_OFF)).into_any_element(),
+    };
+    let token_controls = div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(token)
+        .child(tagged(
+            AGENTS_TOKEN_REVEAL_SELECTOR,
+            Button::new(
+                "settings-agents-reveal",
+                tr(
+                    cx,
+                    if shown {
+                        keys::SETTINGS_AGENTS_TOKEN_HIDE
+                    } else {
+                        keys::SETTINGS_AGENTS_TOKEN_REVEAL
+                    },
+                ),
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| reveal.update(cx, |state, cx| state.toggle_agents_token(cx))),
+        ))
+        .child(tagged(
+            AGENTS_TOKEN_ROTATE_SELECTOR,
+            Button::new(
+                "settings-agents-rotate",
+                tr(cx, keys::SETTINGS_AGENTS_TOKEN_ROTATE),
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| rotate.update(cx, |state, cx| state.rotate_agents_token(cx))),
+        ));
+    section = section.row(
+        SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_TOKEN_TITLE))
+            .description(tr(cx, keys::SETTINGS_AGENTS_TOKEN_HINT))
+            .control(tagged(AGENTS_TOKEN_SELECTOR, token_controls)),
+    );
+
+    // What a client needs, ready to paste: the same address and token that are on screen.
+    if let (Some(address), Some(token)) = (agents.address(), agents.token()) {
+        let config = serde_json::json!({
+            "mcpServers": {
+                "colab-playground": {
+                    "type": "http",
+                    "url": format!("http://{address}/mcp"),
+                    "headers": { "Authorization": format!("Bearer {token}") },
+                }
+            }
+        })
+        .to_string();
+        section = section.row(
+            SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_CONFIG_TITLE))
+                .description(tr(cx, keys::SETTINGS_AGENTS_CONFIG_HINT))
+                .control(tagged(
+                    AGENTS_CONFIG_SELECTOR,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .max_w(theme.container_width(ContainerSize::Sm))
+                        .child(div().min_w_0().child(MiddleEllipsis::new(config.clone())))
+                        .child(
+                            div()
+                                .flex_none()
+                                .child(CopyButton::new("settings-agents-config-copy", config)),
+                        ),
+                )),
+        );
+    }
+
+    section
 }
 
 pub const PROJECT_LINK_SELECTOR: &str = "about-project";

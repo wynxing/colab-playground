@@ -1271,4 +1271,38 @@ pub(super) const MESSAGES: Messages = &[
         PROV_RATE_PUBLISHED,
         "A figure other users published. The app's own measurement replaces it.",
     ),
+    (SETTINGS_AGENTS_TITLE, "Agents"),
+    (
+        SETTINGS_AGENTS_DESCRIPTION,
+        "Let an agent on this computer drive the app: it can read what is running, what a run \
+         produced, and the settings.",
+    ),
+    (SETTINGS_AGENTS_TOGGLE, "Serve the agent endpoint"),
+    (
+        SETTINGS_AGENTS_TOGGLE_HINT,
+        "Listens on this computer only (127.0.0.1) and wants the token below, so nothing reaches \
+         it from the network.",
+    ),
+    (SETTINGS_AGENTS_ADDRESS_TITLE, "Address"),
+    (SETTINGS_AGENTS_TOKEN_TITLE, "Token"),
+    (
+        SETTINGS_AGENTS_TOKEN_HINT,
+        "Give this to the agent. Replacing it stops an agent that still has the old one.",
+    ),
+    (SETTINGS_AGENTS_TOKEN_REVEAL, "Show"),
+    (SETTINGS_AGENTS_TOKEN_HIDE, "Hide"),
+    (SETTINGS_AGENTS_TOKEN_ROTATE, "Replace"),
+    (SETTINGS_AGENTS_CONFIG_TITLE, "Agent configuration"),
+    (
+        SETTINGS_AGENTS_CONFIG_HINT,
+        "Paste this into the agent's MCP configuration.",
+    ),
+    (
+        SETTINGS_AGENTS_OFF,
+        "The endpoint is off, so nothing is listening.",
+    ),
+    (
+        SETTINGS_AGENTS_PORT_TAKEN,
+        "Port {port} is taken by another program, so the endpoint is not running.",
+    ),
 ];

@@ -164,6 +164,8 @@ pub struct AppState {
     /// (`feedback`).
     feedback_waits_for_listing: bool,
     settings_focus: bool,
+    /// Whether the agent endpoint's token is on screen. The section's reveal button flips it.
+    agents_revealed: bool,
     update: updates::UpdateCheck,
     /// Whether this copy can replace itself (`None` until the backend has said).
     self_update: Option<SelfUpdate>,
@@ -302,6 +304,7 @@ impl AppState {
                 stop_all_pending: false,
                 feedback_waits_for_listing: false,
                 settings_focus: false,
+                agents_revealed: false,
                 update: updates::UpdateCheck::default(),
                 self_update: None,
                 installed: None,
@@ -557,6 +560,32 @@ impl AppState {
     /// not running when the settings ask it to be.
     pub fn agents(&self) -> &Agents {
         &self.agents
+    }
+
+    /// Whether the endpoint is switched on in the settings.
+    pub fn agents_enabled(&self) -> bool {
+        self.settings.mcp_enabled
+    }
+
+    /// Whether the endpoint's token is on screen. Kept in the state so the section re-renders with
+    /// it, and hidden again whenever the endpoint is switched off.
+    pub fn agents_revealed(&self) -> bool {
+        self.agents_revealed
+    }
+
+    pub(crate) fn toggle_agents_token(&mut self, cx: &mut Context<Self>) {
+        self.agents_revealed = !self.agents_revealed;
+        cx.notify();
+    }
+
+    /// Switches the endpoint on or off and saves it: [`Self::persist_settings`] is what starts or
+    /// stops it, so the endpoint follows the file rather than this call.
+    pub(crate) fn set_agents_enabled(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.mcp_enabled = on;
+        // A token that just went away should not stay on screen.
+        self.agents_revealed = false;
+        self.persist_settings(cx);
+        cx.notify();
     }
 
     /// Hands the endpoint what it answers from, taken from the state the pages read. Called

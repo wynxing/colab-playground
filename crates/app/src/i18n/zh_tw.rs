@@ -1093,4 +1093,33 @@ pub(super) const MESSAGES: Messages = &[
         PROV_RATE_PUBLISHED,
         "其他使用者公布的數值，本應用程式測得後會取代。",
     ),
+    (SETTINGS_AGENTS_TITLE, "智慧代理"),
+    (
+        SETTINGS_AGENTS_DESCRIPTION,
+        "讓這台電腦上的智慧代理驅動本應用程式：它可以讀取正在執行什麼、一次執行產出了什麼，以及各項設定。",
+    ),
+    (SETTINGS_AGENTS_TOGGLE, "提供智慧代理端點"),
+    (
+        SETTINGS_AGENTS_TOGGLE_HINT,
+        "只在本機監聽（127.0.0.1），並要求下面這組權杖，所以網路上的程式存取不到它。",
+    ),
+    (SETTINGS_AGENTS_ADDRESS_TITLE, "位址"),
+    (SETTINGS_AGENTS_TOKEN_TITLE, "權杖"),
+    (
+        SETTINGS_AGENTS_TOKEN_HINT,
+        "把這個交給智慧代理。替換它會讓仍持有舊權杖的智慧代理失效。",
+    ),
+    (SETTINGS_AGENTS_TOKEN_REVEAL, "顯示"),
+    (SETTINGS_AGENTS_TOKEN_HIDE, "隱藏"),
+    (SETTINGS_AGENTS_TOKEN_ROTATE, "替換"),
+    (SETTINGS_AGENTS_CONFIG_TITLE, "智慧代理設定"),
+    (
+        SETTINGS_AGENTS_CONFIG_HINT,
+        "把它貼到智慧代理的 MCP 設定裡。",
+    ),
+    (SETTINGS_AGENTS_OFF, "端點已關閉，沒有在監聽。"),
+    (
+        SETTINGS_AGENTS_PORT_TAKEN,
+        "連接埠 {port} 被別的程式佔用，所以端點沒有執行。",
+    ),
 ];

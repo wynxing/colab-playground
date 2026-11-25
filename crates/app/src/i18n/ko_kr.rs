@@ -1286,4 +1286,36 @@ pub(super) const MESSAGES: Messages = &[
         PROV_RATE_PUBLISHED,
         "다른 사용자가 공개한 값입니다. 앱이 측정하면 그 값으로 바뀝니다.",
     ),
+    (SETTINGS_AGENTS_TITLE, "에이전트"),
+    (
+        SETTINGS_AGENTS_DESCRIPTION,
+        "이 컴퓨터의 에이전트가 앱을 다루게 합니다. 무엇이 실행 중인지, 실행이 무엇을 만들었는지, 설정을 읽을 수 있습니다.",
+    ),
+    (SETTINGS_AGENTS_TOGGLE, "에이전트 엔드포인트 제공"),
+    (
+        SETTINGS_AGENTS_TOGGLE_HINT,
+        "이 컴퓨터 안(127.0.0.1)에서만 대기하고 아래 토큰을 요구합니다. 네트워크에서는 닿지 않습니다.",
+    ),
+    (SETTINGS_AGENTS_ADDRESS_TITLE, "주소"),
+    (SETTINGS_AGENTS_TOKEN_TITLE, "토큰"),
+    (
+        SETTINGS_AGENTS_TOKEN_HINT,
+        "이 값을 에이전트에 넘깁니다. 교체하면 예전 토큰을 가진 에이전트는 동작하지 않습니다.",
+    ),
+    (SETTINGS_AGENTS_TOKEN_REVEAL, "표시"),
+    (SETTINGS_AGENTS_TOKEN_HIDE, "숨기기"),
+    (SETTINGS_AGENTS_TOKEN_ROTATE, "교체"),
+    (SETTINGS_AGENTS_CONFIG_TITLE, "에이전트 설정"),
+    (
+        SETTINGS_AGENTS_CONFIG_HINT,
+        "에이전트의 MCP 설정에 붙여 넣습니다.",
+    ),
+    (
+        SETTINGS_AGENTS_OFF,
+        "엔드포인트가 꺼져 있어 아무것도 대기하지 않습니다.",
+    ),
+    (
+        SETTINGS_AGENTS_PORT_TAKEN,
+        "포트 {port} 을(를) 다른 프로그램이 쓰고 있어 엔드포인트가 실행되지 않습니다.",
+    ),
 ];
