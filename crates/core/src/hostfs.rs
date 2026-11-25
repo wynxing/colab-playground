@@ -31,6 +31,8 @@ cat > "$t" && mv -f -- "$t" "$1""#;
 
 const REMOVE: &str = r#"rm -f -- "$1""#;
 
+const MAKE_DIR: &str = r#"mkdir -p -- "$1""#;
+
 impl<'a> HostFs<'a> {
     pub fn new(host: &'a Host, env: &'a [(String, String)]) -> Self {
         HostFs { host, env }
@@ -85,6 +87,18 @@ impl<'a> HostFs<'a> {
         let out = self
             .host
             .run_quiet(self.req(REMOVE).arg(path.as_str()), cancel)?;
+        if out.success() {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::Io).detail(tail(&out.stderr, 300)))
+        }
+    }
+
+    /// Makes a directory and its parents; one that is already there is not an error.
+    pub fn create_dir(&self, path: &HostPath, cancel: &CancelToken) -> Result<()> {
+        let out = self
+            .host
+            .run_quiet(self.req(MAKE_DIR).arg(path.as_str()), cancel)?;
         if out.success() {
             Ok(())
         } else {

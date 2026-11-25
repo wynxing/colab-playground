@@ -358,6 +358,34 @@ fn a_paid_call_parks_the_window_and_runs_when_the_user_allows_it(cx: &mut TestAp
     // The runtime is gone from the window too: the call took the path a click takes.
     assert!(!runtime_names(&mut app).contains(&"t4-91c2".to_owned()));
 }
+/// A `session_start` that names no session is the ordinary case — the tool's own description
+/// says the app's defaults are used — so the app has to name it the way its own new-session form
+/// does, instead of handing the backend an empty name that it refuses.
+#[gpui::test]
+fn a_start_with_no_name_is_named_by_the_app(cx: &mut TestAppContext) {
+    // One account, no runtime: what starts here is the app's own doing.
+    let mut app = with_agents(cx, MockScenario::single());
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call("session_start", json!({ "hardware": "T4" }));
+    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
+    app.click(APPROVAL_ALLOW);
+    settle_until(&mut app, |app| !runtime_names(app).is_empty());
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    let name = answer["session"]
+        .as_str()
+        .expect("a session name")
+        .to_owned();
+    assert!(name.starts_with("t4-"), "named for its hardware: {answer}");
+    assert_eq!(
+        runtime_names(&mut app),
+        vec![name],
+        "the runtime the app started is the one it answered with: {answer}"
+    );
+}
 
 #[gpui::test]
 fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {
