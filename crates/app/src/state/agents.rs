@@ -43,7 +43,12 @@ use super::{AppState, Op, Overlay, PluginView, RunForm, ops::key_of, tunnels::fo
 /// How long the endpoint holds an agent's HTTP response while it waits for the window. A backstop,
 /// not the app's own wait: the approval's two minutes and the work itself are where a call really
 /// ends. Reaching this means the window is gone, and saying so beats hanging the client.
-const CALL_WAIT: Duration = Duration::from_secs(600);
+///
+/// An hour, because a call that reports finished work can be waiting on something long: a runtime
+/// that is slow to come up, a checkpoint, a render. A client's own timeout is usually shorter, so a
+/// long piece of work is better handed back as a handle and watched (see `run_watch`) than waited
+/// on in one call.
+const CALL_WAIT: Duration = Duration::from_secs(3_600);
 
 /// How long a paid call waits for the user's word before it lapses, as the specification says.
 pub const APPROVAL_WAIT: Duration = Duration::from_secs(120);
@@ -69,6 +74,15 @@ impl Call {
     /// Answers the agent. The endpoint's thread is waiting for exactly one of these; dropping the
     /// call instead is what a window that went away does.
     pub fn answer(self, answer: Result<Value>) {
+        // The line that closes a call: what was asked for, by whom, and whether it happened.
+        match &answer {
+            Ok(_) => log::info!("agent: {} answered for {}", self.action.name(), self.client),
+            Err(error) => log::warn!(
+                "agent: {} refused for {}: {error}",
+                self.action.name(),
+                self.client
+            ),
+        }
         let _ = self.reply.send(answer);
     }
 }
@@ -201,6 +215,11 @@ impl AppState {
     /// anything else: there is no work to allow and none to wait for. A paid call asks the user
     /// first; everything else starts now.
     pub(crate) fn begin_agent_call(&mut self, call: Call, cx: &mut Context<Self>) {
+        log::info!(
+            "agent: {} asked for by {}",
+            call.action.name(),
+            call.client()
+        );
         if let Err(error) = self.resolvable_op(&call.action) {
             call.answer(Err(error));
             return;
@@ -249,6 +268,12 @@ impl AppState {
             units_per_hour: self.rate_for(&call.action),
             error: None,
         };
+        log::info!(
+            "agent: asking about {} on {} for {}",
+            prompt.action,
+            prompt.target,
+            prompt.client
+        );
         self.agent_approvals += 1;
         let asked = self.agent_approvals;
         self.agent_approval = Some((asked, call));
@@ -300,6 +325,7 @@ impl AppState {
         if matches!(self.overlay, Some(Overlay::Approval(_))) {
             self.overlay = None;
         }
+        log::info!("agent: {} allowed", call.action.name());
         self.run_agent_call(call, cx);
     }
 
@@ -307,6 +333,7 @@ impl AppState {
     pub(crate) fn refuse_agent_call(&mut self, reason: Denial, cx: &mut Context<Self>) {
         if let Some(call) = self.take_agent_approval() {
             let name = call.action.name();
+            log::warn!("agent: {name} refused ({reason:?})");
             call.answer(Err(Error::denied(name, reason)));
         }
         if matches!(self.overlay, Some(Overlay::Approval(_))) {

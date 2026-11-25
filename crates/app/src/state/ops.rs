@@ -234,7 +234,7 @@ impl AppState {
             self.settle_agent_call(op, Some(Error::new(ErrorKind::Busy).with("op", "busy")), cx);
             return;
         };
-        log::debug!("ops: {op:?} started");
+        log::info!("ops: {op:?} started");
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { work(&*backend, &token) })
@@ -242,7 +242,10 @@ impl AppState {
             this.update(cx, |state, cx| {
                 state.ops.finish(op);
                 let failure = result.as_ref().err().cloned();
-                log::debug!("ops: {op:?} finished ({})", outcome(&result));
+                log::info!("ops: {op:?} finished ({})", outcome(&result));
+                if let Some(error) = &failure {
+                    log::warn!("ops: {op:?} failed: {error}");
+                }
                 done(state, result, cx);
                 // An agent's call that was waiting for this one is answered with what it now
                 // sees — after `done`, so the answer is the state this call left.
@@ -313,7 +316,10 @@ impl AppState {
             this.update(cx, |state, cx| {
                 state.ops.finish(op);
                 let failure = result.as_ref().err().cloned();
-                log::debug!("ops: {op:?} finished ({})", outcome(&result));
+                log::info!("ops: {op:?} finished ({})", outcome(&result));
+                if let Some(error) = &failure {
+                    log::warn!("ops: {op:?} failed: {error}");
+                }
                 done(state, result, cx);
                 state.settle_agent_call(op, failure, cx);
                 state.settle_pending_restart(cx);
