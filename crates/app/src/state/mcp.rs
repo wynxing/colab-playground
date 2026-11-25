@@ -17,7 +17,6 @@ use std::{
 use colab_playground_core::{
     Error,
     backend::BackendKind,
-    error::Result,
     mcp::{
         Config, Endpoint,
         view::{
