@@ -139,6 +139,27 @@ pub fn default_local_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("colab-playground"))
 }
 
+/// The directory the app's own log goes in (`<local data dir>/colab-playground/logs`). Local, not
+/// roaming: a log is about this machine.
+pub fn default_log_dir() -> Option<PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("colab-playground").join("logs"))
+}
+
+/// How large a log file may grow before it is set aside at the start of the next run.
+pub const LOG_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Sets a log aside when it has grown past `limit`, keeping the one before it as `<name>.1.log`.
+/// Nothing here is fatal: a log that cannot be rotated is no reason not to start.
+pub fn rotate_log(path: &Path, limit: u64) -> std::io::Result<Option<PathBuf>> {
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.len() >= limit) {
+        return Ok(None);
+    }
+    let aside = path.with_extension("1.log");
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(path, &aside)?;
+    Ok(Some(aside))
+}
+
 /// Writes `bytes` to `path` atomically (temporary file + rename), creating
 /// parent directories. Files are owner-only on unix.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -192,6 +213,30 @@ mod tests {
             );
         }
     }
+    /// A log that has grown is set aside, and the one before it is kept — an install that runs for
+    /// months cannot fill the disk.
+    #[test]
+    fn a_log_is_set_aside_once_it_has_grown() {
+        let dir = std::env::temp_dir().join(format!("cpg-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a directory to log in");
+        let path = dir.join("colab-playground.log");
+        std::fs::write(&path, b"small").expect("a log");
+        assert_eq!(
+            rotate_log(&path, 1024).expect("a look"),
+            None,
+            "a small log stays"
+        );
+        std::fs::write(&path, vec![b'x'; 2048]).expect("a big log");
+        let aside = rotate_log(&path, 1024).expect("a look").expect("set aside");
+        assert!(!path.exists(), "the log starts again");
+        assert_eq!(std::fs::read(&aside).expect("the old log")[0], b'x');
+        std::fs::write(&path, vec![b'y'; 2048]).expect("another big log");
+        let again = rotate_log(&path, 1024).expect("a look").expect("set aside");
+        assert_eq!(again, aside, "there is one kept log, not a shelf of them");
+        assert_eq!(std::fs::read(&aside).expect("the newest old log")[0], b'y');
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn host_paths_join_with_slashes() {
         let h = HostPath::new("/home/u/.local/share/colab-playground");

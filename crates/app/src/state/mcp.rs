@@ -566,7 +566,7 @@ fn session_started(state: &AppState) -> Value {
 }
 
 /// The files a download left, named as this computer has them.
-fn files_in(dir: &std::path::Path) -> Vec<String> {
+pub(crate) fn files_in(dir: &std::path::Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };

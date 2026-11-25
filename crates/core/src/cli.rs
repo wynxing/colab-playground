@@ -225,6 +225,35 @@ pub fn parse_usage(stdout: &str) -> Result<Usage> {
     }
 }
 
+/// A command as a log line: what it is and what it is about, and never a value that could be a
+/// secret — an environment entry's value is where tokens travel.
+fn describe(cmd: &CliCommand) -> String {
+    match cmd {
+        CliCommand::Sessions => "sessions".to_owned(),
+        CliCommand::Usage => "usage".to_owned(),
+        CliCommand::New { .. } => "new".to_owned(),
+        CliCommand::Version => "version".to_owned(),
+        CliCommand::Whoami => "whoami".to_owned(),
+        CliCommand::Stop { name } => format!("stop -s {name}"),
+        CliCommand::Download { name, remote, .. } => format!("download -s {name} {remote} <here>"),
+        CliCommand::Exec {
+            name,
+            env,
+            timeout_secs,
+        } => {
+            let keys: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
+            format!(
+                "exec -s {name} --timeout {timeout_secs} (env {})",
+                if keys.is_empty() {
+                    "none".to_owned()
+                } else {
+                    keys.join(",")
+                }
+            )
+        }
+    }
+}
+
 /// Extracts the JSON value printed after [`RESULT_MARKER`] (last one wins).
 pub fn find_result(stdout: &str) -> Option<serde_json::Value> {
     stdout
@@ -344,6 +373,10 @@ impl Cli {
         cancel: &CancelToken,
         on_line: &mut dyn FnMut(&Line),
     ) -> Result<ScriptOutput> {
+        // Two lines around every command, because a command that started and never finished is how
+        // a stuck run is told apart from a slow one.
+        let described = describe(cmd);
+        log::info!("cli: {described} (timeout {timeout:?})");
         let mut req = self.request(state, cmd)?;
         req.stdin = stdin;
         req.timeout = timeout;
@@ -359,6 +392,13 @@ impl Cli {
                 LineAction::Continue
             }
         })?;
+        log::info!(
+            "cli: {described} -> {}",
+            match out.code {
+                Some(code) => format!("exit {code}"),
+                None => "no exit code".to_owned(),
+            }
+        );
         if out.killed {
             let mut e = classify_failure(&out);
             if !matches!(e.kind, ErrorKind::KeyringUnavailable) {

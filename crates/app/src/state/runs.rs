@@ -659,6 +659,8 @@ impl AppState {
             .map(|run| run.plugin.clone())
             .unwrap_or_default();
         let path = path.to_owned();
+        // The work closure moves the plugin's name, and the answer's log line wants it too.
+        let named = plugin.clone();
         self.run_backend(
             Op::DownloadOutputs(key_of(&path)),
             cx,
@@ -690,12 +692,17 @@ impl AppState {
                 }
                 Ok(dir.to_string_lossy().to_string())
             },
-            |state, result, cx| {
+            move |state, result: colab_playground_core::Result<String>, cx| {
                 match result {
                     Ok(dir) => {
+                        let here = super::mcp::files_in(std::path::Path::new(dir.as_str())).len();
+                        log::info!("download: {named} -> {dir} ({here} file(s) here)");
                         state.toast_done(tr_args(cx, keys::RUN_SAVED, &[("path", &dir)]), cx)
                     }
-                    Err(error) => state.toast_error(&error, cx),
+                    Err(error) => {
+                        log::warn!("download: {named} failed: {error}");
+                        state.toast_error(&error, cx)
+                    }
                 }
                 cx.notify();
             },
