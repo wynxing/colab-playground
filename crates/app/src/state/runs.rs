@@ -677,8 +677,16 @@ impl AppState {
                 std::fs::create_dir_all(&dir)?;
                 for file in &files {
                     let name = file.path.rsplit('/').next().unwrap_or("file");
-                    let local = dir.join(name).to_string_lossy().to_string();
-                    backend.vm_download(&target, &file.path, &local, cancel)?;
+                    let local = dir.join(name);
+                    // The CLI writes it, so it needs the path in its own namespace: a Windows path
+                    // given to it as-is becomes one file name in its working directory.
+                    let target_path = colab_playground_core::paths::host_path_for_local(&local)
+                        .ok_or_else(|| {
+                            Error::new(ErrorKind::Io)
+                                .with("path", local.to_string_lossy())
+                                .detail("the download cannot be written there")
+                        })?;
+                    backend.vm_download(&target, &file.path, target_path.as_str(), cancel)?;
                 }
                 Ok(dir.to_string_lossy().to_string())
             },
