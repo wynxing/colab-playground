@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.0](https://github.com/wynxing/colab-playground/compare/v0.5.1...v0.6.0) (2026-11-25)
+
+
+### Added
+
+* **app:** let an agent read the app through a local endpoint ([aa34088](https://github.com/wynxing/colab-playground/commit/aa34088a5c98986292465a005a2b6820c3af9d46))
+* **app:** let an agent drive the app, asking before it spends ([d982c8b](https://github.com/wynxing/colab-playground/commit/d982c8b5beba380cc83fd4bd0762f23602c3b50f))
+* **app:** keep a log, and hold an agent's call for an hour ([1facaf4](https://github.com/wynxing/colab-playground/commit/1facaf48dd8ccc7818ddf887a4cde26296c44d6c))
+* **app:** run_watch — the agent waits, and the app tells it when something happens ([5c3a81a](https://github.com/wynxing/colab-playground/commit/5c3a81a82e332c42adfb881f26f74f068e031a66))
+
+
+### Fixed
+
+* **app:** start a session an agent left unnamed, and find a run's files ([0124478](https://github.com/wynxing/colab-playground/commit/01244781d4400cade02a6233a1f92f47f2b0237a))
+* **app:** answer an agent's plugin_run at a stage, not at the end of the run ([43efbb9](https://github.com/wynxing/colab-playground/commit/43efbb9755481906256e827abc0245342db68a73))
+* **app:** say where a save looked, and never leave a call unanswered ([279017e](https://github.com/wynxing/colab-playground/commit/279017ed933c086a1affa186557146932930ffa8))
+* **core:** hand the CLI a path it can write, so a download lands where it is asked ([14c5a21](https://github.com/wynxing/colab-playground/commit/14c5a21f7a9b25106dbffac084dc5dced71c6a65))
+
+
 ## [0.5.1](https://github.com/wynxing/colab-playground/compare/v0.5.0...v0.5.1) (2026-11-24)
 
 
