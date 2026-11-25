@@ -49,7 +49,9 @@ fn the_section_is_there_and_listens_to_nothing_until_it_is_switched_on(cx: &mut 
 fn switching_it_on_binds_loopback_saves_it_and_switching_it_off_frees_the_port(
     cx: &mut TestAppContext,
 ) {
-    let mut app = open_settings(cx, Options::default());
+    // On a port the system picks: the app on this machine may well hold the default one, and what
+    // this test is about is the switch binding at all, not which port it lands on.
+    let mut app = with_settings(cx, r#"{"mcp_port":0}"#);
 
     app.click(AGENTS_TOGGLE_SELECTOR);
     app.settle();
