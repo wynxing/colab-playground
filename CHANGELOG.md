@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.2](https://github.com/wynxing/colab-playground/compare/v0.6.1...v0.6.2) (2026-11-26)
+
+
+### Changed
+
+* **app:** ask only before an agent opens a runtime or moves its auto-stop ([f72b2a5](https://github.com/wynxing/colab-playground/commit/f72b2a5f832631d78c088582c55a5ac949521e49))
+
+
 ## [0.6.1](https://github.com/wynxing/colab-playground/compare/v0.5.1...v0.6.1) (2026-11-25)
 
 
