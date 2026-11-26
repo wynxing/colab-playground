@@ -144,6 +144,8 @@ pub struct AppSettings {
     pub colab_path: Option<String>,
     /// Whether the app is running on demo data (nothing runs and nothing is billed).
     pub demo_data: bool,
+    /// Whether a call that would open a runtime, or move its auto-stop, asks first.
+    pub ask_before_spend: bool,
 }
 
 /// A source with nothing in it, for tests and for the moment before the app has a state.

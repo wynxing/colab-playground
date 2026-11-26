@@ -1080,7 +1080,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "智能体"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "让这台电脑上的智能体驱动本应用：可以启动和停止运行环境、运行插件、读取一次运行产出了什么、修改各项设置。任何花钱的操作都会先在这里问你。",
+        "让这台电脑上的智能体驱动本应用：可以启动和停止运行环境、运行插件、读取一次运行产出了什么、修改各项设置。停止运行环境，以及在已经开着的机器上运行插件，会直接进行。新开一台，或改动它的自动停止，会先问你，除非你在下面关掉。",
     ),
     (SETTINGS_AGENTS_TOGGLE, "提供智能体端点"),
     (
@@ -1105,6 +1105,11 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_AGENTS_PORT_TAKEN,
         "端口 {port} 被别的程序占用，所以端点没有运行。",
+    ),
+    (SETTINGS_AGENTS_CONFIRM, "花钱前询问"),
+    (
+        SETTINGS_AGENTS_CONFIRM_HINT,
+        "智能体新开一台运行环境、延长它，或关掉自动停止之前，先问你。停止运行环境，以及在已经开着的机器上运行插件，从不询问。关掉后，这些也会直接执行。",
     ),
     (APPROVAL_TITLE, "有 agent 请求花钱的操作"),
     (

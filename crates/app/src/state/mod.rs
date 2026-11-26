@@ -604,6 +604,19 @@ impl AppState {
         self.settings.mcp_enabled
     }
 
+    /// Whether a call that would open a runtime, or move its auto-stop, asks first.
+    pub fn agents_confirm(&self) -> bool {
+        self.settings.mcp_confirm.0
+    }
+
+    /// Switches that question on or off and saves it. Stopping a runtime, and running a plugin on
+    /// one that is already open, never ask either way.
+    pub(crate) fn set_agents_confirm(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.settings.mcp_confirm = crate::settings::OnByDefault(on);
+        self.persist_settings(cx);
+        cx.notify();
+    }
+
     /// Whether the endpoint's token is on screen. Kept in the state so the section re-renders with
     /// it, and hidden again whenever the endpoint is switched off.
     pub fn agents_revealed(&self) -> bool {

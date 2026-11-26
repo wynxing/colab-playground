@@ -474,6 +474,7 @@ pub(crate) fn settings_of(state: &AppState) -> AppSettings {
             state.backend.as_ref().map(|backend| backend.kind()),
             Ok(BackendKind::Mock)
         ),
+        ask_before_spend: state.settings.mcp_confirm.0,
     }
 }
 

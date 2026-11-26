@@ -192,12 +192,18 @@ reports something — a new stage, ready, failed, or the runtime gone — and at
 two minutes with whatever it is doing now. A deploy that takes five minutes is therefore a handful
 of short calls, and a client's own timeout is never reached.
 
-**Anything that spends money asks you first.** Starting, stopping, extending and running a plugin
-open a dialog naming the action, its target, the rate per hour where the app knows it, and the
-client that asked. Allowing it carries the work out. Refusing it, closing the dialog or not
-answering within two minutes fails the call, and the agent is told not to ask again — a refusal is
-final. One such question stands at a time: a second call that spends money is turned down while one
-waits.
+**Opening a runtime, or moving its auto-stop, asks you first.** That is `session_start`, a
+`plugin_run` that names no session (it opens one), and `session_extend` — including zero minutes,
+which removes the auto-stop. The dialog names the action, its target, the rate per hour where the
+app knows it, and the client that asked. Allowing it carries the work out. Refusing it, closing
+the dialog or not answering within two minutes fails the call, and the agent is told not to ask
+again — a refusal is final. One such question stands at a time: a second call that would ask is
+turned down while one waits.
+
+Stopping a runtime, and running a plugin on one that is already open, do not ask: stopping ends a
+charge, and the machine is already billing. **Ask before spending**, on the same settings page,
+is on unless you turn it off. Off, and the calls above run at once too. The app's own idle timeout
+and per-session limit are what stop a runtime the agent was allowed to open.
 
 The endpoint listens on this computer only, and it refuses a request whose `Origin` is not its own
 window, so a page in a browser cannot reach it. The token is the only way in: anyone who has it can
