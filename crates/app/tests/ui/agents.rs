@@ -15,8 +15,8 @@ use colab_playground::{
     ui::{
         overlays::{APPROVAL_ALLOW, APPROVAL_REFUSE},
         pages::settings::{
-            AGENTS_ADDRESS_SELECTOR, AGENTS_CONFIG_SELECTOR, AGENTS_TOGGLE_SELECTOR,
-            AGENTS_TOKEN_HIDDEN_SELECTOR, AGENTS_TOKEN_REVEAL_SELECTOR,
+            AGENTS_ADDRESS_SELECTOR, AGENTS_CONFIG_SELECTOR, AGENTS_CONFIRM_SELECTOR,
+            AGENTS_TOGGLE_SELECTOR, AGENTS_TOKEN_HIDDEN_SELECTOR, AGENTS_TOKEN_REVEAL_SELECTOR,
             AGENTS_TOKEN_ROTATE_SELECTOR, AGENTS_TOKEN_SHOWN_SELECTOR,
         },
     },
@@ -349,7 +349,10 @@ fn a_paid_call_parks_the_window_and_runs_when_the_user_allows_it(cx: &mut TestAp
     let (address, token) = endpoint(&mut app);
 
     let mut agent = Agent::connect(address, &token);
-    agent.call("session_stop", json!({ "session": "t4-91c2" }));
+    agent.call(
+        "session_extend",
+        json!({ "session": "t4-91c2", "minutes": 30 }),
+    );
     settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
 
     // The question names the action, its target and the client that asked, and nothing has started
@@ -357,7 +360,7 @@ fn a_paid_call_parks_the_window_and_runs_when_the_user_allows_it(cx: &mut TestAp
     let prompt = app
         .read(|state, _| state.agent_approval().cloned())
         .expect("a question is up");
-    assert_eq!(prompt.action, "session_stop");
+    assert_eq!(prompt.action, "session_extend");
     assert_eq!(prompt.target, "t4-91c2");
     assert_eq!(prompt.client, AGENT);
     assert!(
@@ -371,16 +374,34 @@ fn a_paid_call_parks_the_window_and_runs_when_the_user_allows_it(cx: &mut TestAp
         !app.shown(APPROVAL_ALLOW),
         "the question goes with the answer"
     );
+    settle_a_while(&mut app);
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["session"], "t4-91c2");
+    assert_eq!(answer["minutes"], 30);
+    assert_eq!(answer["auto_stop"], "scheduled");
+    // Moving the stop does not close the runtime: the call took the path a click takes.
+    assert!(runtime_names(&mut app).contains(&"t4-91c2".to_owned()));
+}
+
+/// Stopping saves money, so it does not wait for a click. A dialog here would leave the runtime
+/// billing for as long as the question stood.
+#[gpui::test]
+fn stopping_a_runtime_does_not_ask(cx: &mut TestAppContext) {
+    let mut app = with_agents(cx, MockScenario::demo());
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call("session_stop", json!({ "session": "t4-91c2" }));
     settle_until(&mut app, |app| {
         !runtime_names(app).contains(&"t4-91c2".to_owned())
     });
 
     let (is_error, answer) = agent.result();
     assert!(!is_error, "{answer}");
-    assert_eq!(answer["session"], "t4-91c2");
     assert_eq!(answer["stopped"], true);
-    // The runtime is gone from the window too: the call took the path a click takes.
-    assert!(!runtime_names(&mut app).contains(&"t4-91c2".to_owned()));
+    assert!(app.read(|state, _| state.agent_approval().is_none()));
 }
 /// A `session_start` that names no session is the ordinary case — the tool's own description
 /// says the app's defaults are used — so the app has to name it the way its own new-session form
@@ -423,11 +444,13 @@ fn a_run_is_answered_at_its_first_stage_and_keeps_running(cx: &mut TestAppContex
         "plugin_run",
         json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
     );
-    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
-    app.click(APPROVAL_ALLOW);
     settle_until(&mut app, |app| {
         app.read(|state, _| state.plugin_run().is_some_and(|run| run.status.is_some()))
     });
+    assert!(
+        app.read(|state, _| state.agent_approval().is_none()),
+        "a plugin on a runtime that is already open does not ask"
+    );
 
     let (is_error, answer) = agent.result();
     assert!(!is_error, "{answer}");
@@ -454,8 +477,9 @@ fn a_watch_answers_with_the_run_as_it_stands_when_nothing_happens(cx: &mut TestA
         "plugin_run",
         json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
     );
-    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
-    app.click(APPROVAL_ALLOW);
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.plugin_run().is_some())
+    });
     let _ = agent.result();
 
     agent.call("run_watch", json!({ "plugin": "comfyui" }));
@@ -485,8 +509,6 @@ fn a_second_watch_is_told_to_wait_its_turn(cx: &mut TestAppContext) {
         "plugin_run",
         json!({ "plugin": "comfyui", "session": "t4-91c2", "inputs": { "preset": "sd15" } }),
     );
-    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
-    app.click(APPROVAL_ALLOW);
     settle_until(&mut app, |app| {
         app.read(|state, _| state.plugin_run().is_some())
     });
@@ -533,7 +555,10 @@ fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {
     let (address, token) = endpoint(&mut app);
 
     let mut agent = Agent::connect(address, &token);
-    agent.call("session_stop", json!({ "session": "t4-91c2" }));
+    agent.call(
+        "session_extend",
+        json!({ "session": "t4-91c2", "minutes": 0 }),
+    );
     settle_until(&mut app, |app| app.shown(APPROVAL_REFUSE));
 
     app.click(APPROVAL_REFUSE);
@@ -543,12 +568,12 @@ fn a_refused_call_starts_nothing_and_is_told_so(cx: &mut TestAppContext) {
     let (is_error, answer) = agent.result();
     assert!(is_error, "a refusal is an error result: {answer}");
     assert_eq!(answer["kind"], "denied");
-    assert_eq!(answer["params"]["action"], "session_stop");
+    assert_eq!(answer["params"]["action"], "session_extend");
     assert_eq!(answer["params"]["reason"], "refused");
     assert_eq!(answer["next_step"], "none", "asking again is wrong");
     assert!(
         runtime_names(&mut app).contains(&"t4-91c2".to_owned()),
-        "nothing was stopped"
+        "cancelling the auto-stop did not happen"
     );
 }
 
@@ -558,29 +583,29 @@ fn a_second_paid_call_is_refused_while_one_waits(cx: &mut TestAppContext) {
     let (address, token) = endpoint(&mut app);
 
     let mut first = Agent::connect(address, &token);
-    first.call("session_stop", json!({ "session": "t4-91c2" }));
+    first.call(
+        "session_extend",
+        json!({ "session": "t4-91c2", "minutes": 30 }),
+    );
     settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
 
     // The window asks about one thing at a time, so the second call is answered rather than queued
     // behind the first.
     let mut second = Agent::connect(address, &token);
-    second.call(
-        "session_extend",
-        json!({ "session": "a100-7f3a", "minutes": 30 }),
-    );
+    second.call("session_start", json!({ "hardware": "T4" }));
     settle_a_while(&mut app);
 
     let (is_error, answer) = second.result();
     assert!(is_error, "{answer}");
     assert_eq!(answer["kind"], "denied");
-    assert_eq!(answer["params"]["action"], "session_extend");
+    assert_eq!(answer["params"]["action"], "session_start");
     assert_eq!(answer["params"]["reason"], "busy");
 
     // The first is still the one being asked about, and answering it still works.
     let prompt = app
         .read(|state, _| state.agent_approval().cloned())
         .expect("the first question is still up");
-    assert_eq!(prompt.action, "session_stop");
+    assert_eq!(prompt.action, "session_extend");
     app.click(APPROVAL_REFUSE);
     settle_a_while(&mut app);
     assert!(first.result().0, "the first call ends as refused too");
@@ -627,4 +652,90 @@ fn a_target_the_app_does_not_have_is_answered_rather_than_waited_on(cx: &mut Tes
     assert_eq!(answer["params"]["session"], "not-a-runtime");
     // A session that is not there is not something to ask the user about.
     assert!(app.read(|state, _| state.agent_approval().is_none()));
+}
+
+/// A `plugin_run` that names no session opens a runtime, so it asks. Refusing it starts nothing.
+#[gpui::test]
+fn a_plugin_run_that_would_open_a_runtime_asks_first(cx: &mut TestAppContext) {
+    let mut app = with_agents(cx, MockScenario::demo());
+    let (address, token) = endpoint(&mut app);
+    let before = runtime_names(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call(
+        "plugin_run",
+        json!({ "plugin": "comfyui", "inputs": { "preset": "sd15" } }),
+    );
+    settle_until(&mut app, |app| app.shown(APPROVAL_ALLOW));
+    let prompt = app
+        .read(|state, _| state.agent_approval().cloned())
+        .expect("opening a runtime asks");
+    assert_eq!(prompt.action, "plugin_run");
+
+    app.click(APPROVAL_REFUSE);
+    settle_a_while(&mut app);
+    let (is_error, answer) = agent.result();
+    assert!(is_error, "{answer}");
+    assert_eq!(answer["params"]["reason"], "refused");
+    assert_eq!(runtime_names(&mut app), before);
+    assert!(app.read(|state, _| state.plugin_run().is_none()));
+}
+
+/// The question is a setting. Off, a call that would otherwise ask runs at once.
+#[gpui::test]
+fn a_start_does_not_ask_when_asking_is_switched_off(cx: &mut TestAppContext) {
+    let options = Options {
+        config: ConfigDir::TempWith(
+            r#"{"mcp_enabled":true,"mcp_port":0,"mcp_confirm":false}"#.to_owned(),
+        ),
+        ..Options::scenario(MockScenario::single())
+    };
+    let mut app = open_settings(cx, options);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call("session_start", json!({ "hardware": "T4" }));
+    settle_until(&mut app, |app| !runtime_names(app).is_empty());
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert!(
+        answer["session"].as_str().unwrap_or("").starts_with("t4-"),
+        "{answer}"
+    );
+    assert!(app.read(|state, _| state.agent_approval().is_none()));
+}
+
+#[gpui::test]
+fn asking_before_spending_is_on_until_it_is_switched_off(cx: &mut TestAppContext) {
+    let mut app = open_settings(cx, Options::default());
+    assert!(app.shown(AGENTS_CONFIRM_SELECTOR));
+    assert!(app.read(|state, _| state.agents_confirm()));
+
+    app.click(AGENTS_CONFIRM_SELECTOR);
+    app.settle();
+    assert!(!app.read(|state, _| state.agents_confirm()));
+    assert_eq!(
+        app.saved_settings().map(|settings| settings.mcp_confirm.0),
+        Some(false),
+        "the switch is a setting, so it survives a restart"
+    );
+}
+
+/// The agent must not be able to turn the question off. The switch is the user's.
+#[gpui::test]
+fn an_agent_cannot_turn_the_question_off(cx: &mut TestAppContext) {
+    let mut app = with_agents(cx, MockScenario::demo());
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call(
+        "settings_set",
+        json!({ "changes": { "ask_before_spend": false } }),
+    );
+    settle_a_while(&mut app);
+
+    let (is_error, answer) = agent.result();
+    assert!(is_error, "{answer}");
+    assert!(app.read(|state, _| state.agents_confirm()));
 }

@@ -1100,7 +1100,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "智慧代理"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "讓這台電腦上的智慧代理驅動本應用程式：可以啟動與停止執行環境、執行外掛、讀取一次執行產出了什麼、修改各項設定。任何花錢的操作都會先在這裡問你。",
+        "讓這台電腦上的智慧代理驅動本應用程式：可以啟動與停止執行環境、執行外掛、讀取一次執行產出了什麼、修改各項設定。停止執行環境，以及在已經開著的機器上執行外掛，會直接進行。新開一台，或改動它的自動停止，會先問你，除非你在下面關掉。",
     ),
     (SETTINGS_AGENTS_TOGGLE, "提供智慧代理端點"),
     (
@@ -1125,6 +1125,11 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_AGENTS_PORT_TAKEN,
         "連接埠 {port} 被別的程式佔用，所以端點沒有執行。",
+    ),
+    (SETTINGS_AGENTS_CONFIRM, "花錢前詢問"),
+    (
+        SETTINGS_AGENTS_CONFIRM_HINT,
+        "智慧代理新開一台執行環境、延長它，或關掉自動停止之前，先問你。停止執行環境，以及在已經開著的機器上執行外掛，從不問。關掉後，這些也會直接執行。",
     ),
     (APPROVAL_TITLE, "有 agent 要求花錢的操作"),
     (

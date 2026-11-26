@@ -37,6 +37,7 @@ pub const OPEN_FOLDER_SELECTOR: &str = "settings-file-open";
 /// The agent endpoint's own selectors. The token has one for each state, so a test can tell
 /// "hidden" from "shown" without the token itself ever being in a selector.
 pub const AGENTS_TOGGLE_SELECTOR: &str = "settings-agents-toggle";
+pub const AGENTS_CONFIRM_SELECTOR: &str = "settings-agents-confirm";
 pub const AGENTS_ADDRESS_SELECTOR: &str = "settings-agents-address";
 pub const AGENTS_TOKEN_SELECTOR: &str = "settings-agents-token";
 pub const AGENTS_TOKEN_HIDDEN_SELECTOR: &str = "settings-agents-token-hidden";
@@ -316,7 +317,12 @@ fn agents_section(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Sett
     let theme = cx.theme();
     let agents = state.agents();
     let shown = state.agents_revealed();
-    let (toggle, reveal, rotate) = (handle.clone(), handle.clone(), handle.clone());
+    let (toggle, reveal, rotate, confirm) = (
+        handle.clone(),
+        handle.clone(),
+        handle.clone(),
+        handle.clone(),
+    );
 
     let mut section = SettingsSection::new(tr(cx, keys::SETTINGS_AGENTS_TITLE))
         .description(tr(cx, keys::SETTINGS_AGENTS_DESCRIPTION))
@@ -329,6 +335,18 @@ fn agents_section(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Sett
                         .name(tr(cx, keys::SETTINGS_AGENTS_TOGGLE))
                         .on_change(move |on, _, cx| {
                             toggle.update(cx, |state, cx| state.set_agents_enabled(on, cx))
+                        }),
+                )),
+        )
+        .row(
+            SettingsRow::new(tr(cx, keys::SETTINGS_AGENTS_CONFIRM))
+                .description(tr(cx, keys::SETTINGS_AGENTS_CONFIRM_HINT))
+                .control(tagged(
+                    AGENTS_CONFIRM_SELECTOR,
+                    Switch::new(AGENTS_CONFIRM_SELECTOR, state.agents_confirm())
+                        .name(tr(cx, keys::SETTINGS_AGENTS_CONFIRM))
+                        .on_change(move |on, _, cx| {
+                            confirm.update(cx, |state, cx| state.set_agents_confirm(on, cx))
                         }),
                 )),
         );

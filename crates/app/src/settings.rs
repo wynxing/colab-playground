@@ -166,6 +166,11 @@ pub struct Settings {
     /// The loopback port it listens on.
     #[serde(default, deserialize_with = "lenient")]
     pub mcp_port: McpPort,
+    /// Whether an agent is asked before a call that can spend more: opening a runtime, or moving
+    /// its auto-stop (including turning that stop off). On unless the user turns it off. Stopping
+    /// a runtime, and running a plugin on one that is already open, never ask either way.
+    #[serde(default, deserialize_with = "lenient")]
+    pub mcp_confirm: OnByDefault,
 }
 
 /// The port the agent endpoint listens on unless the user changed it. A port of its own type so a
@@ -438,6 +443,22 @@ mod tests {
             "a value the field cannot hold resets that field only"
         );
         assert_eq!(broken.mcp_port, McpPort(8765));
+    }
+
+    #[test]
+    fn asking_before_an_agent_spends_stays_on_unless_it_is_turned_off() {
+        let plain = Settings::from_json("{}").expect("loads");
+        assert!(
+            plain.mcp_confirm.0,
+            "a file that never mentioned it still asks"
+        );
+        let off = Settings::from_json(r#"{"mcp_confirm":false}"#).expect("loads");
+        assert!(!off.mcp_confirm.0);
+        let broken = Settings::from_json(r#"{"mcp_confirm":"no"}"#).expect("loads");
+        assert!(
+            broken.mcp_confirm.0,
+            "a value the field cannot hold keeps the safe default"
+        );
     }
 
     #[test]

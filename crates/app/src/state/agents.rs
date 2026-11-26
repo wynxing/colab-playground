@@ -9,9 +9,10 @@
 //! second truth, which is the whole reason the snapshot exists.
 //!
 //! The response is held open while that happens, which is what makes an answer mean "it is done"
-//! rather than "it was accepted". An action that spends money waits for the user's word in the
-//! app's own dialog first, and a refusal is final: a denial says which kind it was, and it carries
-//! no next step because asking again is wrong.
+//! rather than "it was accepted". A call that would open a runtime or move its auto-stop waits for
+//! the user's word in the app's own dialog first, while that question is switched on, and a
+//! refusal is final: a denial says which kind it was, and it carries no next step because asking
+//! again is wrong.
 
 use std::{
     collections::VecDeque,
@@ -225,8 +226,8 @@ pub(super) enum Chain {
 
 impl AppState {
     /// A call arrived from an agent. A target the app does not have is answered here, before
-    /// anything else: there is no work to allow and none to wait for. A paid call asks the user
-    /// first; everything else starts now.
+    /// anything else: there is no work to allow and none to wait for. A call that would spend
+    /// more asks the user first, while that question is switched on; everything else starts now.
     pub(crate) fn begin_agent_call(&mut self, call: Call, cx: &mut Context<Self>) {
         log::info!(
             "agent: {} asked for by {}",
@@ -244,7 +245,7 @@ impl AppState {
             call.answer(Err(error));
             return;
         }
-        if call.action.is_paid() {
+        if call.action.needs_approval() && self.agents_confirm() {
             self.ask_to_allow(call, cx);
         } else {
             self.run_agent_call(call, cx);
@@ -913,8 +914,9 @@ impl AppState {
     }
 
     /// `settings_set`: every field checked the way the settings page checks it, then saved. The
-    /// endpoint's own switch and port are deliberately not among them — turning the endpoint off
-    /// from a tool call would cut off the answer to that very call.
+    /// endpoint's own switch, its port and the question before spending are deliberately not among
+    /// them — an agent must not turn that question off, and turning the endpoint off from a tool
+    /// call would cut off the answer to that very call.
     fn set_settings_for_agent(
         &mut self,
         changes: Map<String, Value>,

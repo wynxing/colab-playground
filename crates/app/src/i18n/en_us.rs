@@ -1278,7 +1278,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_TITLE, "Agents"),
     (
         SETTINGS_AGENTS_DESCRIPTION,
-        "Let an agent on this computer drive the app: start and stop runtimes, run plugins, read what a run produced, change the settings. Anything that spends money asks you here first.",
+        "Let an agent on this computer drive the app: start and stop runtimes, run plugins, read what a run produced, change the settings. Stopping a runtime, and running a plugin on one that is already open, happen at once. Opening a runtime or changing its auto-stop asks you first, unless you turn that off below.",
     ),
     (SETTINGS_AGENTS_TOGGLE, "Serve the agent endpoint"),
     (
@@ -1307,6 +1307,11 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_AGENTS_PORT_TAKEN,
         "Port {port} is taken by another program, so the endpoint is not running.",
+    ),
+    (SETTINGS_AGENTS_CONFIRM, "Ask before spending"),
+    (
+        SETTINGS_AGENTS_CONFIRM_HINT,
+        "Asks before an agent opens a runtime, lengthens one, or turns off its auto-stop. Stopping a runtime, and running a plugin on one that is already open, never ask. Off, and those calls run at once too.",
     ),
     (APPROVAL_TITLE, "An agent asks to spend money"),
     (

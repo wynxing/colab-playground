@@ -409,7 +409,8 @@ pub fn all() -> &'static [Tool] {
         Tool {
             name: "settings_get",
             description: "The app's settings: language, appearance, the hardware and auto-stop new \
-                          sessions ask for, and host details. Read-only.",
+                          sessions ask for, host details, and whether spending asks first. \
+                          Read-only.",
             input: empty_schema,
             kind: Kind::Read(settings_get),
         },
@@ -429,37 +430,38 @@ pub fn all() -> &'static [Tool] {
         },
         Tool {
             name: "session_start",
-            description: "Starts a Colab runtime, which begins billing. The app asks the user in \
-                          its own window first and holds this call open until they answer; being \
-                          refused is final, so do not call again. Answers when the runtime exists, \
-                          with what it costs per hour.",
+            description: "Starts a Colab runtime, which begins billing. While asking is switched \
+                          on, the app asks the user in its own window first and holds this call \
+                          open until they answer; being refused is final, so do not call again. \
+                          Answers when the runtime exists, with what it costs per hour.",
             input: session_start_schema,
             kind: Kind::Write(session_start),
         },
         Tool {
             name: "session_stop",
-            description: "Stops a runtime and ends its billing. The app asks the user in its own \
-                          window first and holds this call open until they answer; being refused \
-                          is final, so do not call again.",
+            description: "Stops a runtime and ends its billing. The app does this at once and does \
+                          not ask: stopping does not open a new charge.",
             input: session_schema,
             kind: Kind::Write(session_stop),
         },
         Tool {
             name: "session_extend",
             description: "Moves a runtime's auto-stop, or cancels it with zero minutes (after \
-                          which it bills until it is stopped by hand). The app asks the user in \
-                          its own window first and holds this call open until they answer; being \
-                          refused is final, so do not call again.",
+                          which it bills until it is stopped by hand). While asking is switched \
+                          on, the app asks the user in its own window first and holds this call \
+                          open until they answer; being refused is final, so do not call again.",
             input: session_extend_schema,
             kind: Kind::Write(session_extend),
         },
         Tool {
             name: "plugin_run",
             description: "Deploys and starts a plugin on a runtime, with the inputs its manifest \
-                          declares. The app asks the user in its own window first and holds this \
-                          call open until they answer; being refused is final, so do not call \
-                          again. Answers when the run has reached a stage, not when it finishes, so \
-                          read run_status while it works.",
+                          declares. A call that names a session that is already open starts at \
+                          once and does not ask. A call that leaves the session out opens a new \
+                          runtime: while asking is switched on, the app asks the user in its own \
+                          window first and holds this call open until they answer; being refused \
+                          is final, so do not call again. Answers when the run has reached a \
+                          stage, not when it finishes, so read run_status while it works.",
             input: plugin_run_schema,
             kind: Kind::Write(plugin_run),
         },
@@ -475,7 +477,8 @@ pub fn all() -> &'static [Tool] {
             name: "settings_set",
             description: "Changes the app's settings, among the fields settings_get reports. Each \
                           value is checked the way the app's own form checks it; the endpoint's \
-                          own switch and port are not among them.",
+                          own switch and port are not among them, and neither is whether spending \
+                          asks first.",
             input: settings_set_schema,
             kind: Kind::Write(settings_set),
         },
@@ -1078,21 +1081,53 @@ mod tests {
                 tool.name,
                 "an action names the tool it came from"
             );
-            // Whether a call costs money is a property of the action, and the description is the
-            // only thing an agent reads: one without the other is a tool that spends money
-            // quietly.
-            assert_eq!(
-                tool.description.contains("asks the user in its own window"),
-                action.is_paid(),
-                "{}: the description must say the user is asked first, and only then",
+        }
+    }
+
+    #[test]
+    fn a_description_says_when_the_window_asks() {
+        // The description is the only thing an agent reads. A call that always asks says so, a
+        // call that never asks does not, and plugin_run says both because it depends on whether
+        // a session was named.
+        let text = |name: &str| {
+            all()
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} is not a tool"))
+                .description
+                .to_owned()
+        };
+        for name in ["session_start", "session_extend", "plugin_run"] {
+            assert!(
+                text(name).contains("asks the user in its own window"),
+                "{name} must say the user is asked"
+            );
+        }
+        for tool in all() {
+            if matches!(tool.name, "session_start" | "session_extend" | "plugin_run") {
+                continue;
+            }
+            assert!(
+                !tool.description.contains("asks the user in its own window"),
+                "{} must not say the user is asked",
                 tool.name
             );
         }
-        let paid = all()
-            .iter()
-            .filter(|tool| matches!(tool.kind, Kind::Write(_)) && expected(tool.name).is_paid())
-            .count();
-        assert_eq!(paid, 4, "the four tools that spend money");
+        assert!(
+            text("plugin_run").contains("already open"),
+            "a plugin on a runtime that is already open does not ask"
+        );
+        assert!(
+            text("session_stop").contains("does not ask"),
+            "stopping is the call that saves money"
+        );
+        assert!(expected("session_start").needs_approval());
+        assert!(expected("session_extend").needs_approval());
+        assert!(!expected("session_stop").needs_approval());
+        assert!(
+            !expected("plugin_run").needs_approval(),
+            "the sample plugin_run names a session, so it does not ask"
+        );
     }
 
     #[test]

@@ -709,6 +709,8 @@ catalog_keys! {
     SETTINGS_AGENTS_CONFIG_HINT => "app.b14.settings_agents_config_hint",
     SETTINGS_AGENTS_OFF => "app.b14.settings_agents_off",
     SETTINGS_AGENTS_PORT_TAKEN => "app.b14.settings_agents_port_taken",
+    SETTINGS_AGENTS_CONFIRM => "app.b14.settings_agents_confirm",
+    SETTINGS_AGENTS_CONFIRM_HINT => "app.b14.settings_agents_confirm_hint",
     APPROVAL_TITLE => "app.b15.approval_title",
     APPROVAL_BODY => "app.b15.approval_body",
     APPROVAL_CLIENT => "app.b15.approval_client",

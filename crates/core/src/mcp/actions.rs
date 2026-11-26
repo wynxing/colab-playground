@@ -6,7 +6,7 @@
 //!
 //! Core carries the vocabulary and no more. It changes no state, spends nothing and never asks a
 //! person: an [`Actions`] implementation does that, and the app's is what turns a call into the
-//! same work a click starts, including the confirmation an action that spends money needs. Keeping
+//! same work a click starts, including the confirmation a call that would spend more needs. Keeping
 //! the split here is what lets the tool table, the argument checks and the refusals be tested
 //! without a window, and what keeps a second implementation of "start a session" from growing
 //! beside the app's own.
@@ -87,15 +87,17 @@ impl Action {
         }
     }
 
-    /// Whether carrying this out costs money. The four that do are the ones the app asks about
-    /// first: starting, stopping, extending and running all end in a runtime that bills.
-    pub fn is_paid(&self) -> bool {
+    /// Whether the window asks before doing this, while that question is switched on.
+    ///
+    /// Stopping ends a charge, and a plugin on a runtime that is already open does not open
+    /// another, so neither is a decision to spend more. Opening a runtime is, and so is moving
+    /// its auto-stop: zero minutes removes the cap the app would have stopped it with.
+    pub fn needs_approval(&self) -> bool {
         matches!(
             self,
             Action::SessionStart { .. }
-                | Action::SessionStop { .. }
                 | Action::SessionExtend { .. }
-                | Action::PluginRun { .. }
+                | Action::PluginRun { session: None, .. }
         )
     }
 
@@ -252,21 +254,54 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_that_leave_a_runtime_billing_are_paid() {
-        let paid: Vec<&str> = every_action()
-            .iter()
-            .filter(|action| action.is_paid())
-            .map(Action::name)
-            .collect();
-        assert_eq!(
-            paid,
-            [
-                "session_start",
-                "session_stop",
-                "session_extend",
-                "plugin_run"
-            ],
-            "an agent spending money is the thing the window has to ask about"
+    fn the_window_asks_only_before_a_new_charge() {
+        assert!(
+            Action::SessionStart {
+                name: None,
+                hardware: None,
+                auto_stop_minutes: None,
+            }
+            .needs_approval()
+        );
+        assert!(
+            Action::SessionExtend {
+                session: "run-1".to_owned(),
+                minutes: 30,
+            }
+            .needs_approval()
+        );
+        assert!(
+            Action::SessionExtend {
+                session: "run-1".to_owned(),
+                minutes: 0,
+            }
+            .needs_approval(),
+            "zero minutes removes the auto-stop, which is the cap"
+        );
+        assert!(
+            !Action::SessionStop {
+                session: "run-1".to_owned(),
+            }
+            .needs_approval(),
+            "stopping ends a charge"
+        );
+        assert!(
+            !Action::PluginRun {
+                plugin: "comfyui".to_owned(),
+                session: Some("run-1".to_owned()),
+                inputs: Map::new(),
+            }
+            .needs_approval(),
+            "a runtime that is already open is already billing"
+        );
+        assert!(
+            Action::PluginRun {
+                plugin: "comfyui".to_owned(),
+                session: None,
+                inputs: Map::new(),
+            }
+            .needs_approval(),
+            "leaving the session out opens a runtime"
         );
     }
 

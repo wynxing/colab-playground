@@ -17,8 +17,10 @@ state the window shows.
 - **Entry:** an endpoint inside the running app, not a headless command. The agent drives the
   window that is open; what it does is visible there, and what the user does there is visible to
   the agent.
-- **Paid actions:** the app asks, in its own window, and the agent waits for the answer. No answer
-  in time is a refusal.
+- **Paid actions:** the app asks, in its own window, before a call that would open a runtime or
+  move its auto-stop, including cancelling that stop. Stopping a runtime, and running a plugin on
+  one that is already open, do not ask. Settings → Agents has “Ask before spending”, on unless the
+  user turns it off; off, and those calls run at once too. No answer in time is a refusal.
 
 ## Non-goals
 
@@ -108,10 +110,10 @@ so an agent can rely on the shape. "Slice" is when it is built.
 | `plugin_enable` | write | Enables or disables a plugin | 2 |
 | `plugin_install` | write | Installs a plugin from a folder or a Git URL | 2 |
 | `forward_open` / `forward_close` | write | Opens or closes a forward through a session | 2 |
-| `session_start` | **paid** | Provisions a runtime: hardware, name, auto-stop | 2 |
-| `session_stop` | **paid** | Stops a runtime (ends its billing) | 2 |
-| `session_extend` | **paid** | Moves or cancels a runtime's auto-stop | 2 |
-| `plugin_run` | **paid** | Deploys and starts a plugin on a runtime, with its manifest's inputs | 2 |
+| `session_start` | asks | Provisions a runtime: hardware, name, auto-stop | 2 |
+| `session_stop` | write | Stops a runtime. Does not ask | 2 |
+| `session_extend` | asks | Moves or cancels a runtime's auto-stop | 2 |
+| `plugin_run` | asks when it opens a runtime | Deploys a plugin. A named session that is already open does not ask | 2 |
 | `run_watch` | read | Waits for a run's stage to change, or a timeout, and answers with the new state | 3 |
 
 `session_start` reports the hourly rate of the hardware it was asked for, so the card and the
@@ -119,7 +121,7 @@ agent both say the same number.
 
 ## Approval
 
-A paid tool call:
+A call that would open a runtime or move its auto-stop, while asking is switched on:
 
 1. The app opens a dialog — the same one the interface uses for stopping a runtime, naming the
    action, its target, the hourly rate where there is one, and the client that asked (the MCP
