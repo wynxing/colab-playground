@@ -317,6 +317,12 @@ def cmd_exec(state_path, args):
         else:
             err("TimeoutError: Timeout waiting for reply: no message")
         return 1
+    if cli_fail == "invalid_env":
+        err("[colab] Invalid --env value 'BAD'. Expected KEY=VALUE.")
+        return 2
+    if cli_fail == "local_error":
+        err("Traceback (most recent call last):\n  File \"/venv/colab_cli/runtime.py\", line 1\nColabRequestError: Bad Gateway")
+        return 1
     code = sys.stdin.read()
     if not code.strip():
         return 0
@@ -331,6 +337,11 @@ def cmd_exec(state_path, args):
         out(MARK + json.dumps(result))
     record_history(session, env, code, result)
     if result is None:
+        for pm in re.finditer(r'(?m)^\s*print\((["\'])(.*?)\1(,\s*file=sys\.stderr)?\)', code):
+            if pm.group(3):
+                err(pm.group(2))
+            else:
+                out(pm.group(2))
         raise_m = re.search(r"(?m)^\s*raise\s+([A-Za-z_]\w*)\((.*)\)", code)
         if raise_m:
             err("Traceback (most recent call last):\n%s: %s" % (raise_m.group(1), raise_m.group(2).strip("'\"")))
@@ -368,6 +379,9 @@ def record_history(session, env, code, result):
 
 def cmd_stop(state_path, args):
     name = require_account()
+    if fc.knob("stop_failure") == "api_error":
+        err("ColabRequestError: Internal Server Error")
+        return 1
     session = opt(args, "-s", "--session")
     records = load_state(state_path)
     rec = records.get(session)
@@ -425,11 +439,11 @@ def cmd_ssh(state_path, args):
     if s["knobs"]["ssh_busy"]:
         limit = s["knobs"].get("ssh_busy_limit")
         if limit is not None:
+            hint = " If the previous client died, retry with `--force`." if fc.knob("new_cli") else ""
             err(
                 "[colab] SSH session limit reached (HTTP 429): %d of %d SSH sessions in use on this runtime. "
-                "Close another `colab ssh` or IDE connection to it and retry. "
-                "If the previous client died, retry with `--force`. The limit depends on your Colab plan."
-                % (limit, limit)
+                "Close another `colab ssh` or IDE connection to it and retry.%s The limit depends on your Colab plan."
+                % (limit, limit, hint)
             )
         elif fc.knob("new_cli"):
             err(

@@ -67,24 +67,25 @@ when changing either.
   not read the OAuth token from the OS keyring".
 - A legacy `~/.config/colab-cli/token.json` is migrated into the keyring when
   the keyring slot is empty, which matters while adding an account.
-- Most subcommands run a daily update check; `version`, `help`, `whoami`,
-  `url`, `log`, `logout`, `readme`, `skill`, and piped `ssh` do not.
+- Most subcommands run a daily update check; `update`, `version`, `help`,
+  `whoami`, `url`, `log`, `logout`, `pay`, `test-public-api`, `readme`,
+  `skill`, and piped `ssh` do not.
 
 ## `colab exec`
 
 - It runs **Python** in the runtime's Jupyter kernel (use `subprocess` for shell
   commands). `--timeout` is an *idle* limit (seconds without output; default
-  30, 0 = none). In `0.8.0` it busy-waited; post-`0.8.0` enforces the idle
-  timeout properly and reports `"Kernel dead/restarting before the code finished."`
-  if the kernel dies mid-execution.
+  30, 0 = none), enforced in `0.8.0` and newer via streaming polls that also
+  raise `"Kernel dead/restarting before the code finished."` if the kernel dies
+  mid-execution.
 - In `0.8.0`, `colab exec` exited **0 even when the code raised** (traceback on
   stderr). In post-`0.8.0`, uncaught exceptions and `SyntaxError` exit **1**, and
   `SystemExit` follows CPython exit-code semantics (`sys.exit(0)` / `None` → `0`,
   `sys.exit(N)` → `N`, `sys.exit("msg")` → `1` with `msg` on stderr). Snippets
   therefore print one marker line (`__CPG_RESULT__ {json}`) on success, and
   `Cli::exec` treats non-CLI-level non-zero exits as remote code outcomes
-  (`Ok` with `stderr` and no `result`). CLI-level failures exit 1: `"appears to
-  be lost (404/401)"`, `"Session '…' not found."`, `"Connection was lost."`,
+  (`Ok` with `stderr` and `result: None`). CLI-level failures exit 1: `"appears
+  to be lost (404/401)"`, `"Session '…' not found."`, `"Connection was lost."`,
   `"Kernel dead/restarting before the code finished."`, `"Timeout waiting for …"`.
 - `--env K=V` is implemented by prepending `os.environ[K] = V` to the code, so:
   - values **persist in the kernel process** afterwards;
@@ -103,15 +104,16 @@ when changing either.
 
 ## `colab ssh`
 
-- In `0.8.0`, a runtime allowed **one** concurrent `colab ssh` connection; a
-  second got **HTTP 429** (`"Already-active SSH session (HTTP 429)"`).
-  Post-`0.8.0` supports plan-based concurrent SSH limits (up to 5, reporting
-  `"SSH session limit reached (HTTP 429): N of N SSH sessions in use..."`),
-  adds `--force` (kills existing `sshd` sessions via the kernel before
-  connecting), and adds `-- CMD` one-shot command execution (replacing the
-  removed `colab console` command). Background status polling over ssh once
-  blocked the tunnel (and vice versa). The tunnel owns the ssh slot; everything
-  else uses `colab exec`.
+- In `0.8.0` and newer, a runtime enforces a plan-based concurrent `colab ssh`
+  limit (up to 5 sessions). Exceeding it returns **HTTP 429**, reporting either
+  `"SSH session limit reached (HTTP 429): N of N SSH sessions in use..."` (when
+  the server includes the limit) or `"Already-active SSH session (HTTP 429)"`
+  (fallback when no limit is reported). `0.8.0` also supports `colab ssh -- CMD`
+  one-shot execution (replacing the removed `colab console` command).
+  Post-`0.8.0` adds `--force` (kills existing `sshd` sessions via the kernel
+  before connecting) and appends a `--force` hint to both HTTP 429 messages.
+  Background status polling over ssh once blocked the tunnel (and vice versa).
+  The tunnel owns the ssh slot; everything else uses `colab exec`.
 - **Cost trap:** `colab ssh --proxy-mode -s NAME` *creates* a runtime when
   `NAME` is not in its state file. A tunnel reconnecting after its session was
   stopped would silently start a new billed VM. Check that the session is still

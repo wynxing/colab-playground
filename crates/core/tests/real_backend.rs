@@ -280,6 +280,10 @@ fn stop_not_found_across_cli_versions() {
         let stale_out = cli.stop(&state, "stale", &nc()).unwrap();
         assert_eq!(stale_out, StopOutcome::NotFound);
         assert!(!cli.reap_endpoint(&scratch, "unowned-ep", &nc()).unwrap());
+        f.knob("stop_failure", json!("api_error"));
+        let err = cli.stop(&state, "missing", &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Other), "newer={newer}: {err}");
+        f.knob("stop_failure", Value::Null);
     }
 }
 
@@ -316,6 +320,30 @@ fn exec_distinguishes_remote_failures_from_cli_failures_across_cli_versions() {
         assert!(exit2.result.is_none());
         let exit_msg = exec("ex", "sys.exit('boom')").unwrap();
         assert!(exit_msg.stderr.contains("boom"), "{}", exit_msg.stderr);
+        assert!(exit_msg.result.is_none());
+
+        let code_127 = "print('not found', file=sys.stderr)\nsys.exit(127)";
+        let remote_127 = exec("ex", code_127).unwrap();
+        assert!(remote_127.result.is_none());
+        assert!(remote_127.stderr.contains("not found"));
+
+        let code_429 = "print('(HTTP 429)', file=sys.stderr)\nsys.exit(1)";
+        let remote_429 = exec("ex", code_429).unwrap();
+        assert!(remote_429.result.is_none());
+        assert!(remote_429.stderr.contains("(HTTP 429)"));
+
+        let code_usage = "print('Usage: foo', file=sys.stderr)\nsys.exit(2)";
+        let remote_usage = exec("ex", code_usage).unwrap();
+        assert!(remote_usage.result.is_none());
+        assert!(remote_usage.stderr.contains("Usage: foo"));
+
+        if newer {
+            let marker_code = "print('__CPG_RESULT__ {\"ok\": 1}')\nsys.exit(1)";
+            let crashed = exec("ex", marker_code).unwrap();
+            assert!(crashed.result.is_none());
+            let crashed_json = exec_json("ex", marker_code).unwrap_err();
+            assert!(crashed_json.is(ErrorKind::Parse), "{crashed_json}");
+        }
 
         let missing = exec("missing", "print(1)").unwrap_err();
         assert!(missing.is(ErrorKind::SessionGone), "{missing}");
@@ -324,6 +352,8 @@ fn exec_distinguishes_remote_failures_from_cli_failures_across_cli_versions() {
             ("connection_lost", ErrorKind::ConnectionLost),
             ("kernel_dead", ErrorKind::ConnectionLost),
             ("timeout", ErrorKind::ExecTimeout),
+            ("invalid_env", ErrorKind::Other),
+            ("local_error", ErrorKind::Other),
         ] {
             f.knob("exec_failure", json!(knob));
             let err = exec("ex", "print(1)").unwrap_err();
@@ -1167,6 +1197,29 @@ fn tunnel_reports_429_and_port_in_use() {
             assert_eq!(error.param("limit"), Some("5"));
             let detail = &error.detail;
             assert!(detail.contains("5 of 5 SSH sessions in use"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("ssh_busy_limit", Value::Null);
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+            let detail = &error.detail;
+            assert!(detail.contains("--force"), "{detail}");
         }
         other => panic!("{other:?}"),
     }
