@@ -110,6 +110,7 @@ fn fixture() -> Fixture {
         http: Arc::new(NoHttp),
         defaults: Defaults::default(),
         run_poll_interval: Duration::from_secs(1),
+        guard_keep_timeout: Duration::from_secs(45),
     };
     let b = RealBackend::new(cfg.clone()).unwrap();
     Fixture {
@@ -2039,6 +2040,7 @@ fn keep_plan_local_sync_and_pre_stop_never_discards_on_failure() {
                 reason: StopReason::User,
                 save_keep: true,
                 force_on_keep_error: false,
+                ..StopOptions::default()
             },
             &nc(),
         )
@@ -2084,6 +2086,7 @@ fn keep_plan_local_sync_and_pre_stop_never_discards_on_failure() {
             reason: StopReason::User,
             save_keep: true,
             force_on_keep_error: false,
+            ..StopOptions::default()
         },
         &nc(),
     )
@@ -2292,6 +2295,7 @@ fn keep_plan_drive_silent_exit_zero_failure_never_marks_mounted_and_force_stop_r
             reason: StopReason::User,
             save_keep: true,
             force_on_keep_error: true,
+            ..StopOptions::default()
         },
         &nc(),
     )
@@ -2332,14 +2336,14 @@ t.start()
 port = srv.server_address[1]
 cfg = {
     "deadline_epoch": None,
-    "idle_timeout_s": 1.2,
+    "idle_timeout_s": 4.0,
     "cancelled": False,
     "runtime_addr": f"127.0.0.1:{port}",
     "heartbeat": os.path.join(tmp, "heartbeat"),
     "log": os.path.join(tmp, "watchdog.log"),
     "poll_s": 0.2,
     "grace_s": 10,
-    "started": time.time() - 2.0,
+    "started": time.time() - 1.5,
 }
 cfg_path = os.path.join(tmp, "watchdog.json")
 with open(cfg_path, "w") as fh:
@@ -2358,20 +2362,34 @@ print("OK")
     )
     .unwrap();
 
-    let hooks = vec![WatchdogHook {
-        argv: vec![
-            "python3".into(),
-            "-c".into(),
-            format!(
-                "import pathlib, sys; pathlib.Path({:?}).write_text('periodic'); pathlib.Path({:?}).write_text('idle')",
-                marker.to_string_lossy(),
-                idle_marker.to_string_lossy()
-            ),
-        ],
-        env: BTreeMap::new(),
-        timeout_s: 15,
-        interval_s: Some(1),
-    }];
+    let hooks = vec![
+        WatchdogHook {
+            argv: vec![
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import pathlib; p = pathlib.Path({:?}); p.write_text((p.read_text() if p.exists() else '') + 'periodic\\n')",
+                    marker.to_string_lossy(),
+                ),
+            ],
+            env: BTreeMap::new(),
+            timeout_s: 15,
+            interval_s: Some(1),
+        },
+        WatchdogHook {
+            argv: vec![
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import pathlib; pathlib.Path({:?}).write_text('idle')",
+                    idle_marker.to_string_lossy(),
+                ),
+            ],
+            env: BTreeMap::new(),
+            timeout_s: 15,
+            interval_s: None,
+        },
+    ];
     let mut child = Command::new("python3")
         .args(["-B", driver.to_str().unwrap(), tmp.path().to_str().unwrap(), wd_py.to_str().unwrap()])
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -2389,7 +2407,158 @@ print("OK")
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success() && stdout.contains("OK"), "stdout={stdout}\nstderr={stderr}\ncfg={cfg_path:?}\nlog={:?}", std::fs::read_to_string(&log_path));
+    let wd_log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(out.status.success() && stdout.contains("OK"), "stdout={stdout}\nstderr={stderr}\ncfg={cfg_path:?}\nlog={wd_log:?}");
     assert!(marker.exists(), "periodic hook must have executed");
     assert!(idle_marker.exists(), "wind-down hook must have run before idle release");
+    let hook0_pos = wd_log.find("hook 0").expect("hook 0 must be logged");
+    let winddown_pos = wd_log.find("wind-down started").expect("wind-down must be logged");
+    assert!(hook0_pos < winddown_pos, "periodic hook 0 must run before wind-down: {wd_log}");
+    let hook1_pos = wd_log.find("hook 1").expect("hook 1 must be logged");
+    assert!(hook1_pos > winddown_pos, "wind-down-only hook 1 must only run during wind-down: {wd_log}");
+}
+
+#[test]
+fn guard_poll_cancels_hanging_keep_sync_and_still_stops_runtime() {
+    use colab_playground_core::guard::GuardPolicy;
+    use colab_playground_core::keep::{KeepPlan, LocalKeepTarget};
+    use std::time::Instant;
+
+    let f = fixture();
+    f.adopt_alice();
+    let mut cfg = f.cfg.clone();
+    cfg.guard_keep_timeout = Duration::from_millis(300);
+    let backend = RealBackend::new(cfg).unwrap();
+    let mut spec = ProvisionSpec::new("guard-keep-timeout", Accelerator::T4, &Defaults::default());
+    spec.guard = GuardPolicy {
+        min_balance_cu: Some(40.0),
+        ..GuardPolicy::unlimited()
+    };
+    let (tx, _rx) = channel();
+    backend.provision(spec, tx, &nc()).unwrap();
+    let rt = backend
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("guard-keep-timeout"))
+        .unwrap()
+        .id;
+
+    let save_dir = f.root.join("guard-timeout-save");
+    backend
+        .set_keep_plan(
+            &rt,
+            Some(KeepPlan {
+                paths: vec!["/content/out".into()],
+                local: Some(LocalKeepTarget {
+                    folder: save_dir.to_string_lossy().into_owned(),
+                }),
+                hf: None,
+                drive: None,
+            }),
+            &nc(),
+        )
+        .unwrap();
+
+    // Drop balance below min_balance_cu so guard_poll issues Decision::Stop, and make Keep sync hang.
+    f.edit_server(|s| s["accounts"]["alice"]["balance"] = json!(30.0));
+    f.knob("keep_sync_hangs", json!(true));
+
+    let started = Instant::now();
+    let report = backend.guard_poll(&nc()).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "guard_poll took too long when Keep Plan hung: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(report.decisions.len(), 1, "{report:?}");
+    assert!(report.decisions[0].stopped, "runtime must still be stopped: {report:?}");
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn unconsented_drive_target_is_skipped_by_default_sync_and_stop_session() {
+    use colab_playground_core::keep::{DriveKeepTarget, KeepPlan, KeepTargetId, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("unconsented-drive", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("unconsented-drive"))
+        .unwrap()
+        .id;
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/a.txt": "hello"});
+    });
+
+    // Local + unconsented Drive: default sync_keep only syncs Local; explicit Drive still fails.
+    let save_dir = f.root.join("unconsented-local-save");
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: Some(LocalKeepTarget {
+                folder: save_dir.to_string_lossy().into_owned(),
+            }),
+            hf: None,
+            drive: Some(DriveKeepTarget {
+                mount_path: "/content/drive".into(),
+                dest_subpath: "MyDrive/out".into(),
+                consented: false,
+                mounted: false,
+            }),
+        }),
+        &nc(),
+    )
+    .unwrap();
+    assert!(
+        f.b.sync_keep(&rt, Some(vec![KeepTargetId::Drive]), &nc())
+            .is_err()
+    );
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].0, KeepTargetId::Local);
+
+    // Only unconsented Drive: has_enabled_target() is false, so stop_session(save_keep: true)
+    // must not attempt Drive sync or abort stop.
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: None,
+            hf: None,
+            drive: Some(DriveKeepTarget {
+                mount_path: "/content/drive".into(),
+                dest_subpath: "MyDrive/out".into(),
+                consented: false,
+                mounted: false,
+            }),
+        }),
+        &nc(),
+    )
+    .unwrap();
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: false,
+            ..StopOptions::default()
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
 }

@@ -52,6 +52,7 @@ DEFAULT_KNOBS = {
     "drive_already_authorized": False,  # `colab drivemount` mounts without prompting
     "drive_mount_fails": False,     # `colab drivemount` prints failure without exiting non-zero
     "hf_upload_fails": False,       # Keep Plan HF upload snippet reports failure
+    "keep_sync_hangs": False,       # Keep Plan archive/upload snippet stalls until cancelled
 }
 
 

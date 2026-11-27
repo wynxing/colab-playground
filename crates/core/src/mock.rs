@@ -1664,7 +1664,7 @@ impl Backend for MockBackend {
                     .ledger
                     .live(&target.account, name)
                     .and_then(|e| e.keep_plan.as_ref())
-                    .is_some_and(|p| p.local.is_some() || p.hf.is_some() || p.drive.is_some())
+                    .is_some_and(|p| p.has_enabled_target())
             });
             if has_plan
                 && let Err(err) = self.sync_keep(target, None, cancel)
@@ -1872,7 +1872,7 @@ impl Backend for MockBackend {
                 if plan.hf.is_some() {
                     list.push(KeepTargetId::HuggingFace);
                 }
-                if plan.drive.is_some() {
+                if plan.drive.as_ref().is_some_and(|d| d.consented) {
                     list.push(KeepTargetId::Drive);
                 }
                 list
@@ -2197,6 +2197,7 @@ impl Backend for MockBackend {
                         },
                         save_keep,
                         force_on_keep_error: true,
+                        keep_timeout: Some(Duration::from_secs(45)),
                     },
                     cancel,
                 ) {
@@ -3967,20 +3968,46 @@ mod tests {
         )
         .unwrap();
 
-        // Unconsented Drive target must fail sync and abort stop when save_keep = true.
-        assert!(m.sync_keep(&rt, None, &nc()).is_err());
+        // Explicit Drive sync fails when unconsented, while default sync skips unconsented Drive
+        // and syncs enabled Local target cleanly.
         assert!(
-            m.stop_session(
-                &rt,
-                StopOptions {
-                    reason: StopReason::User,
-                    save_keep: true,
-                    force_on_keep_error: false,
-                },
-                &nc(),
-            )
-            .is_err()
+            m.sync_keep(&rt, Some(vec![crate::keep::KeepTargetId::Drive]), &nc())
+                .is_err()
         );
-        assert_eq!(m.runtimes(&nc()).unwrap().runtimes.len(), 1);
+        let report = m.sync_keep(&rt, None, &nc()).unwrap();
+        assert!(report.all_succeeded());
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].0, crate::keep::KeepTargetId::Local);
+
+        // If only an unconsented Drive target exists, stop_session must not abort on it.
+        m.set_keep_plan(
+            &rt,
+            Some(KeepPlan {
+                paths: vec!["/content/out".into()],
+                local: None,
+                hf: None,
+                drive: Some(DriveKeepTarget {
+                    mount_path: "/content/drive".into(),
+                    dest_subpath: "MyDrive/out".into(),
+                    consented: false,
+                    mounted: false,
+                }),
+            }),
+            &nc(),
+        )
+        .unwrap();
+        assert!(m.sync_keep(&rt, None, &nc()).is_err());
+        m.stop_session(
+            &rt,
+            StopOptions {
+                reason: StopReason::User,
+                save_keep: true,
+                force_on_keep_error: false,
+                keep_timeout: None,
+            },
+            &nc(),
+        )
+        .unwrap();
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
     }
 }

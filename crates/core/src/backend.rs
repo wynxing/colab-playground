@@ -144,6 +144,10 @@ pub struct StopOptions {
     /// Continue stopping the runtime even if the pre-stop Keep Plan sync fails.
     #[serde(default)]
     pub force_on_keep_error: bool,
+    /// Optional timeout for the pre-stop Keep Plan sync (used by `guard_poll` so
+    /// cost protection cannot be stalled by a slow upload or download).
+    #[serde(default, with = "crate::clock::serde_dur::option")]
+    pub keep_timeout: Option<Duration>,
 }
 
 impl Default for StopOptions {
@@ -152,6 +156,7 @@ impl Default for StopOptions {
             reason: StopReason::User,
             save_keep: false,
             force_on_keep_error: false,
+            keep_timeout: None,
         }
     }
 }

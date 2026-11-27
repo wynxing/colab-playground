@@ -317,6 +317,8 @@ def simulate(code, env, s, ep, a):
             run["killed"] = True
         return {"signalled": bool(run)}
     if "CPG_KEEP_ARCHIVE" in code and "tarfile" in code:
+        if s["knobs"].get("keep_sync_hangs"):
+            time.sleep(600)
         paths = json.loads(env.get("CPG_KEEP_PATHS", "[]"))
         archive_path = env.get("CPG_KEEP_ARCHIVE", "")
         matched = matching_vm_files(a, paths)

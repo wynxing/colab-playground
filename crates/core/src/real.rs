@@ -68,6 +68,9 @@ pub struct RealConfig {
     pub http: Arc<dyn HttpClient>,
     pub defaults: Defaults,
     pub run_poll_interval: Duration,
+    /// Maximum time `guard_poll` waits on a pre-stop Keep Plan sync before
+    /// cancelling the sync and proceeding with the runtime stop.
+    pub guard_keep_timeout: Duration,
 }
 
 #[cfg(test)]
@@ -368,6 +371,7 @@ impl RealConfig {
             http: crate::http::default_client(),
             defaults,
             run_poll_interval: Duration::from_secs(10),
+            guard_keep_timeout: Duration::from_secs(45),
         })
     }
 }
@@ -1918,13 +1922,43 @@ impl Backend for RealBackend {
                     .ledger
                     .live(&target.account, name)
                     .and_then(|e| e.keep_plan.as_ref())
-                    .is_some_and(|p| p.local.is_some() || p.hf.is_some() || p.drive.is_some())
+                    .is_some_and(|p| p.has_enabled_target())
             });
-            if has_plan
-                && let Err(err) = self.sync_keep(target, None, cancel)
-                && !options.force_on_keep_error
-            {
-                return Err(err);
+            if has_plan {
+                let keep_res = if let Some(limit) = options.keep_timeout {
+                    let keep_cancel = CancelToken::new();
+                    let keep_cancel_bg = keep_cancel.clone();
+                    let outer_cancel = cancel.clone();
+                    let (tx, rx) = std::sync::mpsc::channel::<()>();
+                    let watcher = std::thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + limit;
+                        loop {
+                            if outer_cancel.is_cancelled() || std::time::Instant::now() >= deadline
+                            {
+                                keep_cancel_bg.cancel();
+                                break;
+                            }
+                            let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                            match rx.recv_timeout(rem.min(Duration::from_millis(50))) {
+                                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                    break;
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                            }
+                        }
+                    });
+                    let res = self.sync_keep(target, None, &keep_cancel);
+                    let _ = tx.send(());
+                    let _ = watcher.join();
+                    res
+                } else {
+                    self.sync_keep(target, None, cancel)
+                };
+                if let Err(err) = keep_res
+                    && !options.force_on_keep_error
+                {
+                    return Err(err);
+                }
             }
         }
         self.inner.stop(target, &options, cancel)
@@ -2058,7 +2092,7 @@ impl Backend for RealBackend {
                 if plan.hf.is_some() {
                     list.push(KeepTargetId::HuggingFace);
                 }
-                if plan.drive.is_some() {
+                if plan.drive.as_ref().is_some_and(|d| d.consented) {
                     list.push(KeepTargetId::Drive);
                 }
                 list
@@ -2559,6 +2593,7 @@ impl Backend for RealBackend {
                         },
                         save_keep,
                         force_on_keep_error: true,
+                        keep_timeout: Some(self.inner.cfg.guard_keep_timeout),
                     },
                     cancel,
                 ) {
@@ -2746,6 +2781,7 @@ impl Backend for RealBackend {
                     reason: StopReason::Provision,
                     save_keep: false,
                     force_on_keep_error: false,
+                    keep_timeout: None,
                 },
                 &CancelToken::new(),
             );
