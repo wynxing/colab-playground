@@ -245,6 +245,8 @@ if os.path.isdir(_base):
                 _meta = json.load(_fh)
         except Exception:
             continue
+        if not isinstance(_meta, dict) or _meta.get("run_id") != _rid:
+            continue
         try:
             with open(_d + "/status.json") as _fh:
                 _st = json.load(_fh)
@@ -402,6 +404,15 @@ pub struct DiscoveredVmRun {
     pub skipped: u64,
 }
 
+fn is_safe_run_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains('\0')
+}
+
 pub fn parse_discovered(v: &serde_json::Value) -> Vec<DiscoveredVmRun> {
     let Some(runs) = v.get("runs").and_then(|r| r.as_array()) else {
         return Vec::new();
@@ -416,7 +427,7 @@ pub fn parse_discovered(v: &serde_json::Value) -> Vec<DiscoveredVmRun> {
                 return None;
             }
             let meta: RunMeta = serde_json::from_value(item.get("meta")?.clone()).ok()?;
-            if meta.run_id.is_empty() || meta.plugin.is_empty() {
+            if !is_safe_run_id(&meta.run_id) || meta.plugin.is_empty() {
                 return None;
             }
             let status = match item.get("status") {
@@ -574,5 +585,19 @@ mod tests {
         let snippet = vm_ls_snippet("/content/ComfyUI/output");
         assert!(snippet.contains("/content/ComfyUI/output"));
         assert!(snippet.contains("os.walk"));
+    }
+
+    #[test]
+    fn parse_discovered_rejects_unsafe_run_ids() {
+        for bad in ["", ".", "..", "../evil", "a/b", "a\\b", "a\0b"] {
+            let parsed = parse_discovered(&serde_json::json!({
+                "runs": [{
+                    "alive": true,
+                    "meta": {"run_id": bad, "plugin": "comfyui"}
+                }]
+            }));
+            assert!(parsed.is_empty(), "expected {bad:?} to be rejected");
+        }
+        assert!(plugin_discover_snippet().contains("_meta.get(\"run_id\") != _rid"));
     }
 }

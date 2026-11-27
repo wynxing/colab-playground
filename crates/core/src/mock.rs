@@ -2202,21 +2202,18 @@ impl Backend for MockBackend {
         };
         let manual_stages = step_rx.is_some();
         let wait_step = |cancel: &CancelToken| -> Result<()> {
-            let Some(rx) = &step_rx else {
-                return Ok(());
-            };
-            loop {
-                if cancel.is_cancelled() {
-                    return Err(Error::cancelled());
-                }
-                match rx.recv_timeout(Duration::from_millis(5)) {
+            if let Some(rx) = &step_rx {
+                match rx.try_recv() {
                     Ok(()) => return Ok(()),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         return Err(Error::cancelled());
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        return self.step(cancel);
                     }
                 }
             }
+            self.step(cancel)
         };
         let _ = events.send(PluginRunEvent::Launched {
             session: session.clone(),
@@ -2278,17 +2275,12 @@ impl Backend for MockBackend {
             status
         };
         if keep_alive {
-            if manual_stages {
-                if wait_step(cancel).is_err() {
+            for _ in 0..LIVE_RUN_STEPS {
+                if cancel.is_cancelled() || self.step(cancel).is_err() {
                     finish_entry(self);
                     return Err(Error::cancelled());
                 }
-            } else {
-                for _ in 0..LIVE_RUN_STEPS {
-                    if cancel.is_cancelled() || self.step(cancel).is_err() {
-                        finish_entry(self);
-                        return Err(Error::cancelled());
-                    }
+                if !manual_stages {
                     std::thread::sleep(Duration::from_millis(LIVE_STEP_MILLIS));
                 }
             }

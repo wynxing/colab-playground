@@ -305,11 +305,8 @@ impl AppState {
 
     /// Sets the wait's own deadline, so its answer never depends on something happening.
     fn watch_timer(&mut self, asked: u64, cx: &mut Context<Self>) {
-        let previous = self.watch_timer.take();
+        drop(self.watch_timer.take());
         self.watch_timer = Some(cx.spawn(async move |this, cx| {
-            if let Some(previous) = previous {
-                previous.await;
-            }
             cx.background_executor().timer(WATCH_WAIT).await;
             this.update(cx, |state, cx| state.lapse_agent_watch(asked, cx))
                 .ok();
@@ -381,11 +378,8 @@ impl AppState {
     }
 
     fn session_watch_timer(&mut self, asked: u64, cx: &mut Context<Self>) {
-        let previous = self.session_watch_timer.take();
+        drop(self.session_watch_timer.take());
         self.session_watch_timer = Some(cx.spawn(async move |this, cx| {
-            if let Some(previous) = previous {
-                previous.await;
-            }
             cx.background_executor().timer(WATCH_WAIT).await;
             this.update(cx, |state, cx| state.lapse_agent_session_watch(asked, cx))
                 .ok();

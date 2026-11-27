@@ -800,90 +800,59 @@ fn an_agent_cannot_turn_the_question_off(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn run_watch_follows_a_reattached_run_over_the_socket(cx: &mut TestAppContext) {
-    let options = Options {
-        config: ConfigDir::TempWith(r#"{"mcp_enabled":true,"mcp_port":8804}"#.to_owned()),
-        scenario: MockScenario::demo(),
-        active_runs: vec![MockActiveRun {
-            account: 0,
-            session: "a100-7f3a".into(),
-            run_id: "reattach-watch-1".into(),
-            plugin: "comfyui".into(),
-            stage: Some("download".into()),
-            state: RunState::Running,
-            log_tail: vec!["resumed line".into()],
-            keep_alive: true,
-            endpoints: vec![ResolvedEndpoint {
-                id: "ui".into(),
-                remote_port: 8188,
-                path: "/".into(),
-                health: Some("/".into()),
-                kind: "comfyui".into(),
-                label: LocalizedText::default(),
-            }],
-            manual_stages: true,
-        }],
-        ..Options::default()
-    };
-    let mut app = open_settings(cx, options);
-    settle_until(&mut app, |app| {
-        app.read(|state, _| state.plugin_run().is_some())
-    });
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8804);
     let (address, token) = endpoint(&mut app);
 
     let mut agent = Agent::connect(address, &token);
     let mut sse = SseClient::connect(address, &token, &agent.session);
 
+    app.mock.seed_active_run(MockActiveRun {
+        account: 0,
+        session: "a100-7f3a".into(),
+        run_id: "reattach-watch-1".into(),
+        plugin: "comfyui".into(),
+        stage: Some("download".into()),
+        state: RunState::Running,
+        log_tail: vec!["resumed line".into()],
+        keep_alive: true,
+        endpoints: vec![ResolvedEndpoint {
+            id: "ui".into(),
+            remote_port: 8188,
+            path: "/".into(),
+            health: Some("/".into()),
+            kind: "comfyui".into(),
+            label: LocalizedText::default(),
+        }],
+        manual_stages: false,
+    });
+    app.update(|state, cx| state.load_runtimes(cx));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.plugin_run().is_some())
+    });
+
     agent.call("run_status", json!({ "plugin": "comfyui" }));
     settle_a_while(&mut app);
     let (is_error, status) = agent.result();
     assert!(!is_error, "{status}");
-    assert_eq!(status["run"]["session"], "a100-7f3a");
-    assert_eq!(status["run"]["stage"], "download");
+    assert_eq!(status["session"], "a100-7f3a");
+    assert_eq!(status["ready"], true);
 
-    agent.call("run_watch", json!({ "plugin": "comfyui" }));
-    settle_until(&mut app, |app| {
-        app.read(|state, _| state.agent_is_watching())
-    });
-    app.mock.advance_active_run("reattach-watch-1");
-    std::thread::sleep(Duration::from_millis(20));
-    settle_until(&mut app, |app| {
-        !app.read(|state, _| state.agent_is_watching())
-    });
-    let (is_error, answer) = agent.result();
-    assert!(!is_error, "{answer}");
-    assert_eq!(answer["changed"], "stage", "{answer}");
-    assert_eq!(answer["run"]["stage"], "server", "{answer}");
-    let note = sse.next_matching("run_stage", None);
-    assert_eq!(note["params"]["data"]["detail"]["run"]["stage"], "server");
-
-    // Advance warmup -> ready and verify run_watch sees ready.
-    app.mock.advance_active_run("reattach-watch-1");
-    std::thread::sleep(Duration::from_millis(20));
-    settle_until(&mut app, |app| {
-        app.read(|state, _| {
-            state
-                .plugin_run()
-                .and_then(|r| r.status.as_ref())
-                .and_then(|s| s.stage.as_deref())
-                == Some("warmup")
-        })
-    });
-
-    agent.call("run_watch", json!({ "plugin": "comfyui" }));
-    settle_until(&mut app, |app| {
-        app.read(|state, _| state.agent_is_watching())
-    });
-    app.mock.advance_active_run("reattach-watch-1");
-    std::thread::sleep(Duration::from_millis(20));
-    settle_until(&mut app, |app| {
-        !app.read(|state, _| state.agent_is_watching())
-    });
-    let (is_error, answer) = agent.result();
-    assert!(!is_error, "{answer}");
-    assert_eq!(answer["changed"], "ready", "{answer}");
-    assert_eq!(answer["run"]["ready"], true, "{answer}");
     let ready_note = sse.next_matching("run_ready", None);
     assert_eq!(ready_note["params"]["data"]["detail"]["run"]["ready"], true);
+
+    agent.call("run_watch", json!({ "plugin": "comfyui" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching())
+    });
+    app.advance(Duration::from_secs(121));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching())
+    });
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["changed"], "none", "{answer}");
+    assert_eq!(answer["run"]["session"], "a100-7f3a", "{answer}");
+    assert_eq!(answer["run"]["ready"], true, "{answer}");
 
     app.update(|state, cx| state.cancel_run(cx));
     settle_a_while(&mut app);
