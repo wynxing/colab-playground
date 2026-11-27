@@ -55,6 +55,21 @@ pub enum CliCommand {
         /// Session name.
         name: String,
     },
+    /// `colab url -s NAME`.
+    Url {
+        /// Session name.
+        name: String,
+    },
+    /// `colab restart-kernel -s NAME`.
+    RestartKernel {
+        /// Session name.
+        name: String,
+    },
+    /// `colab ssh --force --proxy-mode -s NAME`.
+    SshReset {
+        /// Session name.
+        name: String,
+    },
     /// `colab download -s NAME REMOTE LOCAL`.
     Download {
         /// Session name.
@@ -124,6 +139,24 @@ pub fn build_argv(state_file: Option<&HostPath>, cmd: &CliCommand) -> Result<Vec
         CliCommand::Stop { name } => {
             validate_session_name(name)?;
             argv.extend(["stop".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::Url { name } => {
+            validate_session_name(name)?;
+            argv.extend(["url".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::RestartKernel { name } => {
+            validate_session_name(name)?;
+            argv.extend(["restart-kernel".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::SshReset { name } => {
+            validate_session_name(name)?;
+            argv.extend([
+                "ssh".into(),
+                "--force".into(),
+                "--proxy-mode".into(),
+                "-s".into(),
+                name.clone(),
+            ]);
         }
         CliCommand::Download {
             name,
@@ -235,6 +268,9 @@ fn describe(cmd: &CliCommand) -> String {
         CliCommand::Version => "version".to_owned(),
         CliCommand::Whoami => "whoami".to_owned(),
         CliCommand::Stop { name } => format!("stop -s {name}"),
+        CliCommand::Url { name } => format!("url -s {name}"),
+        CliCommand::RestartKernel { name } => format!("restart-kernel -s {name}"),
+        CliCommand::SshReset { name } => format!("ssh --force --proxy-mode -s {name}"),
         CliCommand::Download { name, remote, .. } => format!("download -s {name} {remote} <here>"),
         CliCommand::Exec {
             name,
@@ -569,6 +605,86 @@ impl Cli {
         Ok(())
     }
 
+    pub fn url(&self, state: &HostPath, name: &str, cancel: &CancelToken) -> Result<String> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Url {
+                name: name.to_owned(),
+            },
+            60,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        out.stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("https://") || line.starts_with("http://"))
+            .map(str::to_owned)
+            .ok_or_else(|| Error::new(ErrorKind::Parse).detail(tail(&out.stdout, 200)))
+    }
+
+    pub fn restart_kernel(
+        &self,
+        state: &HostPath,
+        name: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::RestartKernel {
+                name: name.to_owned(),
+            },
+            120,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(())
+    }
+
+    pub fn reset_ssh(&self, state: &HostPath, name: &str, cancel: &CancelToken) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::SshReset {
+                name: name.to_owned(),
+            },
+            60,
+            cancel,
+        )?;
+        if out.success() {
+            return Ok(());
+        }
+        // `google-colab-cli` 0.8.0 has no `ssh --force` flag yet; fall back to
+        // the exact `sshd` child cleanup used by post-0.8.0 `_killStaleSshd`.
+        if out.code == Some(2)
+            && out.stderr.contains("--force")
+            && (out.stderr.contains("No such option") || out.stderr.contains("unrecognized"))
+        {
+            self.exec(
+                state,
+                name,
+                &[],
+                "import subprocess; subprocess.run(['sh', '-c', 'pkill -P $(pgrep -o -x sshd) 2>/dev/null || true'])",
+                30,
+                cancel,
+            )?;
+            return Ok(());
+        }
+        // In post-0.8.0, `_killStaleSshd` runs before `_resolve_pubkey`; when no public key exists
+        // yet in `~/.ssh/`, the CLI exits 2 after already killing stale sshd sessions.
+        if out.code == Some(2)
+            && out.stderr.contains("no SSH public key found")
+            && out.stderr.contains("--force: killing stale SSH sessions")
+            && !out.stderr.contains("--force: failed to kill sshd")
+        {
+            return Ok(());
+        }
+        Err(classify_failure(&out))
+    }
+
     pub fn version(&self, cancel: &CancelToken) -> Result<String> {
         let out = self.run_simple(None, &CliCommand::Version, 60, cancel)?;
         if !out.success() {
@@ -750,6 +866,39 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(
+            build_argv(Some(&state), &CliCommand::Url { name: "llm".into() }).unwrap(),
+            ["--config", "/d/accounts/a1/sessions.json", "url", "-s", "llm"]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::RestartKernel { name: "llm".into() }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "restart-kernel",
+                "-s",
+                "llm"
+            ]
+        );
+        assert_eq!(
+            build_argv(Some(&state), &CliCommand::SshReset { name: "llm".into() }).unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "ssh",
+                "--force",
+                "--proxy-mode",
+                "-s",
+                "llm"
+            ]
+        );
+        assert!(build_argv(None, &CliCommand::Url { name: "../bad".into() }).is_err());
+        assert!(build_argv(None, &CliCommand::RestartKernel { name: "".into() }).is_err());
+        assert!(build_argv(None, &CliCommand::SshReset { name: "a b".into() }).is_err());
     }
 
     #[test]
