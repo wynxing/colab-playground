@@ -126,6 +126,103 @@ pub fn proxy_command(colab: &str, state_file: &HostPath, session: &str) -> Strin
     )
 }
 
+/// Quotes an argument for Windows / Win32-OpenSSH command lines (`CommandLineToArgvW`).
+fn win_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:@+,\\".contains(c))
+    {
+        return s.to_owned();
+    }
+    let mut out = String::from('"');
+    let mut backslashes = 0usize;
+    for ch in s.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', backslashes));
+                out.push(ch);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat_n('\\', backslashes * 2));
+    out.push('"');
+    out
+}
+
+/// Formats `ssh -F <config_path> <host_alias>` for the host's shell.
+pub fn ssh_config_command(config_path: &str, host_alias: &str) -> String {
+    let quoted = if config_path.contains('\\') || config_path.contains(':') {
+        win_quote(config_path)
+    } else {
+        shell_quote(config_path)
+    };
+    format!("ssh -F {quoted} {host_alias}")
+}
+
+/// Builds copyable IDE Remote-SSH command and isolated config snippet without
+/// reading or editing `~/.ssh/config`.
+pub fn remote_ssh_info(
+    host: &Host,
+    colab: &str,
+    state_file: &HostPath,
+    session: &str,
+) -> Result<crate::backend::RemoteSsh> {
+    validate_session_name(session)?;
+    let proxy = match host {
+        Host::Local => proxy_command(colab, state_file, session),
+        Host::Wsl { distro: Some(d) } => {
+            format!(
+                "wsl.exe -d {} -- {} --config {} ssh --proxy-mode -s {}",
+                win_quote(d),
+                win_quote(colab),
+                win_quote(state_file.as_str()),
+                win_quote(session)
+            )
+        }
+        Host::Wsl { distro: None } => {
+            format!(
+                "wsl.exe -- {} --config {} ssh --proxy-mode -s {}",
+                win_quote(colab),
+                win_quote(state_file.as_str()),
+                win_quote(session)
+            )
+        }
+    };
+    let known_hosts = match host {
+        Host::Local => "/dev/null",
+        Host::Wsl { .. } => "none",
+    };
+    let host_alias = format!("colab-{session}");
+    let command = match host {
+        Host::Local => format!(
+            "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile={known_hosts} -o {} root@colab-runtime",
+            shell_quote(&format!("ProxyCommand={proxy}"))
+        ),
+        Host::Wsl { .. } => {
+            let escaped = proxy.replace('"', "\\\"");
+            format!(
+                "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile={known_hosts} -o \"ProxyCommand={escaped}\" root@colab-runtime"
+            )
+        }
+    };
+    let config_snippet = format!(
+        "Host {host_alias}\n  HostName colab-runtime\n  User root\n  StrictHostKeyChecking no\n  UserKnownHostsFile {known_hosts}\n  ProxyCommand {proxy}"
+    );
+    Ok(crate::backend::RemoteSsh {
+        host_alias,
+        state_file: state_file.as_str().to_owned(),
+        command,
+        config_snippet,
+    })
+}
+
 pub fn ssh_args(colab: &str, state_file: &HostPath, spec: &TunnelSpec) -> Result<Vec<String>> {
     spec.validate()?;
     let opt = |s: &str| ["-o".to_owned(), s.to_owned()];
@@ -829,6 +926,58 @@ mod tests {
         assert!(
             !marker.exists(),
             "fake ssh did not receive SIGTERM on stdin EOF"
+        );
+    }
+
+    #[test]
+    fn remote_ssh_info_uses_account_config_and_avoids_user_ssh_config() {
+        let state = HostPath::new("/home/u/.local/share/colab-playground/accounts/a1/sessions.json");
+        let local = remote_ssh_info(&Host::Local, "/usr/bin/colab", &state, "a100-1").unwrap();
+        assert_eq!(local.host_alias, "colab-a100-1");
+        assert_eq!(local.state_file, state.as_str());
+        assert!(local.command.contains("ProxyCommand="));
+        assert!(local.command.contains(state.as_str()));
+        assert!(local.command.contains("UserKnownHostsFile=/dev/null"));
+        assert!(local.command.contains("ssh --proxy-mode -s a100-1"));
+        assert!(local.config_snippet.contains("Host colab-a100-1"));
+        assert!(local.config_snippet.contains("ProxyCommand /usr/bin/colab --config"));
+        assert!(!local.command.contains(".ssh/config"));
+        assert!(!local.config_snippet.contains(".ssh/config"));
+
+        let wsl = remote_ssh_info(
+            &Host::Wsl {
+                distro: Some("Ubuntu".into()),
+            },
+            "/home/u/my tools/colab",
+            &state,
+            "a100-1",
+        )
+        .unwrap();
+        assert!(wsl.command.contains("wsl.exe -d Ubuntu -- \\\"/home/u/my tools/colab\\\""));
+        assert!(wsl.command.contains("UserKnownHostsFile=none"));
+        assert!(!wsl.command.contains("bash -lc"));
+        assert!(
+            wsl.config_snippet
+                .contains("ProxyCommand wsl.exe -d Ubuntu -- \"/home/u/my tools/colab\" --config")
+        );
+        assert!(wsl.config_snippet.contains("UserKnownHostsFile none"));
+
+        let wsl_default = remote_ssh_info(
+            &Host::Wsl { distro: None },
+            "/home/u/.local/bin/colab",
+            &state,
+            "a100-1",
+        )
+        .unwrap();
+        assert!(wsl_default.config_snippet.contains("ProxyCommand wsl.exe -- "));
+
+        assert_eq!(
+            ssh_config_command("/tmp/my dir/a1-s1.conf", "colab-s1"),
+            "ssh -F '/tmp/my dir/a1-s1.conf' colab-s1"
+        );
+        assert_eq!(
+            ssh_config_command(r"C:\Users\my user\a1-s1.conf", "colab-s1"),
+            "ssh -F \"C:\\Users\\my user\\a1-s1.conf\" colab-s1"
         );
     }
 }
