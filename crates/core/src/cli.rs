@@ -966,6 +966,24 @@ A new version of colab-cli is available
         );
     }
 
+    #[test]
+    fn local_cli_exec_failures_are_told_apart_from_remote_errors() {
+        let local = |code, stdout, stderr| is_local_cli_exec_failure(&out(code, stdout, stderr));
+        assert!(is_local_cli_exec_failure(&ScriptOutput {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            killed: false,
+        }));
+        assert!(local(2, "", "Usage: colab exec [OPTIONS]"));
+        assert!(local(2, "", "[colab] Invalid --env value 'BAD'"));
+        assert!(local(1, "[colab] Error: No input provided.", ""));
+        assert!(local(1, "", "File \"colab_cli/runtime.py\", line 1"));
+        assert!(local(1, "", "ColabRequestError: Bad Gateway"));
+        assert!(!local(1, "", "Traceback:\nValueError: bad value"));
+        assert!(!local(2, "", ""));
+    }
+
     /// How google-colab-cli 0.8.0 (Typer with rich) prints the read timeout that ends a
     /// `colab new` Colab never answered: the message wraps, the exception line starts it.
     const RICH_READ_TIMEOUT: &str = "\

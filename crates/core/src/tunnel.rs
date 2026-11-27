@@ -685,7 +685,9 @@ mod tests {
             Some(ErrorKind::SshBusy)
         );
         assert_eq!(
-            c("[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."),
+            c(
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            ),
             Some(ErrorKind::SshBusy)
         );
         assert_eq!(
