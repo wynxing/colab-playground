@@ -21,14 +21,16 @@ mod tunnels;
 mod updates;
 mod usage;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use colab_playground_core::{
     Error, ErrorKind,
     accounts::AccountsView,
-    backend::Backend,
     backend::BackendKind as Flavor,
-    backend::LoginFlow,
+    backend::{Backend, LoginFlow, RuntimeRef},
     error::Denial,
     host::ProbeReport,
     updater::{Installed, SelfUpdate},
@@ -158,6 +160,14 @@ pub struct AppState {
     agent_watch: Option<agents::Watch>,
     watch_asks: u64,
     watch_timer: Option<Task<()>>,
+    /// An agent's `session_watch`: waiting for a session/forward/guard event.
+    agent_session_watch: Option<agents::SessionWatch>,
+    session_watch_asks: u64,
+    session_watch_timer: Option<Task<()>>,
+    /// Sessions already notified about an approaching auto-stop deadline.
+    auto_stop_soon_notified: HashSet<RuntimeRef>,
+    /// Run ids that finished or were cancelled in this process, so a refresh does not re-attach them.
+    finished_run_ids: HashSet<String>,
     /// The foreground task that takes an agent's calls off the endpoint's queue.
     /// endpoint, which is what answers a call still waiting then as dismissed.
     agent_drain: Option<Task<()>>,
@@ -315,6 +325,11 @@ impl AppState {
                 agent_watch: None,
                 watch_asks: 0,
                 watch_timer: None,
+                agent_session_watch: None,
+                session_watch_asks: 0,
+                session_watch_timer: None,
+                auto_stop_soon_notified: HashSet::new(),
+                finished_run_ids: HashSet::new(),
                 agent_drain: None,
                 agent_chain: None,
                 probe: Load::Idle,
@@ -687,6 +702,10 @@ impl AppState {
             // Nothing is listening, so nothing is left to read a call off: the drain goes with the
             // endpoint it was reading for.
             self.agent_drain = None;
+            self.agent_watch = None;
+            self.watch_timer = None;
+            self.agent_session_watch = None;
+            self.session_watch_timer = None;
         }
     }
 

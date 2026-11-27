@@ -10,7 +10,9 @@ use std::{collections::VecDeque, sync::Arc};
 use colab_playground_core::{
     Error, ErrorKind,
     accounts::AccountId,
-    backend::{Backend, PluginRunEvent, PluginRunOutcome, PluginRunSpec, RunTarget, Runtime},
+    backend::{
+        Backend, DiscoveredRun, PluginRunEvent, PluginRunOutcome, PluginRunSpec, RunTarget, Runtime,
+    },
     hf::HfModel,
     plugins::{InputKind, InputValue, PluginInfo, ResolvedEndpoint, resolve_endpoints},
     provision::ProvisionSpec,
@@ -95,12 +97,16 @@ pub struct PluginRun {
     /// Session it runs on, once known.
     pub session: Option<String>,
     pub account: Option<AccountId>,
+    /// Run directory id on the VM once launched or reattached.
+    pub run_id: Option<String>,
     pub status: Option<RunStatus>,
     pub log: RunLog,
     pub phase: RunPhase,
     /// The script is a server: it reported ready and keeps running, so its
     /// status is still read.
     pub live: bool,
+    /// Whether the manifest declared `keep_alive` (persisted in `meta.json` across restarts).
+    pub keep_alive: bool,
     /// The endpoints the run offers, resolved when it starts.
     pub endpoints: Vec<ResolvedEndpoint>,
 }
@@ -477,10 +483,12 @@ impl AppState {
             provision: ProvisionProgress::default(),
             session: None,
             account: None,
+            run_id: None,
             status: None,
             log: RunLog::default(),
             phase: RunPhase::Running,
             live: false,
+            keep_alive,
             endpoints,
         });
         self.plugin_view = PluginView::Run;
@@ -502,6 +510,144 @@ impl AppState {
         true
     }
 
+    /// Scans live runtimes once for a detached plugin run started before this app launch and
+    /// reattaches the first active one when no run is currently tracked.
+    pub(crate) fn discover_active_runs(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_run.is_some()
+            || self.ops.is_running(Op::PluginRun)
+            || self.ops.is_running(Op::DiscoverRuns)
+        {
+            return;
+        }
+        let Some(view) = self.sessions.runtimes.ready() else {
+            return;
+        };
+        if view.runtimes.is_empty() {
+            return;
+        }
+        let targets: Vec<_> = view.runtimes.iter().map(|runtime| runtime.id.clone()).collect();
+        self.run_backend(
+            Op::DiscoverRuns,
+            cx,
+            move |backend, cancel| backend.discover_runs(&targets, cancel),
+            |state, result, cx| match result {
+                Ok(runs) => {
+                    if state.plugin_run.is_some() || state.ops.is_running(Op::PluginRun) {
+                        return;
+                    }
+                    if let Some(discovered) = runs
+                        .into_iter()
+                        .find(|run| !state.finished_run_ids.contains(&run.meta.run_id))
+                    {
+                        state.reattach_discovered_run(discovered, cx);
+                    }
+                }
+                Err(error) => log::warn!("runs: discovering active runs failed: {error}"),
+            },
+        );
+    }
+
+    fn reattach_discovered_run(&mut self, discovered: DiscoveredRun, cx: &mut Context<Self>) {
+        let endpoints = if !discovered.meta.endpoints.is_empty() {
+            discovered.meta.endpoints.clone()
+        } else {
+            self.plugin(&discovered.meta.plugin)
+                .and_then(|info| resolve_endpoints(&info.manifest, &discovered.meta.inputs).ok())
+                .unwrap_or_default()
+        };
+        let mut log = RunLog::default();
+        log.extend(discovered.log_tail.clone());
+        let keep_alive = discovered.meta.keep_alive
+            || self
+                .plugin(&discovered.meta.plugin)
+                .is_some_and(|info| info.manifest.run.keep_alive);
+        let ready_status = discovered
+            .status
+            .clone()
+            .filter(|status| status.state == RunState::Ready);
+        let (phase, live) = match ready_status {
+            Some(status) => (
+                RunPhase::Ready(Box::new(PluginRunOutcome {
+                    session: discovered.session.clone(),
+                    account: discovered.account.clone(),
+                    run_id: discovered.meta.run_id.clone(),
+                    status,
+                    endpoints: endpoints.clone(),
+                })),
+                keep_alive,
+            ),
+            None => (RunPhase::Running, false),
+        };
+        let already_ready = matches!(phase, RunPhase::Ready(_));
+        self.plugin_run = Some(PluginRun {
+            plugin: discovered.meta.plugin.clone(),
+            provisions: false,
+            provision: ProvisionProgress::default(),
+            session: Some(discovered.session.clone()),
+            account: Some(discovered.account.clone()),
+            run_id: Some(discovered.meta.run_id.clone()),
+            status: discovered.status.clone(),
+            log,
+            phase,
+            live,
+            keep_alive,
+            endpoints: endpoints.clone(),
+        });
+        if already_ready {
+            self.open_endpoint_forwards(
+                discovered.account.clone(),
+                discovered.session.clone(),
+                &endpoints,
+                cx,
+            );
+        }
+        self.publish_snapshot();
+        self.run_backend_streaming(
+            Op::PluginRun,
+            cx,
+            move |backend, events, cancel| backend.reattach_run(discovered, events, cancel),
+            |state, event, cx| {
+                state.apply_run_event(event, cx);
+                cx.notify();
+            },
+            |state, result, cx| {
+                state.finish_run(result, cx);
+                state.continue_stop_all(cx);
+                cx.notify();
+            },
+        );
+        cx.notify();
+    }
+
+    fn open_endpoint_forwards(
+        &mut self,
+        account: AccountId,
+        session: String,
+        endpoints: &[ResolvedEndpoint],
+        cx: &mut Context<Self>,
+    ) {
+        for endpoint in endpoints {
+            let already_open = self.sessions.tunnels.values().any(|tunnel| {
+                tunnel.spec.account == account
+                    && tunnel.spec.session == session
+                    && tunnel.spec.remote_port == endpoint.remote_port
+            });
+            if !already_open {
+                self.open_tunnel(
+                    TunnelSpec {
+                        account: account.clone(),
+                        session: session.clone(),
+                        local_port: endpoint.remote_port,
+                        remote_port: endpoint.remote_port,
+                        health_path: endpoint.health.clone(),
+                    },
+                    false,
+                    cx,
+                );
+            }
+        }
+    }
+
     pub fn apply_run_event(&mut self, event: PluginRunEvent, cx: &mut Context<Self>) {
         let at = self.backend_now();
         let Some(run) = &mut self.plugin_run else {
@@ -511,7 +657,10 @@ impl AppState {
         let mut published_stage = false;
         match event {
             PluginRunEvent::Provision(event) => run.provision.push(event, at),
-            PluginRunEvent::Launched { session, .. } => run.session = Some(session),
+            PluginRunEvent::Launched { session, run_id } => {
+                run.session = Some(session);
+                run.run_id = Some(run_id);
+            }
             PluginRunEvent::Status(status) => {
                 became_ready = status.state == RunState::Ready;
                 run.status = Some(status);
@@ -523,13 +672,16 @@ impl AppState {
                     .extend([tr_args(cx, keys::RUN_LOG_SKIPPED, &[("path", &path)]).into()])
             }
         }
+        if became_ready {
+            self.run_became_ready(cx);
+        }
+        self.publish_snapshot();
         if published_stage {
             // A waiting `run_watch` hears about it too: the same event, told to whoever asked.
             self.answer_agent_run_stage(cx);
-            self.answer_agent_watch(if became_ready { "ready" } else { "stage" }, cx);
-        }
-        if became_ready {
-            self.run_became_ready(cx);
+            let kind = if became_ready { "ready" } else { "stage" };
+            self.answer_agent_watch(kind, cx);
+            self.notify_run_event(if became_ready { "run_ready" } else { "run_stage" });
         }
     }
 
@@ -538,28 +690,44 @@ impl AppState {
         result: colab_playground_core::Result<PluginRunOutcome>,
         cx: &mut Context<Self>,
     ) {
-        // A watch waiting on this run is answered with how it ended, before the run is borrowed.
-        self.answer_agent_watch(if result.is_ok() { "finished" } else { "failed" }, cx);
-        let Some(run) = &mut self.plugin_run else {
+        let Some(run) = &self.plugin_run else {
             return;
         };
-        let mut forwards = Vec::new();
         // A run that reported ready while it was still going is already shown
         // as ready; it must not say so twice.
         let was_ready = matches!(run.phase, RunPhase::Ready(_));
-        run.phase = match result {
+        let prev_session = run.session.clone();
+        let prev_account = run.account.clone();
+        let prev_run_id = run.run_id.clone();
+        let is_session_gone = matches!(&result, Err(error) if error.is(ErrorKind::SessionGone));
+        let watch_reason = match &result {
+            Ok(_) => "finished",
+            Err(error) if error.is(ErrorKind::Cancelled) => "cancelled",
+            Err(_) => "failed",
+        };
+        let sse_event = match &result {
+            Ok(_) => "run_finished",
+            Err(error) if error.is(ErrorKind::Cancelled) => "run_cancelled",
+            Err(error) if error.is(ErrorKind::SessionGone) => "run_gone",
+            Err(_) => "run_failed",
+        };
+        let forwards_target = result
+            .as_ref()
+            .ok()
+            .map(|outcome| {
+                (
+                    outcome.account.clone(),
+                    outcome.session.clone(),
+                    outcome.endpoints.clone(),
+                )
+            });
+        let next_phase = match result {
             Ok(outcome) => {
-                run.session = Some(outcome.session.clone());
-                run.account = Some(outcome.account.clone());
-                run.status = Some(outcome.status.clone());
-                for endpoint in &outcome.endpoints {
-                    forwards.push(TunnelSpec {
-                        account: outcome.account.clone(),
-                        session: outcome.session.clone(),
-                        local_port: endpoint.remote_port,
-                        remote_port: endpoint.remote_port,
-                        health_path: endpoint.health.clone(),
-                    });
+                if let Some(run) = &mut self.plugin_run {
+                    run.session = Some(outcome.session.clone());
+                    run.account = Some(outcome.account.clone());
+                    run.run_id = Some(outcome.run_id.clone());
+                    run.status = Some(outcome.status.clone());
                 }
                 RunPhase::Ready(Box::new(outcome))
             }
@@ -570,6 +738,7 @@ impl AppState {
         let Some(run) = &mut self.plugin_run else {
             return;
         };
+        run.phase = next_phase;
         if run.account.is_none() {
             run.account = active;
         }
@@ -577,11 +746,23 @@ impl AppState {
         run.live = false;
         let ready = matches!(run.phase, RunPhase::Ready(_));
         let plugin = run.plugin.clone();
+        let final_run_id = run.run_id.clone().or(prev_run_id);
+        let final_session = run.session.clone().or(prev_session);
+        let final_account = run.account.clone().or(prev_account);
+        if let Some(run_id) = final_run_id {
+            self.finished_run_ids.insert(run_id);
+        }
+        self.publish_snapshot();
+        self.answer_agent_watch(watch_reason, cx);
+        self.notify_run_event(sse_event);
+        if is_session_gone {
+            self.notify_run_session_gone(final_account, final_session, cx);
+        }
         if ready && !was_ready {
             self.toast_ready(&plugin, cx);
         }
-        for spec in forwards {
-            self.open_tunnel(spec, false, cx);
+        if let Some((account, session, endpoints)) = forwards_target {
+            self.open_endpoint_forwards(account, session, &endpoints, cx);
         }
         self.after_runtime_change(cx);
     }
@@ -601,36 +782,30 @@ impl AppState {
         let session = run.session.clone().unwrap_or_default();
         let endpoints = run.endpoints.clone();
         let plugin = run.plugin.clone();
-        let live = self
-            .plugin(&plugin)
-            .is_some_and(|info| info.manifest.run.keep_alive);
-        let Some(account) = self.accounts.ready().and_then(|view| view.active.clone()) else {
+        let run_id = run.run_id.clone().unwrap_or_default();
+        let live = run.keep_alive
+            || self
+                .plugin(&plugin)
+                .is_some_and(|info| info.manifest.run.keep_alive);
+        let Some(account) = run
+            .account
+            .clone()
+            .or_else(|| self.accounts.ready().and_then(|view| view.active.clone()))
+        else {
             return;
         };
-        let forwards: Vec<TunnelSpec> = endpoints
-            .iter()
-            .map(|endpoint| TunnelSpec {
-                account: account.clone(),
-                session: session.clone(),
-                local_port: endpoint.remote_port,
-                remote_port: endpoint.remote_port,
-                health_path: endpoint.health.clone(),
-            })
-            .collect();
         let outcome = PluginRunOutcome {
-            session,
-            account,
-            run_id: String::new(),
+            session: session.clone(),
+            account: account.clone(),
+            run_id,
             status,
-            endpoints,
+            endpoints: endpoints.clone(),
         };
         if let Some(run) = &mut self.plugin_run {
             run.phase = RunPhase::Ready(Box::new(outcome));
             run.live = live;
         }
-        for spec in forwards {
-            self.open_tunnel(spec, false, cx);
-        }
+        self.open_endpoint_forwards(account, session, &endpoints, cx);
         self.toast_ready(&plugin, cx);
     }
 
@@ -646,6 +821,9 @@ impl AppState {
 
     /// Asks the run to stop; a session it provisioned is stopped too.
     pub fn cancel_run(&mut self, cx: &mut Context<Self>) {
+        if let Some(run_id) = self.plugin_run.as_ref().and_then(|run| run.run_id.clone()) {
+            self.finished_run_ids.insert(run_id);
+        }
         self.ops.cancel(Op::PluginRun);
         cx.notify();
     }

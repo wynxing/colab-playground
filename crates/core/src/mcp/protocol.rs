@@ -128,7 +128,10 @@ pub fn initialize_result(
 ) -> Value {
     json!({
         "protocolVersion": negotiate_version(requested),
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": {
+            "tools": { "listChanged": false },
+            "logging": {},
+        },
         "serverInfo": { "name": server_name, "version": server_version },
     })
 }

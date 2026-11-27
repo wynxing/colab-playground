@@ -146,6 +146,13 @@ impl Agents {
         }
     }
 
+    /// Pushes an unsolicited SSE notification to connected agent clients.
+    pub(crate) fn notify(&self, event: &str, detail: Value) {
+        if let Some(endpoint) = &self.endpoint {
+            endpoint.notify(event, detail);
+        }
+    }
+
     fn stop(&mut self) {
         self.endpoint = None;
         self.address = None;
@@ -285,6 +292,41 @@ pub(crate) fn watch_answer(state: &AppState, plugin: &str, changed: &str) -> Res
         .filter(|run| run.plugin == plugin)
         .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
     Ok(json!({ "run": run_of(run), "changed": changed }))
+}
+
+pub(crate) fn session_watch_answer(
+    state: &AppState,
+    event: &str,
+    session: Option<&str>,
+    detail: Value,
+) -> Value {
+    json!({
+        "event": event,
+        "session": session,
+        "detail": detail,
+        "sessions": sessions_of(state),
+        "warnings": warnings_of(state),
+        "forwards": forwards_of(state),
+    })
+}
+
+fn warnings_of(state: &AppState) -> Vec<Value> {
+    let mut items: Vec<_> = state
+        .sessions
+        .warnings
+        .iter()
+        .map(|(runtime, concerns)| {
+            (
+                runtime.name.clone().unwrap_or_default(),
+                json!({
+                    "session": runtime.name,
+                    "concerns": concerns,
+                }),
+            )
+        })
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items.into_iter().map(|(_, value)| value).collect()
 }
 
 /// The last few lines of a run's log, oldest first. Secrets are already redacted where the lines
@@ -485,7 +527,9 @@ pub(crate) fn settings_of(state: &AppState) -> AppSettings {
 pub(crate) fn answer_for_action(action: &Action, state: &AppState) -> Result<Value> {
     Ok(match action {
         // Answered by the window's own events: a watch is still waiting when this would be built.
-        Action::RunWatch { .. } => unreachable!("a watch is answered by the window's events"),
+        Action::RunWatch { .. } | Action::SessionWatch { .. } => {
+            unreachable!("a watch is answered by the window's events")
+        }
         Action::SessionStart { .. } => session_started(state),
         Action::SessionStop { session } => json!({ "session": session, "stopped": true }),
         Action::SessionExtend { session, minutes } => json!({

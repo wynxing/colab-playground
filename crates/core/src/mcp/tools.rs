@@ -27,6 +27,7 @@ pub struct Tool {
     /// The JSON Schema for the arguments. A function so the table stays free of `Value`s.
     pub input: fn() -> Value,
     pub kind: Kind,
+    pub read_only: bool,
 }
 
 /// The two things a tool can do.
@@ -176,6 +177,19 @@ fn plugin_schema() -> Value {
             "plugin": string_property("The plugin id, as plugin_list answers it.")
         },
         "required": ["plugin"],
+        "additionalProperties": false
+    })
+}
+
+fn session_watch_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "session": string_property(
+                "Optional runtime name to watch, as sessions_list answers it. When absent, \
+                 watches all active runtimes and forwards."
+            )
+        },
         "additionalProperties": false
     })
 }
@@ -359,6 +373,7 @@ pub fn all() -> &'static [Tool] {
                           is started or stopped.",
             input: empty_schema,
             kind: Kind::Read(sessions_list),
+            read_only: true,
         },
         Tool {
             name: "session_usage",
@@ -366,6 +381,7 @@ pub fn all() -> &'static [Tool] {
                           now. Read-only.",
             input: empty_schema,
             kind: Kind::Read(session_usage),
+            read_only: true,
         },
         Tool {
             name: "runs_list",
@@ -373,6 +389,7 @@ pub fn all() -> &'static [Tool] {
                           how far each has got. Read-only.",
             input: empty_schema,
             kind: Kind::Read(runs_list),
+            read_only: true,
         },
         Tool {
             name: "run_status",
@@ -380,6 +397,7 @@ pub fn all() -> &'static [Tool] {
                           of its log (secrets already redacted). Read-only.",
             input: plugin_schema,
             kind: Kind::Read(run_status),
+            read_only: true,
         },
         Tool {
             name: "run_watch",
@@ -390,6 +408,19 @@ pub fn all() -> &'static [Tool] {
                           again to keep watching. It changes nothing.",
             input: plugin_schema,
             kind: Kind::Write(run_watch),
+            read_only: true,
+        },
+        Tool {
+            name: "session_watch",
+            description: "Waits until a runtime raises a cost-guard warning, approaches its \
+                          auto-stop deadline, stops or vanishes, or a port forward disconnects or \
+                          becomes unhealthy — and answers with the sessions, warnings and forwards \
+                          as they stand then. Answers anyway after about two minutes so the call \
+                          never hits a client timeout. Call it again to keep watching. It changes \
+                          nothing.",
+            input: session_watch_schema,
+            kind: Kind::Write(session_watch),
+            read_only: true,
         },
         Tool {
             name: "run_outputs",
@@ -398,6 +429,7 @@ pub fn all() -> &'static [Tool] {
                           is what copies them here.",
             input: plugin_schema,
             kind: Kind::Read(run_outputs),
+            read_only: true,
         },
         Tool {
             name: "plugin_list",
@@ -405,6 +437,7 @@ pub fn all() -> &'static [Tool] {
                           whether it ships with the app. Read-only.",
             input: empty_schema,
             kind: Kind::Read(plugin_list),
+            read_only: true,
         },
         Tool {
             name: "settings_get",
@@ -413,6 +446,7 @@ pub fn all() -> &'static [Tool] {
                           Read-only.",
             input: empty_schema,
             kind: Kind::Read(settings_get),
+            read_only: true,
         },
         Tool {
             name: "accounts_list",
@@ -420,6 +454,7 @@ pub fn all() -> &'static [Tool] {
                           Read-only; accounts_switch is what changes it.",
             input: empty_schema,
             kind: Kind::Read(accounts_list),
+            read_only: true,
         },
         Tool {
             name: "forwards_list",
@@ -427,6 +462,7 @@ pub fn all() -> &'static [Tool] {
                           agent would connect to. Read-only.",
             input: empty_schema,
             kind: Kind::Read(forwards_list),
+            read_only: true,
         },
         Tool {
             name: "session_start",
@@ -436,6 +472,7 @@ pub fn all() -> &'static [Tool] {
                           Answers when the runtime exists, with what it costs per hour.",
             input: session_start_schema,
             kind: Kind::Write(session_start),
+            read_only: false,
         },
         Tool {
             name: "session_stop",
@@ -443,6 +480,7 @@ pub fn all() -> &'static [Tool] {
                           not ask: stopping does not open a new charge.",
             input: session_schema,
             kind: Kind::Write(session_stop),
+            read_only: false,
         },
         Tool {
             name: "session_extend",
@@ -452,6 +490,7 @@ pub fn all() -> &'static [Tool] {
                           open until they answer; being refused is final, so do not call again.",
             input: session_extend_schema,
             kind: Kind::Write(session_extend),
+            read_only: false,
         },
         Tool {
             name: "plugin_run",
@@ -464,6 +503,7 @@ pub fn all() -> &'static [Tool] {
                           stage, not when it finishes, so read run_status while it works.",
             input: plugin_run_schema,
             kind: Kind::Write(plugin_run),
+            read_only: false,
         },
         Tool {
             name: "run_download",
@@ -472,6 +512,7 @@ pub fn all() -> &'static [Tool] {
                           their paths here.",
             input: plugin_schema,
             kind: Kind::Write(run_download),
+            read_only: false,
         },
         Tool {
             name: "settings_set",
@@ -481,6 +522,7 @@ pub fn all() -> &'static [Tool] {
                           asks first.",
             input: settings_set_schema,
             kind: Kind::Write(settings_set),
+            read_only: false,
         },
         Tool {
             name: "accounts_switch",
@@ -488,6 +530,7 @@ pub fn all() -> &'static [Tool] {
                           session is then started on. Answers when the switch is done.",
             input: accounts_switch_schema,
             kind: Kind::Write(accounts_switch),
+            read_only: false,
         },
         Tool {
             name: "plugin_enable",
@@ -495,6 +538,7 @@ pub fn all() -> &'static [Tool] {
                           stored, with the plugin list as it then stands.",
             input: plugin_enable_schema,
             kind: Kind::Write(plugin_enable),
+            read_only: false,
         },
         Tool {
             name: "plugin_install",
@@ -503,6 +547,7 @@ pub fn all() -> &'static [Tool] {
                           manifest's own complaint when it cannot.",
             input: plugin_install_schema,
             kind: Kind::Write(plugin_install),
+            read_only: false,
         },
         Tool {
             name: "forward_open",
@@ -511,12 +556,14 @@ pub fn all() -> &'static [Tool] {
                           port to connect to.",
             input: forward_open_schema,
             kind: Kind::Write(forward_open),
+            read_only: false,
         },
         Tool {
             name: "forward_close",
             description: "Closes a port forward that is open. Answers when it is gone.",
             input: forward_close_schema,
             kind: Kind::Write(forward_close),
+            read_only: false,
         },
     ]
 }
@@ -531,11 +578,15 @@ pub fn descriptors() -> Value {
     let tools: Vec<Value> = all()
         .iter()
         .map(|tool| {
-            json!({
+            let mut entry = json!({
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": (tool.input)(),
-            })
+            });
+            if tool.read_only {
+                entry["annotations"] = json!({ "readOnlyHint": true });
+            }
+            entry
         })
         .collect();
     json!({ "tools": tools })
@@ -694,6 +745,13 @@ fn run_watch(args: &Args) -> Result<Action> {
     })
 }
 
+fn session_watch(args: &Args) -> Result<Action> {
+    args.only(&["session"])?;
+    Ok(Action::SessionWatch {
+        session: args.maybe_string("session")?.map(str::to_owned),
+    })
+}
+
 fn run_download(args: &Args) -> Result<Action> {
     args.only(&["plugin"])?;
     Ok(Action::RunDownload {
@@ -829,6 +887,7 @@ mod tests {
             "run_status" | "run_outputs" | "run_download" | "run_watch" => {
                 json!({ "plugin": "comfyui" })
             }
+            "session_watch" => json!({ "session": "run-1" }),
             "plugin_enable" => json!({ "plugin": "comfyui", "enabled": false }),
             "plugin_install" => json!({ "source": "/home/someone/plugins/comfyui" }),
             "plugin_run" => {
@@ -854,6 +913,9 @@ mod tests {
         match name {
             "run_watch" => Action::RunWatch {
                 plugin: "comfyui".to_owned(),
+            },
+            "session_watch" => Action::SessionWatch {
+                session: Some("run-1".to_owned()),
             },
             "session_start" => Action::SessionStart {
                 name: Some("run-2".to_owned()),
@@ -915,7 +977,7 @@ mod tests {
         assert_eq!(reads, 9, "the read tools of slice 1");
         assert_eq!(
             count - reads,
-            12,
+            13,
             "the tools that ask the app to do something"
         );
         for tool in all() {
@@ -935,7 +997,7 @@ mod tests {
     #[test]
     fn tools_list_reports_what_the_table_holds() {
         let listed = descriptors();
-        assert_eq!(listed["tools"].as_array().expect("tools").len(), 21);
+        assert_eq!(listed["tools"].as_array().expect("tools").len(), 22);
         let names: Vec<&str> = listed["tools"]
             .as_array()
             .expect("tools")
@@ -945,6 +1007,31 @@ mod tests {
         assert!(names.contains(&"sessions_list"));
         assert!(names.contains(&"run_outputs"));
         assert!(names.contains(&"session_start"));
+        assert!(names.contains(&"session_watch"));
+    }
+
+    #[test]
+    fn run_watch_is_advertised_as_read_only() {
+        let descriptors = descriptors();
+        let watch = descriptors["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "run_watch")
+            .unwrap();
+        assert_eq!(watch["annotations"]["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn session_watch_is_advertised_as_read_only() {
+        let descriptors = descriptors();
+        let watch = descriptors["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "session_watch")
+            .expect("session_watch descriptor");
+        assert_eq!(watch["annotations"]["readOnlyHint"], true);
     }
 
     #[test]

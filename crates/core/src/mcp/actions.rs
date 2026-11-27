@@ -48,6 +48,9 @@ pub enum Action {
     /// Waits for a run to change and answers with what it is now. The shape a long job is followed
     /// with: a call that answers on a change is never left past a client's own timeout.
     RunWatch { plugin: String },
+    /// Waits for a session event (cost-guard warning, approaching auto-stop, stop/vanish, or
+    /// forward disconnect/health change) and answers within about two minutes.
+    SessionWatch { session: Option<String> },
     /// Change the app's settings. Only the app knows which names it has and which values are
     /// legal, so that check happens there.
     SettingsSet { changes: Map<String, Value> },
@@ -78,6 +81,7 @@ impl Action {
             Action::PluginRun { .. } => "plugin_run",
             Action::RunDownload { .. } => "run_download",
             Action::RunWatch { .. } => "run_watch",
+            Action::SessionWatch { .. } => "session_watch",
             Action::SettingsSet { .. } => "settings_set",
             Action::AccountsSwitch { .. } => "accounts_switch",
             Action::PluginEnable { .. } => "plugin_enable",
@@ -120,6 +124,9 @@ impl Action {
             Action::RunDownload { plugin }
             | Action::RunWatch { plugin }
             | Action::PluginEnable { plugin, .. } => plugin.clone(),
+            Action::SessionWatch { session } => session
+                .clone()
+                .unwrap_or_else(|| "all sessions".to_owned()),
             Action::SettingsSet { changes } => {
                 let names: Vec<&str> = changes.keys().map(String::as_str).collect();
                 names.join(", ")
@@ -346,5 +353,24 @@ mod tests {
             .expect_err("nothing is done here");
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert_eq!(error.param("action"), Some("session_stop"));
+    }
+
+    #[test]
+    fn watch_tools_never_require_approval_and_describe_their_target() {
+        let run_watch = Action::RunWatch {
+            plugin: "comfyui".to_owned(),
+        };
+        assert!(!run_watch.needs_approval());
+        assert_eq!(run_watch.target(), "comfyui");
+
+        let all_sessions = Action::SessionWatch { session: None };
+        assert!(!all_sessions.needs_approval());
+        assert_eq!(all_sessions.target(), "all sessions");
+
+        let one_session = Action::SessionWatch {
+            session: Some("run-1".to_owned()),
+        };
+        assert!(!one_session.needs_approval());
+        assert_eq!(one_session.target(), "run-1");
     }
 }

@@ -1716,9 +1716,13 @@ time.sleep(30)
         std::fs::write(&p, text.replace(watchdog::VM_BASE, &base)).unwrap();
         p.to_string_lossy().into_owned()
     };
-    let launch = write("launch.py", vm::plugin_launch_snippet(script));
+    let launch = write(
+        "launch.py",
+        vm::plugin_launch_snippet(script, br#"{"run_id":"r1","plugin":"p1"}"#),
+    );
     let poll = write("poll.py", vm::plugin_poll_snippet());
     let kill = write("kill.py", vm::plugin_kill_snippet());
+    let discover = write("discover.py", vm::plugin_discover_snippet());
     let driver = write(
         "driver.py",
         r#"import contextlib, io, json, os, sys, time
@@ -1737,17 +1741,22 @@ for _ in range(100):
     result = buf.getvalue()
     if "leaking" in result and '"message"' in result:
         break
+dbuf = io.StringIO()
+with contextlib.redirect_stdout(dbuf):
+    exec(open(sys.argv[4]).read(), g)
+discover_out = dbuf.getvalue()
 os.environ["CPG_RUN_ID"] = "r1"
 with contextlib.redirect_stdout(io.StringIO()):
     exec(open(sys.argv[3]).read(), g)
 print("POLL " + result.strip())
+print("DISCOVER " + discover_out.strip())
 "#
         .to_owned(),
     );
     let out = Host::Local
         .run_program(
             "python3",
-            &["-B".to_owned(), driver, launch, poll, kill],
+            &["-B".to_owned(), driver, launch, poll, kill, discover],
             &[("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned())],
             &nc(),
             Some(Duration::from_secs(60)),
@@ -1762,6 +1771,21 @@ print("POLL " + result.strip())
     );
     let v: Value = serde_json::from_str(line.trim_start_matches("POLL __CPG_RESULT__ ")).unwrap();
     assert_eq!(v["status"]["outputs"]["k"][0], "***");
+
+    let dline = out
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("DISCOVER "))
+        .unwrap();
+    assert!(
+        dline.contains("leaking ***") && dline.contains("m ***"),
+        "{dline}"
+    );
+    let dv: Value =
+        serde_json::from_str(dline.trim_start_matches("DISCOVER __CPG_RESULT__ ")).unwrap();
+    assert_eq!(dv["runs"][0]["status"]["outputs"]["k"][0], "***");
+    let meta_on_disk = std::fs::read_to_string(tmp.path().join("vm/runs/r1/meta.json")).unwrap();
+    assert!(!meta_on_disk.contains("sk-VMSECRET789"), "{meta_on_disk}");
 }
 
 #[test]
@@ -1951,4 +1975,159 @@ fn probe_blames_the_configured_path_when_nothing_runs_there() {
     // `NotInstalled` would make the checklist offer an install that cannot help.
     let error = backend.probe(&nc()).unwrap_err();
     assert!(error.is(ErrorKind::InvalidInput), "{error}");
+}
+
+#[test]
+fn plugin_run_writes_non_secret_meta_and_reattach_resumes_to_ready_and_cancel() {
+    let f = fixture();
+    f.adopt_alice();
+    f.b.set_secret("hf_token", "hf_SECRET123", &nc()).unwrap();
+    let mut spec = f.b.plugin_run_template("llama-cpp").unwrap();
+    spec.inputs.insert(
+        "repo".into(),
+        InputValue::Text("unsloth/Qwen3-0.6B-GGUF".into()),
+    );
+    spec.inputs
+        .insert("api_key".into(), InputValue::Text("sk-SECRET456".into()));
+    let (tx, _rx) = channel();
+    let out = f.b.run_plugin(spec, tx, &nc()).unwrap();
+
+    // 1) meta.json recorded on launch must hold plugin + non-secret inputs + endpoints, never secrets.
+    let meta = &f.server()["runs"][&out.run_id]["meta"];
+    assert_eq!(meta["plugin"], "llama-cpp", "{meta}");
+    assert_eq!(meta["inputs"]["repo"], "unsloth/Qwen3-0.6B-GGUF", "{meta}");
+    assert!(
+        meta["inputs"].get("api_key").is_none(),
+        "secret inputs must never enter meta.json: {meta}"
+    );
+    let meta_text = meta.to_string();
+    assert!(
+        !meta_text.contains("hf_SECRET123") && !meta_text.contains("sk-SECRET456"),
+        "secret leaked into meta.json: {meta_text}"
+    );
+    assert_eq!(meta["endpoints"][0]["remote_port"], 8000, "{meta}");
+
+    // 2) Simulate an app restart while an active run is mid-flight on the session.
+    let run_id = "llama-cpp-reattach1";
+    f.edit_server(|s| {
+        s["runs"][&out.run_id]["exited"] = json!(true);
+        let ep = s["accounts"]["alice"]["assignments"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        s["runs"][run_id] = json!({
+            "endpoint": ep,
+            "polls": 2,
+            "killed": false,
+            "env": {
+                "PLUGIN_HF_TOKEN": "hf_SECRET123",
+                "PLUGIN_INPUT_REPO": "unsloth/Qwen3-0.6B-GGUF"
+            },
+            "meta": {
+                "run_id": run_id,
+                "plugin": "llama-cpp",
+                "inputs": { "repo": "unsloth/Qwen3-0.6B-GGUF" },
+                "endpoints": meta["endpoints"].clone(),
+                "keep_alive": false,
+                "provisions": false
+            },
+            "log": [
+                "poll 0 (debug secret=hf_SECRET123)\n",
+                "poll 1 (debug secret=hf_SECRET123)\n"
+            ]
+        });
+    });
+
+    let targets: Vec<RuntimeRef> = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .filter(|r| r.on_active_account && r.id.name.is_some())
+        .map(|r| r.id)
+        .collect();
+    let discovered = f.b.discover_runs(&targets, &nc()).unwrap();
+    assert_eq!(discovered.len(), 1, "{discovered:?}");
+    let d = discovered[0].clone();
+    assert_eq!(d.meta.run_id, run_id);
+    assert_eq!(d.meta.plugin, "llama-cpp");
+    assert_eq!(
+        d.status.as_ref().and_then(|s| s.stage.as_deref()),
+        Some("plan")
+    );
+    let tail_joined = d.log_tail.join("\n");
+    assert!(
+        tail_joined.contains("poll 1 (debug secret=***)"),
+        "secrets must be redacted in reattached log tail: {tail_joined}"
+    );
+    assert!(!tail_joined.contains("hf_SECRET123"), "{tail_joined}");
+
+    // 3) Reattach resumes polling from log_offset and reaches Ready without duplicating old lines.
+    let (tx, rx) = channel();
+    let resumed = f.b.reattach_run(d, tx, &nc()).unwrap();
+    assert_eq!(resumed.status.state, RunState::Ready);
+    assert_eq!(resumed.run_id, run_id);
+    let events: Vec<PluginRunEvent> = rx.try_iter().collect();
+    let log_text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            PluginRunEvent::Log { lines } => Some(lines.join("\n")),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!log_text.contains("poll 0"), "old lines should not replay: {log_text}");
+    assert!(!log_text.contains("hf_SECRET123"), "{log_text}");
+
+    // 4) Cancelling a reattached run sends SIGTERM (killpg) and leaves the session running.
+    let cancel_id = "llama-cpp-cancel1";
+    f.edit_server(|s| {
+        s["runs"][run_id]["exited"] = json!(true);
+        let ep = s["accounts"]["alice"]["assignments"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        s["runs"][cancel_id] = json!({
+            "endpoint": ep,
+            "polls": 1,
+            "killed": false,
+            "env": {},
+            "meta": {
+                "run_id": cancel_id,
+                "plugin": "llama-cpp",
+                "inputs": {},
+                "endpoints": meta["endpoints"].clone(),
+                "keep_alive": false,
+                "provisions": false
+            },
+            "log": ["poll 0 (debug secret=)\n"]
+        });
+    });
+    let discovered = f.b.discover_runs(&targets, &nc()).unwrap();
+    let d_cancel = discovered
+        .into_iter()
+        .find(|d| d.meta.run_id == cancel_id)
+        .expect("cancel run discovered");
+    let cancel = CancelToken::new();
+    let (tx, rx) = channel();
+    let cancel_clone = cancel.clone();
+    let watcher = std::thread::spawn(move || {
+        for ev in rx {
+            if matches!(ev, PluginRunEvent::Status(_)) {
+                cancel_clone.cancel();
+                break;
+            }
+        }
+    });
+    let err = f.b.reattach_run(d_cancel, tx, &cancel).unwrap_err();
+    watcher.join().unwrap();
+    assert!(err.is(ErrorKind::Cancelled), "{err:?}");
+    assert_eq!(f.server()["runs"][cancel_id]["killed"], true);
 }

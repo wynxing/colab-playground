@@ -79,6 +79,14 @@ pub(super) struct Watch {
     call: Call,
 }
 
+/// An agent's `session_watch`: waiting for a guard warning, approaching auto-stop, stop/vanish,
+/// or forward disconnect/health event.
+pub(super) struct SessionWatch {
+    asked: u64,
+    session: Option<String>,
+    call: Call,
+}
+
 impl Call {
     /// The client that asked.
     pub fn client(&self) -> &str {
@@ -241,6 +249,11 @@ impl AppState {
             self.begin_agent_watch(call, plugin, cx);
             return;
         }
+        if let Action::SessionWatch { session } = &call.action {
+            let session = session.clone();
+            self.begin_agent_session_watch(call, session, cx);
+            return;
+        }
         if let Err(error) = self.resolvable_op(&call.action) {
             call.answer(Err(error));
             return;
@@ -261,7 +274,8 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
-            | Action::RunWatch { .. } => Ok(None),
+            | Action::RunWatch { .. }
+            | Action::SessionWatch { .. } => Ok(None),
             other => self.agent_op(other).map(Some),
         }
     }
@@ -333,6 +347,102 @@ impl AppState {
     /// Whether an agent is waiting on a `run_watch` right now.
     pub fn agent_is_watching(&self) -> bool {
         self.agent_watch.is_some()
+    }
+
+    /// Files an agent's `session_watch`: one at a time, validating a named session if present.
+    fn begin_agent_session_watch(
+        &mut self,
+        call: Call,
+        session: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(name) = &session
+            && let Err(error) = self.runtime_named(name)
+        {
+            call.answer(Err(error));
+            return;
+        }
+        if self.agent_session_watch.is_some() {
+            call.answer(Err(Error::denied("session_watch", Denial::Busy)));
+            return;
+        }
+        self.session_watch_asks += 1;
+        let asked = self.session_watch_asks;
+        log::info!(
+            "agent: session_watch ({}) is waiting",
+            session.as_deref().unwrap_or("all")
+        );
+        self.agent_session_watch = Some(SessionWatch {
+            asked,
+            session,
+            call,
+        });
+        self.session_watch_timer(asked, cx);
+    }
+
+    fn session_watch_timer(&mut self, asked: u64, cx: &mut Context<Self>) {
+        let previous = self.session_watch_timer.take();
+        self.session_watch_timer = Some(cx.spawn(async move |this, cx| {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            cx.background_executor().timer(WATCH_WAIT).await;
+            this.update(cx, |state, cx| state.lapse_agent_session_watch(asked, cx))
+                .ok();
+        }));
+    }
+
+    fn lapse_agent_session_watch(&mut self, asked: u64, cx: &mut Context<Self>) {
+        if self
+            .agent_session_watch
+            .as_ref()
+            .is_some_and(|watch| watch.asked == asked)
+            && let Some(watch) = self.agent_session_watch.take()
+        {
+            let answer =
+                super::mcp::session_watch_answer(self, "none", watch.session.as_deref(), json!({}));
+            log::info!("agent: session_watch answered (none)");
+            watch.call.answer(Ok(answer));
+            cx.notify();
+        }
+    }
+
+    /// Publishes an updated snapshot, pushes an unsolicited SSE notification, and answers a
+    /// waiting `session_watch` if its target filter matches.
+    pub(super) fn emit_session_event(
+        &mut self,
+        event: &str,
+        session: Option<&str>,
+        detail: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.publish_snapshot();
+        self.agents
+            .notify(event, json!({ "session": session, "detail": detail }));
+        if self
+            .agent_session_watch
+            .as_ref()
+            .is_some_and(|watch| watch.session.is_none() || watch.session.as_deref() == session)
+            && let Some(watch) = self.agent_session_watch.take()
+        {
+            let answer = super::mcp::session_watch_answer(self, event, session, detail);
+            log::info!("agent: session_watch answered ({event})");
+            watch.call.answer(Ok(answer));
+            cx.notify();
+        }
+    }
+
+    /// Pushes a plugin run lifecycle SSE notification with the latest snapshot view of the run.
+    pub(super) fn notify_run_event(&self, event: &str) {
+        if let Some(run) = self.plugin_run() {
+            self.agents
+                .notify(event, json!({ "run": super::mcp::run_of(run) }));
+        }
+    }
+
+    /// Whether an agent is waiting on a `session_watch` right now.
+    pub fn agent_is_watching_session(&self) -> bool {
+        self.agent_session_watch.is_some()
     }
 
     /// What a paid call is asking the user about, while it waits.
@@ -629,7 +739,8 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
-            | Action::RunWatch { .. } => {
+            | Action::RunWatch { .. }
+            | Action::SessionWatch { .. } => {
                 unreachable!("answered from the window's own events")
             }
         })
@@ -701,7 +812,8 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
-            | Action::RunWatch { .. } => {
+            | Action::RunWatch { .. }
+            | Action::SessionWatch { .. } => {
                 unreachable!("answered from the window's own events")
             }
         }

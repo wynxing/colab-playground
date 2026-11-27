@@ -224,6 +224,7 @@ impl AppState {
                     is_stale(snapshot, Some(now)) != is_stale(snapshot, self.usage.now)
                 });
             self.usage.now = Some(now);
+            self.check_auto_stop_soon(cx);
             if stale_changed {
                 cx.notify();
             }
@@ -296,6 +297,7 @@ impl AppState {
                         }
                         None => {}
                     }
+                    state.check_auto_stop_soon(cx);
                     if relist {
                         state.load_runtimes(cx);
                     } else {

@@ -199,9 +199,10 @@ fn a_client_can_name_itself_list_the_tools_and_call_one() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name").to_owned())
         .collect();
-    assert_eq!(names.len(), 21, "{names:?}");
+    assert_eq!(names.len(), 22, "{names:?}");
     assert!(names.contains(&"sessions_list".to_owned()), "{names:?}");
     assert!(names.contains(&"session_start".to_owned()), "{names:?}");
+    assert!(names.contains(&"session_watch".to_owned()), "{names:?}");
 
     let called = post(
         &mut client,
@@ -389,4 +390,96 @@ fn stopping_the_endpoint_frees_the_port() {
     // Binding it again is the proof that nothing is left listening.
     let again = TcpListener::bind(addr).expect("the port is free after stop");
     drop(again);
+}
+
+#[test]
+fn get_with_event_stream_receives_sse_notifications() {
+    let endpoint = endpoint();
+    let mut reader = connect(endpoint.addr());
+    {
+        let mut stream = reader.get_ref();
+        let req = format!(
+            "GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n\
+             Accept: text/event-stream\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).expect("written");
+        stream.flush().expect("flushed");
+    }
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).expect("status line");
+    assert!(status_line.contains("200"), "{status_line}");
+    let mut content_type = String::new();
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).expect("header");
+        let trimmed = header.trim_end();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':')
+            && k.eq_ignore_ascii_case("content-type")
+        {
+            content_type = v.trim().to_ascii_lowercase();
+        }
+    }
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{content_type}"
+    );
+
+    endpoint.notify(
+        "guard_warning",
+        serde_json::json!({ "session": "playground-1" }),
+    );
+
+    let mut data_line = None;
+    for _ in 0..10 {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("sse line");
+        let trimmed = line.trim_end();
+        if let Some(payload) = trimmed.strip_prefix("data: ") {
+            data_line = Some(payload.to_owned());
+            break;
+        }
+    }
+    let payload = data_line.expect("an SSE data line");
+    let msg: serde_json::Value = serde_json::from_str(&payload).expect("SSE JSON");
+    assert_eq!(msg["jsonrpc"], "2.0");
+    assert_eq!(msg["method"], "notifications/message");
+    assert_eq!(msg["params"]["data"]["event"], "guard_warning");
+    assert_eq!(msg["params"]["data"]["detail"]["session"], "playground-1");
+}
+
+#[test]
+fn get_event_stream_enforces_auth_origin_and_session_rules() {
+    let endpoint = endpoint();
+    let sse = |token: Option<&str>, origin: Option<&str>, session: Option<&str>| -> Answer {
+        let mut reader = connect(endpoint.addr());
+        let mut req = format!("GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n");
+        if let Some(token) = token {
+            req.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        if let Some(origin) = origin {
+            req.push_str(&format!("Origin: {origin}\r\n"));
+        }
+        if let Some(session) = session {
+            req.push_str(&format!("{SESSION_HEADER}: {session}\r\n"));
+        }
+        req.push_str("\r\n");
+        let mut stream = reader.get_ref();
+        stream.write_all(req.as_bytes()).expect("written");
+        stream.flush().expect("flushed");
+        read_answer(&mut reader)
+    };
+
+    assert_eq!(sse(None, None, None).status, 401);
+    assert_eq!(sse(Some("wrong"), None, None).status, 401);
+    assert_eq!(
+        sse(Some(TOKEN), Some("http://a-page.example"), None).status,
+        403
+    );
+    assert_eq!(
+        sse(Some(TOKEN), None, Some("0123456789abcdef")).status,
+        404
+    );
 }

@@ -21,11 +21,12 @@
 
 use std::{
     collections::HashMap,
-    io::BufReader,
+    io::{BufReader, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -113,6 +114,9 @@ struct Ctx {
     actions: Arc<dyn Actions>,
     /// The sessions handed out, each with the client that opened it.
     sessions: Mutex<HashMap<String, Client>>,
+    /// Open `GET /mcp` SSE streams waiting for unsolicited notifications.
+    subscribers: Mutex<Vec<mpsc::Sender<String>>>,
+    stopped: Arc<AtomicBool>,
     /// The endpoint's own origin, for the check described above.
     origins: Vec<String>,
 }
@@ -142,12 +146,54 @@ impl Ctx {
         }
         id
     }
+
+    fn subscribe(&self) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut list) = self.subscribers.lock() {
+            list.push(tx);
+        }
+        rx
+    }
+
+    fn notify(&self, event: &str, detail: Value) {
+        let level = if matches!(
+            event,
+            "guard_warning"
+                | "guard_stopped"
+                | "guard_stop_failed"
+                | "auto_stop_soon"
+                | "tunnel_disconnected"
+                | "tunnel_unhealthy"
+                | "run_failed"
+        ) {
+            "warning"
+        } else {
+            "info"
+        };
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": level,
+                "logger": super::SERVER_NAME,
+                "data": {
+                    "event": event,
+                    "detail": detail,
+                }
+            }
+        })
+        .to_string();
+        if let Ok(mut list) = self.subscribers.lock() {
+            list.retain(|tx| tx.send(payload.clone()).is_ok());
+        }
+    }
 }
 
 /// A running endpoint. Dropping it stops the listener.
 pub struct Endpoint {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    ctx: Arc<Ctx>,
     accept: Option<JoinHandle<()>>,
 }
 
@@ -172,19 +218,22 @@ impl Endpoint {
         listener
             .set_nonblocking(true)
             .map_err(|e| Error::new(ErrorKind::Http).detail(format!("non-blocking bind: {e}")))?;
+        let stop = Arc::new(AtomicBool::new(false));
         let ctx = Arc::new(Ctx {
             token: config.token,
             source,
             actions: config.actions,
             sessions: Mutex::new(HashMap::new()),
+            subscribers: Mutex::new(Vec::new()),
+            stopped: Arc::clone(&stop),
             origins: vec![
                 format!("http://127.0.0.1:{}", addr.port()),
                 format!("http://localhost:{}", addr.port()),
             ],
         });
-        let stop = Arc::new(AtomicBool::new(false));
         let accept = {
             let stop = Arc::clone(&stop);
+            let ctx = Arc::clone(&ctx);
             thread::Builder::new()
                 .name("mcp-endpoint".to_owned())
                 .spawn(move || accept_loop(listener, ctx, stop))
@@ -196,6 +245,7 @@ impl Endpoint {
         Ok(Endpoint {
             addr,
             stop,
+            ctx,
             accept: Some(accept),
         })
     }
@@ -205,9 +255,17 @@ impl Endpoint {
         self.addr
     }
 
+    /// Pushes an unsolicited notification to every client holding `GET /mcp` open as SSE.
+    pub fn notify(&self, event: &str, detail: Value) {
+        self.ctx.notify(event, detail);
+    }
+
     /// Stops the listener and waits for its thread. Serving connections end on their own.
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut list) = self.ctx.subscribers.lock() {
+            list.clear();
+        }
         if let Some(handle) = self.accept.take() {
             let _ = handle.join();
         }
@@ -256,6 +314,10 @@ fn serve(stream: TcpStream, ctx: Arc<Ctx>) {
         match http::read_request(&mut reader) {
             Ok(http::ReadOutcome::Closed) => return,
             Ok(http::ReadOutcome::Request(request)) => {
+                if wants_sse(&request) {
+                    serve_sse(&request, &ctx, &mut writer);
+                    return;
+                }
                 let close = request
                     .header("connection")
                     .is_some_and(|value| value.eq_ignore_ascii_case("close"));
@@ -301,7 +363,7 @@ fn handle(request: &http::Request, ctx: &Ctx) -> http::Response {
         "POST" => post(request, ctx),
         "GET" => http::Response::text(
             405,
-            "this endpoint sends nothing on its own yet; POST to /mcp".to_owned(),
+            "send Accept: text/event-stream on GET /mcp, or POST to /mcp".to_owned(),
         ),
         "DELETE" => {
             if let Some(id) = request.header(SESSION_HEADER)
@@ -312,6 +374,67 @@ fn handle(request: &http::Request, ctx: &Ctx) -> http::Response {
             http::Response::text(200, "session closed")
         }
         other => http::Response::text(405, format!("{other} is not answered here")),
+    }
+}
+
+fn wants_sse(request: &http::Request) -> bool {
+    request.method == "GET"
+        && request.path() == PATH
+        && request
+            .header("accept")
+            .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn serve_sse(request: &http::Request, ctx: &Ctx, writer: &mut TcpStream) {
+    if let Some(origin) = request.header("origin")
+        && !origin.is_empty()
+        && !ctx.origins.iter().any(|own| own == origin)
+    {
+        let _ = http::Response::text(403, "this endpoint only answers its own window".to_owned())
+            .write_to(writer);
+        return;
+    }
+    let Some(offered) = request.bearer() else {
+        let _ = http::Response::text(
+            401,
+            "this endpoint wants Authorization: Bearer <token>".to_owned(),
+        )
+        .write_to(writer);
+        return;
+    };
+    if !token_matches(&ctx.token, offered) {
+        let _ = http::Response::text(401, "the token is wrong".to_owned()).write_to(writer);
+        return;
+    }
+    if let Some(id) = request.header(SESSION_HEADER)
+        && !ctx.holds(id)
+    {
+        let _ = http::Response::json(
+            404,
+            Fault::new(protocol::INVALID_REQUEST, "unknown session")
+                .response()
+                .to_string(),
+        )
+        .write_to(writer);
+        return;
+    }
+    let rx = ctx.subscribe();
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                Cache-Control: no-cache\r\nConnection: close\r\n\r\n: connected\n\n";
+    if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
+        return;
+    }
+    while !ctx.stopped.load(Ordering::Relaxed) {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(msg) => {
+                let frame = format!("event: message\ndata: {msg}\n\n");
+                if writer.write_all(frame.as_bytes()).is_err() || writer.flush().is_err() {
+                    return;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
     }
 }
 
@@ -532,6 +655,8 @@ mod tests {
             source: Arc::new(Empty),
             actions: Arc::new(Recorder::default()),
             sessions: Mutex::new(HashMap::new()),
+            subscribers: Mutex::new(Vec::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
             origins: vec!["http://127.0.0.1:8765".to_owned()],
         }
     }
