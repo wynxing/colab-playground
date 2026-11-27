@@ -11,10 +11,12 @@ errors surface like kernel tracebacks) and the core's known snippets get
 simulated answers. State lives under ``$CPG_FAKE_STATE`` (see fake_common).
 """
 
+import io
 import json
 import os
 import re
 import sys
+import tarfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -90,6 +92,38 @@ def opt(args, *names):
             if i + 1 < len(args):
                 return args[i + 1]
     return None
+
+
+def positional_args(args):
+    pos = []
+    i = 0
+    while i < len(args):
+        if args[i] in ("-s", "--session", "--config") and i + 1 < len(args):
+            i += 2
+        else:
+            pos.append(args[i])
+            i += 1
+    return pos
+
+
+def norm_vm_path(path):
+    if not path:
+        return "/content"
+    return "/" + path.lstrip("/")
+
+
+def matching_vm_files(a, paths):
+    vm_files = a.get("vm_files", {})
+    matched = []
+    seen = set()
+    for p in paths:
+        norm = norm_vm_path(p)
+        prefix = norm.rstrip("/") + "/"
+        for k in sorted(vm_files):
+            if (k == norm or k.startswith(prefix)) and k not in seen:
+                seen.add(k)
+                matched.append((k, vm_files[k]))
+    return matched
 
 
 def label(acc):
@@ -282,6 +316,59 @@ def simulate(code, env, s, ep, a):
         if run:
             run["killed"] = True
         return {"signalled": bool(run)}
+    if "CPG_KEEP_ARCHIVE" in code and "tarfile" in code:
+        paths = json.loads(env.get("CPG_KEEP_PATHS", "[]"))
+        archive_path = env.get("CPG_KEEP_ARCHIVE", "")
+        matched = matching_vm_files(a, paths)
+        if not matched:
+            return {"empty": True, "files": 0, "bytes": 0}
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for vm_path, data in matched:
+                raw = data.encode("latin-1") if isinstance(data, str) else bytes(data)
+                info = tarfile.TarInfo(name=vm_path.lstrip("/"))
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+        raw_tar = buf.getvalue()
+        a.setdefault("vm_archives", {})[archive_path] = raw_tar.decode("latin-1")
+        return {"empty": False, "archive": archive_path, "files": len(matched), "bytes": len(raw_tar)}
+    if "CPG_KEEP_ARCHIVE" in code and "os.remove" in code:
+        archive_path = env.get("CPG_KEEP_ARCHIVE", "")
+        removed = archive_path in a.get("vm_archives", {})
+        a.get("vm_archives", {}).pop(archive_path, None)
+        return {"removed": removed}
+    if "CPG_KEEP_REPO" in code:
+        if not env.get("HF_TOKEN", ""):
+            return {"ok": False, "files": 0, "bytes": 0, "error": "HF_TOKEN is missing"}
+        if s["knobs"].get("hf_upload_fails"):
+            return {"ok": False, "files": 0, "bytes": 0, "error": "simulated HF upload failure"}
+        paths = json.loads(env.get("CPG_KEEP_PATHS", "[]"))
+        matched = matching_vm_files(a, paths)
+        if not matched:
+            return {"ok": False, "files": 0, "bytes": 0, "error": "no files found at keep paths"}
+        total = sum(len(d) for _, d in matched)
+        a.setdefault("hf_uploads", []).append({
+            "repo": env.get("CPG_KEEP_REPO", ""),
+            "subpath": env.get("CPG_KEEP_SUBPATH", ""),
+            "files": len(matched),
+            "bytes": total,
+        })
+        return {"ok": True, "files": len(matched), "bytes": total}
+    if "CPG_KEEP_DRIVE_DEST" in code:
+        mount = env.get("CPG_KEEP_MOUNT", "/content/drive")
+        if mount not in a.get("drive_mounts", []):
+            return {"ok": False, "files": 0, "bytes": 0, "error": "Google Drive is not mounted at " + mount}
+        paths = json.loads(env.get("CPG_KEEP_PATHS", "[]"))
+        matched = matching_vm_files(a, paths)
+        if not matched:
+            return {"ok": False, "files": 0, "bytes": 0, "error": "no files found at keep paths"}
+        total = sum(len(d) for _, d in matched)
+        target = os.path.join(mount, env.get("CPG_KEEP_DRIVE_DEST", "MyDrive/colab-playground").strip("/"))
+        a.setdefault("drive_copies", []).append({"target": target, "files": len(matched), "bytes": total})
+        return {"ok": True, "files": len(matched), "bytes": total, "destination": target}
+    if "CPG_KEEP_MOUNT" in code and "ismount" in code:
+        mount = env.get("CPG_KEEP_MOUNT", "/content/drive")
+        return {"mounted": mount in a.get("drive_mounts", []), "path": mount}
     return None
 
 
@@ -399,6 +486,104 @@ def cmd_ssh(state_path, args):
     return 0
 
 
+def cmd_ls(state_path, args):
+    name = require_account()
+    session = opt(args, "-s", "--session")
+    pos = positional_args(args)
+    path = pos[0] if pos else "content"
+    _, _, a = lookup(state_path, name, session)
+    norm = norm_vm_path(path)
+    vm_files = a.get("vm_files", {})
+    if norm in vm_files:
+        out(os.path.basename(norm) or norm)
+        return 0
+    prefix = "/" if norm == "/" else norm.rstrip("/") + "/"
+    dirs, files = set(), set()
+    for k in vm_files:
+        if k.startswith(prefix):
+            rest = k[len(prefix):]
+            if "/" in rest:
+                dirs.add(rest.split("/", 1)[0])
+            elif rest:
+                files.add(rest)
+    if not dirs and not files:
+        out("[colab] Error: File or directory not found: %s" % path)
+        return 1
+    for d in sorted(dirs):
+        out(d + "/")
+    for f in sorted(files):
+        out(f)
+    return 0
+
+
+def cmd_upload(state_path, args):
+    name = require_account()
+    session = opt(args, "-s", "--session")
+    pos = positional_args(args)
+    if len(pos) < 2:
+        err("Usage: colab upload LOCAL REMOTE")
+        return 2
+    local_path, remote_path = pos[0], pos[1]
+    s, _, a = lookup(state_path, name, session)
+    if not os.path.isfile(local_path):
+        out("[colab] Local file '%s' not found." % local_path)
+        return 1
+    with open(local_path, "rb") as fh:
+        data = fh.read().decode("latin-1")
+    a.setdefault("vm_files", {})[norm_vm_path(remote_path)] = data
+    fc.save_server(s)
+    out("[colab] Uploaded '%s' to '%s'" % (local_path, remote_path))
+    return 0
+
+
+def cmd_download(state_path, args):
+    name = require_account()
+    session = opt(args, "-s", "--session")
+    pos = positional_args(args)
+    if len(pos) < 2:
+        err("Usage: colab download REMOTE LOCAL")
+        return 2
+    remote_path, local_path = pos[0], pos[1]
+    _, _, a = lookup(state_path, name, session)
+    data = a.get("vm_archives", {}).get(remote_path)
+    if data is None:
+        data = a.get("vm_files", {}).get(remote_path) or a.get("vm_files", {}).get(norm_vm_path(remote_path))
+    if data is None:
+        out("[colab] Download failed: File or directory not found: %s" % remote_path)
+        return 1
+    parent = os.path.dirname(os.path.abspath(local_path))
+    os.makedirs(parent, exist_ok=True)
+    with open(local_path, "wb") as fh:
+        fh.write(data.encode("latin-1") if isinstance(data, str) else bytes(data))
+    out("[colab] Downloaded '%s' to '%s'" % (remote_path, local_path))
+    return 0
+
+
+def cmd_drivemount(state_path, args):
+    name = require_account()
+    session = opt(args, "-s", "--session")
+    pos = positional_args(args)
+    mount_path = pos[0] if pos else "/content/drive"
+    s, _, a = lookup(state_path, name, session)
+    if not s["knobs"].get("drive_already_authorized"):
+        out("\n[colab] REQUIRED: Google Drive Authorization needed.\nPlease visit:\n\nhttps://accounts.google.com/o/oauth2/auth?client_id=fake-drive&scope=drive\n")
+        sys.stdout.write("Press Enter after you have granted access... ")
+        sys.stdout.flush()
+        line = sys.stdin.readline()
+        if not line:
+            return 1
+        s, _, a = lookup(state_path, name, session)
+    if s["knobs"].get("drive_mount_fails"):
+        out("[colab] Drive credentials could not be propagated to the VM.")
+        return 0
+    mounts = a.setdefault("drive_mounts", [])
+    if mount_path not in mounts:
+        mounts.append(mount_path)
+    fc.save_server(s)
+    out("[colab] Credentials propagated. Resuming mount...")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     log_call(argv)
@@ -414,7 +599,8 @@ def main():
         out("Version: 0.8.0-fake")
         return 0
     handlers = {"sessions": cmd_sessions, "usage": cmd_usage, "new": cmd_new, "exec": cmd_exec,
-                "stop": cmd_stop, "whoami": cmd_whoami, "ssh": cmd_ssh}
+                "stop": cmd_stop, "whoami": cmd_whoami, "ssh": cmd_ssh, "ls": cmd_ls,
+                "upload": cmd_upload, "download": cmd_download, "drivemount": cmd_drivemount}
     if cmd not in handlers:
         err("Error: No such command '%s'." % cmd)
         return 2

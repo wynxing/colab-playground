@@ -95,6 +95,8 @@ mod reconciliation_tests {
             watchdog: None,
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         };
         backend.inner.st().ledger.upsert(entry("old")).unwrap();
         let sample = backend.inner.reconciliation_sample();
@@ -131,6 +133,8 @@ mod reconciliation_tests {
                     watchdog: None,
                     stopped: None,
                     measured_rate: None,
+                    keep_plan: None,
+                    last_keep_sync: None,
                 })
                 .unwrap();
         }
@@ -172,6 +176,8 @@ mod reconciliation_tests {
                 watchdog: None,
                 stopped: None,
                 measured_rate: None,
+                keep_plan: None,
+                last_keep_sync: None,
             })
             .unwrap();
         let listing = |endpoint: &str| {
@@ -227,6 +233,8 @@ mod reconciliation_tests {
             watchdog: None,
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         };
         let listing = |endpoints: &[&str]| -> Vec<RemoteAssignment> {
             endpoints
@@ -310,6 +318,8 @@ mod reconciliation_tests {
             watchdog: None,
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         };
         for endpoint in [
             None,
@@ -1188,6 +1198,206 @@ impl LoginFlow for RealLoginFlow {
     }
 }
 
+struct RealDriveMountFlow {
+    inner: Arc<Inner>,
+    cli: Cli,
+    state: HostPath,
+    account: AccountId,
+    name: String,
+    mount_path: String,
+    url: String,
+    child: Option<crate::host::HostChild>,
+    finished: bool,
+    _guard: ReadGuard,
+}
+
+impl Drop for RealDriveMountFlow {
+    fn drop(&mut self) {
+        if !self.finished
+            && let Some(mut c) = self.child.take()
+        {
+            c.kill();
+        }
+    }
+}
+
+impl DriveMountFlow for RealDriveMountFlow {
+    fn auth_url(&self) -> &str {
+        &self.url
+    }
+
+    fn confirm(mut self: Box<Self>, cancel: &CancelToken) -> Result<()> {
+        let mut child = self.child.take().ok_or_else(|| {
+            Error::new(ErrorKind::Other).detail("Drive mount flow already finished")
+        })?;
+        child.write_stdin(b"\n")?;
+        child.close_stdin();
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut lines = Vec::new();
+        loop {
+            if cancel.is_cancelled() {
+                child.kill();
+                self.finished = true;
+                return Err(Error::cancelled());
+            }
+            match child.recv_line(Duration::from_millis(100)) {
+                Ok(l) => lines.push(l.text),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if Instant::now() > deadline {
+                child.kill();
+                self.finished = true;
+                return Err(Error::new(ErrorKind::Timeout));
+            }
+        }
+        let code = child.wait();
+        let joined = lines.join("\n");
+        if code != Some(0) || drive_mount_output_failed(&joined) {
+            self.finished = true;
+            return Err(Error::new(ErrorKind::Other).detail(tail(&joined, 600)));
+        }
+        verify_and_record_drive_mount(
+            &self.inner,
+            &self.cli,
+            &self.state,
+            &self.account,
+            &self.name,
+            &self.mount_path,
+            cancel,
+        )?;
+        self.finished = true;
+        Ok(())
+    }
+
+    fn cancel(mut self: Box<Self>) -> Result<()> {
+        if let Some(mut c) = self.child.take() {
+            c.kill();
+        }
+        self.finished = true;
+        Ok(())
+    }
+}
+
+fn drive_mount_output_failed(text: &str) -> bool {
+    text.contains("Drive credentials could not be propagated")
+        || text.contains("Traceback (most recent call last)")
+        || text.contains("[colab] Error:")
+        || text.contains("Authorization failed")
+}
+
+fn verify_and_record_drive_mount(
+    inner: &Arc<Inner>,
+    cli: &Cli,
+    state: &HostPath,
+    account: &AccountId,
+    name: &str,
+    mount_path: &str,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let check = cli.exec_json(
+        state,
+        name,
+        &[(vm::ENV_KEEP_MOUNT.into(), mount_path.to_owned())],
+        &vm::keep_check_drive_mount_snippet(),
+        60,
+        cancel,
+    )?;
+    if check.get("mounted").and_then(|m| m.as_bool()) != Some(true) {
+        return Err(Error::new(ErrorKind::Other)
+            .with("path", mount_path)
+            .detail("Google Drive did not mount on the runtime"));
+    }
+    let updated_plan = {
+        let mut st = inner.st();
+        let mut next_plan = None;
+        let _ = st.ledger.update(account, name, |e| {
+            let mut plan = e.keep_plan.clone().unwrap_or_default();
+            let mut drive = plan.drive.unwrap_or_default();
+            drive.mount_path = mount_path.to_owned();
+            drive.consented = true;
+            drive.mounted = true;
+            plan.drive = Some(drive);
+            e.keep_plan = Some(plan.clone());
+            next_plan = Some(plan);
+        });
+        next_plan
+    };
+    if let Some(plan) = updated_plan {
+        let _ = sync_watchdog_hooks(inner, cli, state, account, name, Some(&plan), cancel);
+    }
+    Ok(())
+}
+
+fn redact_history_with_inner(inner: &Inner, session: &str, secrets: &[String]) {
+    if secrets.is_empty() {
+        return;
+    }
+    if let Ok(helper) = inner.helper() {
+        let _ = helper.history_redact(session, secrets, &CancelToken::new());
+    }
+}
+
+fn sync_watchdog_hooks(
+    inner: &Inner,
+    cli: &Cli,
+    state: &HostPath,
+    account: &AccountId,
+    name: &str,
+    plan: Option<&crate::keep::KeepPlan>,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let tracked = inner.st().ledger.live(account, name).cloned();
+    let Some(entry) = tracked else {
+        return Ok(());
+    };
+    let hf_token = if plan.is_some_and(|p| p.hf.is_some()) {
+        inner
+            .helper()
+            .ok()
+            .and_then(|h| h.secret_get("hf_token", cancel).ok().flatten())
+    } else {
+        None
+    };
+    let hooks = plan
+        .map(|p| vm::watchdog_hooks_for_keep_plan(p, name, hf_token.as_deref()))
+        .unwrap_or_default();
+    let armed = entry.watchdog.as_ref().is_some_and(|w| w.armed);
+    let cancelled = entry.watchdog.as_ref().is_some_and(|w| w.cancelled);
+    if !armed && (hooks.is_empty() || cancelled) {
+        return Ok(());
+    }
+    let now = inner.now();
+    let mut policy = entry.policy.clone();
+    policy.max_runtime = entry
+        .auto_stop_at()
+        .map(|at| at.duration_since(now).unwrap_or_else(|_| Duration::from_secs(60)));
+    let grace = inner.st().defaults.winddown_grace;
+    let exec_res = cli.exec_json(
+        state,
+        name,
+        &watchdog::start_env(&policy, grace, &hooks),
+        &watchdog::start_snippet(),
+        120,
+        cancel,
+    );
+    if let Some(tok) = &hf_token {
+        redact_history_with_inner(inner, name, std::slice::from_ref(tok));
+    }
+    let v = exec_res?;
+    let reply = watchdog::parse_reply(&v, inner.now())?;
+    let info = if reply.alive && reply.can_release {
+        reply.info
+    } else {
+        watchdog::start_failed(&policy)
+    };
+    let _ = inner
+        .st()
+        .ledger
+        .update(account, name, |e| e.watchdog = Some(info));
+    Ok(())
+}
+
 fn install_script(method: InstallMethod) -> &'static str {
     match method {
         InstallMethod::Uv => {
@@ -1689,6 +1899,8 @@ impl Backend for RealBackend {
             watchdog: outcome.watchdog.clone(),
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         })?;
         Ok(outcome)
     }
@@ -1699,6 +1911,22 @@ impl Backend for RealBackend {
         options: StopOptions,
         cancel: &CancelToken,
     ) -> Result<()> {
+        if options.save_keep {
+            let has_plan = target.name.as_ref().is_some_and(|name| {
+                self.inner
+                    .st()
+                    .ledger
+                    .live(&target.account, name)
+                    .and_then(|e| e.keep_plan.as_ref())
+                    .is_some_and(|p| p.local.is_some() || p.hf.is_some() || p.drive.is_some())
+            });
+            if has_plan
+                && let Err(err) = self.sync_keep(target, None, cancel)
+                && !options.force_on_keep_error
+            {
+                return Err(err);
+            }
+        }
         self.inner.stop(target, &options, cancel)
     }
 
@@ -1718,6 +1946,19 @@ impl Backend for RealBackend {
         Ok(crate::vm::parse_vm_files(&value))
     }
 
+    fn vm_list_dir(
+        &self,
+        target: &RuntimeRef,
+        path: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<VmEntry>> {
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        cli.ls(&state, &name, path, cancel)
+    }
+
     fn vm_download(
         &self,
         target: &RuntimeRef,
@@ -1730,6 +1971,461 @@ impl Backend for RealBackend {
         };
         let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
         cli.download(&state, &name, remote, local, cancel)
+    }
+
+    fn vm_upload(
+        &self,
+        target: &RuntimeRef,
+        local: &str,
+        remote: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let host_local = crate::paths::host_path_for_local(Path::new(local)).ok_or_else(|| {
+            Error::new(ErrorKind::Io)
+                .with("path", local)
+                .detail("the local file path is outside the CLI host namespace")
+        })?;
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        cli.upload(&state, &name, host_local.as_str(), remote, cancel)
+    }
+
+    fn set_keep_plan(
+        &self,
+        target: &RuntimeRef,
+        plan: Option<crate::keep::KeepPlan>,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        if let Some(ref p) = plan {
+            p.validate()?;
+        }
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        let found = self
+            .inner
+            .st()
+            .ledger
+            .update(&target.account, &name, |e| e.keep_plan = plan.clone())?;
+        if !found {
+            return Err(Error::new(ErrorKind::SessionGone).with("session", &name));
+        }
+        sync_watchdog_hooks(
+            &self.inner,
+            &cli,
+            &state,
+            &target.account,
+            &name,
+            plan.as_ref(),
+            cancel,
+        )?;
+        Ok(())
+    }
+
+    fn sync_keep(
+        &self,
+        target: &RuntimeRef,
+        targets: Option<Vec<crate::keep::KeepTargetId>>,
+        cancel: &CancelToken,
+    ) -> Result<crate::keep::KeepSyncReport> {
+        use crate::keep::{KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded};
+
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        let plan = self
+            .inner
+            .st()
+            .ledger
+            .live(&target.account, &name)
+            .and_then(|e| e.keep_plan.clone())
+            .ok_or_else(|| Error::invalid("keep_plan", "no Keep Plan configured"))?;
+        if plan.paths.is_empty() {
+            return Err(Error::invalid("keep_paths", "no VM paths configured"));
+        }
+        plan.validate()?;
+        let selected: Vec<KeepTargetId> = match targets {
+            Some(list) if !list.is_empty() => list,
+            _ => {
+                let mut list = Vec::new();
+                if plan.local.is_some() {
+                    list.push(KeepTargetId::Local);
+                }
+                if plan.hf.is_some() {
+                    list.push(KeepTargetId::HuggingFace);
+                }
+                if plan.drive.is_some() {
+                    list.push(KeepTargetId::Drive);
+                }
+                list
+            }
+        };
+        if selected.is_empty() {
+            return Err(Error::invalid("keep_plan", "no Keep Plan targets enabled"));
+        }
+        let now = self.inner.now();
+        let paths_json = serde_json::to_string(&plan.paths).unwrap_or_else(|_| "[]".into());
+        let mut results = Vec::new();
+        for id in selected {
+            let res = match id {
+                KeepTargetId::Local => {
+                    let Some(local) = &plan.local else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "local_folder",
+                                    "local Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let archive = format!(
+                        "{}/keep-{}.tar.gz",
+                        crate::watchdog::VM_BASE,
+                        crate::accounts::nonce()
+                    );
+                    let dir = PathBuf::from(&local.folder);
+                    let stamp = now
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let local_file = dir.join(format!("{name}-{stamp}.tar.gz"));
+                    let dest = local_file.to_string_lossy().into_owned();
+                    let run_local = || -> Result<(u64, u64)> {
+                        let archived = cli.exec_json(
+                            &state,
+                            &name,
+                            &[
+                                (vm::ENV_KEEP_PATHS.into(), paths_json.clone()),
+                                (vm::ENV_KEEP_ARCHIVE.into(), archive.clone()),
+                            ],
+                            &vm::keep_archive_snippet(),
+                            300,
+                            cancel,
+                        )?;
+                        let empty = archived
+                            .get("empty")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let files = archived.get("files").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let bytes = archived.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        if empty || files == 0 {
+                            return Err(Error::new(ErrorKind::Io)
+                                .detail("no files found at Keep Plan paths"));
+                        }
+                        std::fs::create_dir_all(&dir)?;
+                        let host_local = crate::paths::host_path_for_local(&local_file)
+                            .ok_or_else(|| {
+                                Error::new(ErrorKind::Io)
+                                    .with("path", &dest)
+                                    .detail("local Keep Plan path cannot be written by the CLI")
+                            })?;
+                        let dl = cli.download(&state, &name, &archive, host_local.as_str(), cancel);
+                        let _ = cli.exec_json(
+                            &state,
+                            &name,
+                            &[(vm::ENV_KEEP_ARCHIVE.into(), archive.clone())],
+                            &vm::keep_remove_snippet(),
+                            60,
+                            &CancelToken::new(),
+                        );
+                        dl?;
+                        let meta = std::fs::metadata(&local_file)?;
+                        if meta.len() == 0 {
+                            return Err(Error::new(ErrorKind::Io)
+                                .with("path", &dest)
+                                .detail("downloaded Keep Plan archive is empty"));
+                        }
+                        Ok((files, bytes))
+                    };
+                    match run_local() {
+                        Ok((files, bytes)) => KeepTargetResult {
+                            files,
+                            bytes,
+                            destination: dest,
+                            error: None,
+                        },
+                        Err(e) => KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(e),
+                        },
+                    }
+                }
+                KeepTargetId::HuggingFace => {
+                    let Some(hf) = &plan.hf else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "hf_repo",
+                                    "Hugging Face Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let dest = match &hf.path_in_repo {
+                        Some(sub) if !sub.trim().is_empty() => format!("{}/{}", hf.repo, sub.trim()),
+                        _ => hf.repo.clone(),
+                    };
+                    let token = self.hf_token(cancel).filter(|t| !t.trim().is_empty());
+                    let Some(token) = token else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: dest,
+                                error: Some(Error::invalid(
+                                    "hf_token",
+                                    "no Hugging Face token saved",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let secrets = [token.clone()];
+                    let env = vec![
+                        (vm::ENV_KEEP_PATHS.into(), paths_json.clone()),
+                        (vm::ENV_KEEP_REPO.into(), hf.repo.clone()),
+                        (
+                            vm::ENV_KEEP_SUBPATH.into(),
+                            hf.path_in_repo.clone().unwrap_or_default(),
+                        ),
+                        ("HF_TOKEN".into(), token),
+                    ];
+                    let exec_res = cli.exec_json(
+                        &state,
+                        &name,
+                        &env,
+                        &vm::keep_hf_upload_snippet(),
+                        900,
+                        cancel,
+                    );
+                    let _ = self.redact_cli_history(&name, &secrets);
+                    match exec_res {
+                        Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                            KeepTargetResult {
+                                files: v.get("files").and_then(|x| x.as_u64()).unwrap_or(0),
+                                bytes: v.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+                                destination: dest,
+                                error: None,
+                            }
+                        }
+                        Ok(v) => {
+                            let msg = v
+                                .get("error")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("Hugging Face upload failed");
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: dest,
+                                error: Some(
+                                    Error::new(ErrorKind::Other).detail(redact(msg, &secrets)),
+                                ),
+                            }
+                        }
+                        Err(e) => KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error {
+                                detail: redact(&e.detail, &secrets),
+                                ..e
+                            }),
+                        },
+                    }
+                }
+                KeepTargetId::Drive => {
+                    let Some(drive) = &plan.drive else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "drive",
+                                    "Google Drive Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let dest_sub = format!(
+                        "{}/{}",
+                        drive.dest_subpath.trim_end_matches('/'),
+                        name
+                    );
+                    let dest = format!("{}/{}", drive.mount_path.trim_end_matches('/'), dest_sub);
+                    if !drive.consented {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: dest,
+                                error: Some(Error::invalid(
+                                    "drive_consent",
+                                    "Google Drive mount requires explicit user consent",
+                                )),
+                            },
+                        ));
+                        continue;
+                    }
+                    if !drive.mounted {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: dest,
+                                error: Some(Error::invalid(
+                                    "drive_mount",
+                                    "Google Drive is not mounted on this runtime",
+                                )),
+                            },
+                        ));
+                        continue;
+                    }
+                    let env = vec![
+                        (vm::ENV_KEEP_PATHS.into(), paths_json.clone()),
+                        (vm::ENV_KEEP_MOUNT.into(), drive.mount_path.clone()),
+                        (vm::ENV_KEEP_DRIVE_DEST.into(), dest_sub),
+                    ];
+                    match cli.exec_json(
+                        &state,
+                        &name,
+                        &env,
+                        &vm::keep_drive_copy_snippet(),
+                        900,
+                        cancel,
+                    ) {
+                        Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                            KeepTargetResult {
+                                files: v.get("files").and_then(|x| x.as_u64()).unwrap_or(0),
+                                bytes: v.get("bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+                                destination: dest,
+                                error: None,
+                            }
+                        }
+                        Ok(v) => KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error::new(ErrorKind::Io).detail(
+                                v.get("error")
+                                    .and_then(|e| e.as_str())
+                                    .unwrap_or("Google Drive copy failed"),
+                            )),
+                        },
+                        Err(e) => KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(e),
+                        },
+                    }
+                }
+            };
+            results.push((id, res));
+        }
+        let report = KeepSyncReport { at: now, results };
+        let _ = self
+            .inner
+            .st()
+            .ledger
+            .update(&target.account, &name, |e| e.last_keep_sync = Some(report.clone()));
+        ensure_report_succeeded(&report)?;
+        Ok(report)
+    }
+
+    fn begin_drive_mount(
+        &self,
+        target: &RuntimeRef,
+        mount_path: &str,
+        cancel: &CancelToken,
+    ) -> Result<DriveMountStart> {
+        crate::keep::validate_vm_path("drive_mount_path", mount_path)?;
+        let Some(name) = target.name.clone() else {
+            return Err(Error::new(ErrorKind::SessionGone));
+        };
+        let (guard, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        let req = cli
+            .request(
+                Some(&state),
+                &CliCommand::DriveMount {
+                    name: name.clone(),
+                    path: mount_path.to_owned(),
+                },
+            )?
+            .stdin_pipe();
+        let mut child = self.inner.cfg.host.spawn(req)?;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut lines = Vec::new();
+        loop {
+            if cancel.is_cancelled() {
+                child.kill();
+                return Err(Error::cancelled());
+            }
+            match child.recv_line(Duration::from_millis(100)) {
+                Ok(l) => {
+                    if let Some(url) = auth_url_from_line(&l.text) {
+                        return Ok(DriveMountStart::NeedsConsent(Box::new(
+                            RealDriveMountFlow {
+                                inner: self.inner.clone(),
+                                cli,
+                                state,
+                                account: target.account.clone(),
+                                name,
+                                mount_path: mount_path.to_owned(),
+                                url,
+                                child: Some(child),
+                                finished: false,
+                                _guard: guard,
+                            },
+                        )));
+                    }
+                    lines.push(l.text);
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if Instant::now() > deadline {
+                child.kill();
+                return Err(Error::new(ErrorKind::Timeout));
+            }
+        }
+        let code = child.wait();
+        let joined = lines.join("\n");
+        if code != Some(0) || drive_mount_output_failed(&joined) {
+            return Err(Error::new(ErrorKind::Other).detail(tail(&joined, 600)));
+        }
+        verify_and_record_drive_mount(
+            &self.inner,
+            &cli,
+            &state,
+            &target.account,
+            &name,
+            mount_path,
+            cancel,
+        )?;
+        Ok(DriveMountStart::Mounted)
     }
 
     fn extend_session(
@@ -1851,12 +2547,18 @@ impl Backend for RealBackend {
                 // A stop can take long and the app can quit before it returns: what the
                 // round read is saved first.
                 let _ = self.inner.st().ledger.save_changes();
-                match self.inner.stop(
+                let save_keep = e
+                    .keep_plan
+                    .as_ref()
+                    .is_some_and(|p| p.has_enabled_target());
+                match self.stop_session(
                     &target,
-                    &StopOptions {
+                    StopOptions {
                         reason: StopReason::Guard {
                             concern: concern.clone(),
                         },
+                        save_keep,
+                        force_on_keep_error: true,
                     },
                     cancel,
                 ) {
@@ -2025,6 +2727,11 @@ impl Backend for RealBackend {
                 name: Some(session.clone()),
             }
         };
+        if let Some(mut plan) = spec.keep_plan {
+            let extra: Vec<String> = manifest.keep.iter().map(|k| k.path.clone()).collect();
+            plan.merge_paths(&extra);
+            self.set_keep_plan(&target(&self.inner), Some(plan), cancel)?;
+        }
         let result = self.run_on(
             &plugin, &account, &session, env, &secrets, &endpoints, &events, cancel,
         );
@@ -2037,6 +2744,8 @@ impl Backend for RealBackend {
                 &target(&self.inner),
                 &StopOptions {
                     reason: StopReason::Provision,
+                    save_keep: false,
+                    force_on_keep_error: false,
                 },
                 &CancelToken::new(),
             );
@@ -2221,20 +2930,54 @@ impl RealBackend {
         let info = if reply.info.armed {
             reply.info
         } else {
-            let tracked = self
-                .inner
-                .st()
-                .ledger
-                .live(&target.account, &name)
-                .map(|e| e.policy.clone());
+            let (tracked, keep_plan) = {
+                let st = self.inner.st();
+                let entry = st.ledger.live(&target.account, &name);
+                (
+                    entry.map(|e| e.policy.clone()),
+                    entry.and_then(|e| e.keep_plan.clone()),
+                )
+            };
             let policy =
                 watchdog::restart_policy(tracked.as_ref(), reply.info.idle_timeout, runtime);
-            let started = self.inner.layout(cancel).and_then(|layout| {
-                let ops = self
-                    .inner
-                    .ops(&cli, &target.account, &state, layout.host_scratch());
-                provision::start_watchdog(&ops, &name, &policy)
-            });
+            let hf_token = if keep_plan.as_ref().is_some_and(|p| p.hf.is_some()) {
+                self.hf_token(cancel)
+            } else {
+                None
+            };
+            let hooks = keep_plan
+                .as_ref()
+                .map(|p| vm::watchdog_hooks_for_keep_plan(p, &name, hf_token.as_deref()))
+                .unwrap_or_default();
+            let started = if hooks.is_empty() {
+                self.inner.layout(cancel).and_then(|layout| {
+                    let ops = self
+                        .inner
+                        .ops(&cli, &target.account, &state, layout.host_scratch());
+                    provision::start_watchdog(&ops, &name, &policy)
+                })
+            } else {
+                let grace = self.inner.st().defaults.winddown_grace;
+                let exec_res = cli.exec_json(
+                    &state,
+                    &name,
+                    &watchdog::start_env(&policy, grace, &hooks),
+                    &watchdog::start_snippet(),
+                    120,
+                    cancel,
+                );
+                if let Some(tok) = &hf_token {
+                    let _ = self.redact_cli_history(&name, std::slice::from_ref(tok));
+                }
+                exec_res.and_then(|v| {
+                    let r = watchdog::parse_reply(&v, self.inner.now())?;
+                    Ok(Some(if r.alive && r.can_release {
+                        r.info
+                    } else {
+                        watchdog::start_failed(&policy)
+                    }))
+                })
+            };
             match started {
                 Ok(Some(info)) if info.armed => info,
                 _ => watchdog::start_failed(&policy),

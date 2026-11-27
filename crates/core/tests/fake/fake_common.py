@@ -49,6 +49,9 @@ DEFAULT_KNOBS = {
     "keyring_locked": False,        # keyring reads fail
     "cli_api_broken": False,        # colab_cli.client cannot be imported
     "keyring_during_refresh": None,  # {"<service>\u0000<user>": value or null}, applied by the next token refresh
+    "drive_already_authorized": False,  # `colab drivemount` mounts without prompting
+    "drive_mount_fails": False,     # `colab drivemount` prints failure without exiting non-zero
+    "hf_upload_fails": False,       # Keep Plan HF upload snippet reports failure
 }
 
 

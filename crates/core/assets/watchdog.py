@@ -57,6 +57,7 @@ class Watchdog:
         self.log_path = None
         self.last_gpu_busy = 0.0
         self.started = time.time()
+        self.last_periodic = {}
 
     def log(self, message):
         line = "%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), message)
@@ -151,6 +152,22 @@ class Watchdog:
         except OSError:
             pass
 
+    def run_hook(self, i, hook, timeout):
+        argv = hook.get("argv") if isinstance(hook, dict) else None
+        if not argv or not all(isinstance(a, str) for a in argv):
+            self.log("hook %d skipped: invalid argv" % i)
+            return
+        env = dict(os.environ)
+        env.update({k: str(v) for k, v in (hook.get("env") or {}).items()})
+        try:
+            rc = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=timeout).returncode
+            self.log("hook %d (%s) exited %d" % (i, os.path.basename(argv[0]), rc))
+        except subprocess.TimeoutExpired:
+            self.log("hook %d (%s) timed out after %ds" % (i, os.path.basename(argv[0]), timeout))
+        except OSError as exc:
+            self.log("hook %d (%s) failed to start (%s)" % (i, os.path.basename(argv[0]), type(exc).__name__))
+
     def winddown(self, deadline):
         self.winddown_for = deadline
         try:
@@ -160,22 +177,26 @@ class Watchdog:
             pass
         self.log("wind-down started (%d hook(s))" % len(self.hooks))
         for i, hook in enumerate(self.hooks):
-            argv = hook.get("argv") if isinstance(hook, dict) else None
-            if not argv or not all(isinstance(a, str) for a in argv):
-                self.log("hook %d skipped: invalid argv" % i)
-                continue
-            env = dict(os.environ)
-            env.update({k: str(v) for k, v in (hook.get("env") or {}).items()})
             budget = max(1.0, deadline - time.time())
             timeout = min(budget, float(hook.get("timeout_s") or budget))
-            try:
-                rc = subprocess.run(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, timeout=timeout).returncode
-                self.log("hook %d (%s) exited %d" % (i, os.path.basename(argv[0]), rc))
-            except subprocess.TimeoutExpired:
-                self.log("hook %d (%s) timed out after %ds" % (i, os.path.basename(argv[0]), timeout))
-            except OSError as exc:
-                self.log("hook %d (%s) failed to start (%s)" % (i, os.path.basename(argv[0]), type(exc).__name__))
+            self.run_hook(i, hook, timeout)
+
+    def run_periodic(self, now, deadline):
+        for i, hook in enumerate(self.hooks):
+            if not isinstance(hook, dict):
+                continue
+            interval = hook.get("interval_s")
+            if not isinstance(interval, (int, float)) or interval <= 0:
+                continue
+            last = self.last_periodic.get(i, self.started)
+            if now - last < interval:
+                continue
+            timeout = float(hook.get("timeout_s") or 240)
+            if isinstance(deadline, (int, float)):
+                budget = max(1.0, deadline - time.time())
+                timeout = min(timeout, budget)
+            self.run_hook(i, hook, timeout)
+            self.last_periodic[i] = time.time()
 
     def run(self):
         self.load()
@@ -188,18 +209,20 @@ class Watchdog:
                 return 0
             now = time.time()
             deadline = self.config.get("deadline_epoch")
+            grace = self.config.get("grace_s", 300)
+            grace = grace if isinstance(grace, (int, float)) and grace >= 0 else 300
             if not isinstance(deadline, (int, float)):
                 if self.winddown_for is not None:
                     self.clear_winddown()
             else:
-                grace = self.config.get("grace_s", 300)
-                grace = grace if isinstance(grace, (int, float)) and grace >= 0 else 300
                 if self.winddown_for is not None and deadline != self.winddown_for and now < deadline - grace:
                     self.log("deadline extended; wind-down reset")
                     self.clear_winddown()
                 if self.winddown_for is None and now >= deadline - grace and now < deadline:
                     self.winddown(deadline)
                     continue
+            if self.winddown_for is None:
+                self.run_periodic(now, deadline)
             if isinstance(deadline, (int, float)) and now >= deadline:
                 if self.release("deadline"):
                     return 0
@@ -207,6 +230,8 @@ class Watchdog:
             if isinstance(idle, (int, float)) and idle > 0:
                 idle_s = self.idle_for(now)
                 if idle_s >= idle:
+                    if self.hooks and self.winddown_for is None:
+                        self.winddown(time.time() + grace)
                     if self.release("idle for %ds" % idle_s):
                         return 0
             poll = self.config.get("poll_s", 15)

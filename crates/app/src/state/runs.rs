@@ -72,6 +72,8 @@ pub struct RunForm {
     pub target_lost: Option<TargetLost>,
     /// Stop a session provisioned for this run when the run fails.
     pub stop_on_failure: bool,
+    /// Optional Keep Plan to attach when the run starts.
+    pub keep_plan: Option<colab_playground_core::keep::KeepPlan>,
     pub hf: HfLookup,
     pub error: Option<Error>,
 }
@@ -223,6 +225,7 @@ impl AppState {
             existing_account: None,
             target_lost: None,
             stop_on_failure: template.stop_on_failure,
+            keep_plan: template.keep_plan,
             hf: HfLookup::default(),
             error: None,
         });
@@ -470,6 +473,7 @@ impl AppState {
             target,
             stop_on_failure: form.stop_on_failure,
             keep_alive,
+            keep_plan: form.keep_plan.clone(),
         };
         self.plugin_run = Some(PluginRun {
             plugin: form.plugin.clone(),

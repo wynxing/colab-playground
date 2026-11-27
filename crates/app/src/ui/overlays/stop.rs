@@ -3,6 +3,7 @@
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant},
     feedback::InlineMessage,
+    forms::Switch,
     overlays::Dialog,
     primitives::{IconName, Severity},
     typography::Paragraph,
@@ -17,6 +18,8 @@ use crate::{
 };
 
 pub const STOP_CONFIRM: &str = "stop-confirm";
+pub const STOP_KEEP_TOGGLE: &str = "stop-save-keep";
+pub const STOP_FORCE_CONFIRM: &str = "stop-force-confirm";
 
 pub(super) fn render(
     prompt: &StopPrompt,
@@ -41,11 +44,31 @@ pub(super) fn render(
         Severity::Warning,
         tr(cx, keys::STOP_WIPED),
     ));
+    if prompt.has_keep_plan {
+        let toggle = handle.clone();
+        dialog = dialog.child(tagged(
+            STOP_KEEP_TOGGLE,
+            Switch::new(STOP_KEEP_TOGGLE, prompt.save_keep)
+                .label(tr(cx, keys::STOP_KEEP_TOGGLE))
+                .on_change(move |on, _, cx| {
+                    toggle.update(cx, |state, cx| state.toggle_stop_save_keep(on, cx))
+                }),
+        ));
+    }
     if let Some(error) = &prompt.error {
         dialog = dialog.child(error_view::alert("stop", None, error, None, handle, cx));
+        if prompt.keep_failed {
+            dialog = dialog.child(InlineMessage::new(
+                Severity::Danger,
+                tr(cx, keys::STOP_KEEP_FAILED_HINT),
+            ));
+        }
     }
     let go = handle.clone();
-    dialog
+    let force_go = handle.clone();
+    let keep_failed = prompt.keep_failed;
+    let force_label = tr(cx, keys::STOP_FORCE_ACTION);
+    let mut dialog = dialog
         .action({
             let handle = handle.clone();
             move |_| Layer::Overlay.cancel_button(cancel, handle)
@@ -60,8 +83,23 @@ pub(super) fn render(
                     .disabled(stopping)
                     .on_click(move |_, _, cx| go.update(cx, |state, cx| state.confirm_stop(cx))),
             )
-        })
-        .into_any_element()
+        });
+    if keep_failed {
+        dialog = dialog.action(move |_| {
+            tagged(
+                STOP_FORCE_CONFIRM,
+                Button::new(STOP_FORCE_CONFIRM, force_label)
+                    .variant(ButtonVariant::Danger)
+                    .icon(IconName::Square)
+                    .loading(stopping)
+                    .disabled(stopping)
+                    .on_click(move |_, _, cx| {
+                        force_go.update(cx, |state, cx| state.force_stop(cx))
+                    }),
+            )
+        });
+    }
+    dialog.into_any_element()
 }
 
 pub const CANCEL_AUTO_STOP_CONFIRM: &str = "cancel-auto-stop-confirm";

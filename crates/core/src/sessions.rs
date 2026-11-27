@@ -249,6 +249,12 @@ pub struct TrackedSession {
     /// the account's only runtime: what its hardware burns, not an estimate.
     #[serde(default)]
     pub measured_rate: Option<RateReading>,
+    /// Per-session Keep Plan (paths and persistence targets).
+    #[serde(default)]
+    pub keep_plan: Option<crate::keep::KeepPlan>,
+    /// Result of the most recent Keep Plan sync attempt.
+    #[serde(default)]
+    pub last_keep_sync: Option<crate::keep::KeepSyncReport>,
 }
 
 impl TrackedSession {
@@ -616,6 +622,8 @@ mod tests {
                 }),
                 stopped: None,
                 measured_rate: None,
+                keep_plan: None,
+                last_keep_sync: None,
             })
             .unwrap();
         let again = Ledger::load(&path).unwrap();
@@ -641,6 +649,8 @@ mod tests {
             watchdog: None,
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         }
     }
 
@@ -834,6 +844,8 @@ mod tests {
             watchdog: Some(wd),
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         };
         assert_eq!(s.auto_stop_at(), Some(t0 + Duration::from_secs(600)));
         s.watchdog = Some(dead);

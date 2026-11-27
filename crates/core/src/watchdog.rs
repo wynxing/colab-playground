@@ -37,7 +37,7 @@ pub const ENV_GRACE: &str = "CPG_WD_GRACE_S";
 /// watchdog's stdin, never written to disk.
 pub const ENV_HOOKS: &str = "CPG_WD_HOOKS";
 
-/// A command the watchdog runs during wind-down (before the deadline).
+/// A command the watchdog runs during wind-down (before the deadline) or periodically.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WatchdogHook {
     /// Program and arguments (no shell).
@@ -46,6 +46,9 @@ pub struct WatchdogHook {
     pub env: std::collections::BTreeMap<String, String>,
     /// Time limit in seconds (capped by the time left before the deadline).
     pub timeout_s: u64,
+    /// Optional periodic interval in seconds (runs hook repeatedly while alive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_s: Option<u64>,
 }
 
 const STATUS_FN: &str = r#"
@@ -292,6 +295,7 @@ mod tests {
             argv: vec!["/usr/bin/true".into()],
             env: [("TOKEN".to_owned(), "x".to_owned())].into(),
             timeout_s: 60,
+            interval_s: Some(900),
         };
         let env = start_env(&p, Duration::from_secs(300), std::slice::from_ref(&hook));
         assert_eq!(
@@ -304,6 +308,9 @@ mod tests {
         );
         let hooks: Vec<WatchdogHook> = serde_json::from_str(&env[3].1).unwrap();
         assert_eq!(hooks, vec![hook]);
+        let plain: WatchdogHook =
+            serde_json::from_str(r#"{"argv":["true"],"env":{},"timeout_s":10}"#).unwrap();
+        assert_eq!(plain.interval_s, None);
         let none = start_env(&GuardPolicy::unlimited(), Duration::ZERO, &[]);
         assert_eq!(none[0].1, "none");
         assert_eq!(none[3].1, "[]");

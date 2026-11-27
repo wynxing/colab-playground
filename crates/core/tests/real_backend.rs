@@ -1952,3 +1952,444 @@ fn probe_blames_the_configured_path_when_nothing_runs_there() {
     let error = backend.probe(&nc()).unwrap_err();
     assert!(error.is(ErrorKind::InvalidInput), "{error}");
 }
+
+#[test]
+fn vm_list_dir_and_vm_upload_roundtrip_and_errors() {
+    let f = fixture();
+    let _alice = f.adopt_alice();
+    f.provision("files-rt", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("files-rt"))
+        .unwrap()
+        .id;
+
+    let local_file = f.root.join("lora.safetensors");
+    std::fs::write(&local_file, b"fake-lora-weights").unwrap();
+    f.b.vm_upload(
+        &rt,
+        &local_file.to_string_lossy(),
+        "content/weights/lora.safetensors",
+        &nc(),
+    )
+    .unwrap();
+
+    let entries = f.b.vm_list_dir(&rt, "content/weights", &nc()).unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.name == "lora.safetensors" && !e.is_dir),
+        "{entries:?}"
+    );
+
+    let missing_local = f
+        .b
+        .vm_upload(
+            &rt,
+            &f.root.join("does-not-exist.bin").to_string_lossy(),
+            "content/missing.bin",
+            &nc(),
+        )
+        .unwrap_err();
+    assert!(missing_local.is(ErrorKind::Io), "{missing_local}");
+
+    let missing_remote = f.b.vm_list_dir(&rt, "content/no-such-dir", &nc()).unwrap_err();
+    assert!(!missing_remote.is(ErrorKind::SessionGone), "{missing_remote}");
+}
+
+#[test]
+fn keep_plan_local_sync_and_pre_stop_never_discards_on_failure() {
+    use colab_playground_core::keep::{KeepPlan, KeepTargetId, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("keep-local", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-local"))
+        .unwrap()
+        .id;
+
+    let save_dir = f.root.join("saved-local");
+    let plan = KeepPlan {
+        paths: vec!["/content/out".into()],
+        local: Some(LocalKeepTarget {
+            folder: save_dir.to_string_lossy().into_owned(),
+        }),
+        hf: None,
+        drive: None,
+    };
+    f.b.set_keep_plan(&rt, Some(plan), &nc()).unwrap();
+
+    // No files on VM yet: save must fail, and pre-stop save must abort stop without wiping the VM.
+    assert!(f.b.sync_keep(&rt, None, &nc()).is_err());
+    let stop_err = f
+        .b
+        .stop_session(
+            &rt,
+            StopOptions {
+                reason: StopReason::User,
+                save_keep: true,
+                force_on_keep_error: false,
+            },
+            &nc(),
+        )
+        .unwrap_err();
+    assert!(!stop_err.is(ErrorKind::OrphanSuspected), "{stop_err}");
+    assert_eq!(
+        f.assignments("alice").len(),
+        1,
+        "runtime must stay alive when pre-stop Keep Plan fails"
+    );
+
+    // Populate simulated VM output file and retry save + pre-stop stop.
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/result.png": "png-bytes"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert!(
+        report
+            .results
+            .iter()
+            .any(|(id, r)| *id == KeepTargetId::Local && r.error.is_none()),
+        "{report:?}"
+    );
+    let downloaded: Vec<_> = std::fs::read_dir(&save_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(!downloaded.is_empty(), "archive must exist on local disk");
+    assert!(
+        std::fs::metadata(&downloaded[0]).unwrap().len() > 0,
+        "downloaded archive must be non-empty"
+    );
+
+    // Pre-stop save succeeds and then releases the VM.
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: false,
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn keep_plan_hf_upload_isolates_secret_and_arms_watchdog_hooks() {
+    use colab_playground_core::keep::{HfKeepTarget, KeepPlan};
+
+    let f = fixture();
+    f.adopt_alice();
+    let secret = "hf_SUPERSECRET_ISSUE19_TOKEN";
+    f.b.set_secret("hf_token", secret, &nc()).unwrap();
+    f.provision("keep-hf", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-hf"))
+        .unwrap()
+        .id;
+
+    let plan = KeepPlan {
+        paths: vec!["/content/checkpoints".into()],
+        local: None,
+        hf: Some(HfKeepTarget {
+            repo: "alice/test-checkpoints".into(),
+            path_in_repo: Some("run-1".into()),
+            interval_minutes: Some(15),
+        }),
+        drive: None,
+    };
+    f.b.set_keep_plan(&rt, Some(plan), &nc()).unwrap();
+
+    // Watchdog must be restarted with the HF wind-down hook, and CLI history must be scrubbed.
+    let starts = f.watchdog_starts();
+    assert!(starts.len() >= 2, "watchdog restarted with keep hooks: {starts:?}");
+    let last_hooks = starts
+        .last()
+        .unwrap()
+        .iter()
+        .find_map(|a| a.strip_prefix("CPG_WD_HOOKS="))
+        .unwrap();
+    assert!(last_hooks.contains("alice/test-checkpoints"), "{last_hooks}");
+    assert!(!f.history("keep-hf").contains(secret), "history leaked HF token!");
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/checkpoints/step-100.safetensors": "ckpt-bytes"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert!(!f.history("keep-hf").contains(secret), "sync leaked HF token!");
+
+    // Deleting hf_token makes HF sync fail clearly without leaking or claiming Ok.
+    f.b.delete_secret("hf_token", &nc()).unwrap();
+    let err = f.b.sync_keep(&rt, None, &nc()).unwrap_err();
+    assert!(!err.detail.contains(secret));
+}
+
+#[test]
+fn keep_plan_drive_mount_requires_explicit_consent_and_handles_auth_flow() {
+    use colab_playground_core::backend::DriveMountStart;
+    use colab_playground_core::keep::{DriveKeepTarget, KeepPlan};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("keep-drive", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-drive"))
+        .unwrap()
+        .id;
+
+    // Drive with consented = false must refuse to sync.
+    let unconsented = KeepPlan {
+        paths: vec!["/content/out".into()],
+        local: None,
+        hf: None,
+        drive: Some(DriveKeepTarget {
+            mount_path: "/content/drive".into(),
+            dest_subpath: "MyDrive/colab-playground".into(),
+            consented: false,
+            mounted: false,
+        }),
+    };
+    f.b.set_keep_plan(&rt, Some(unconsented), &nc()).unwrap();
+    let err = f.b.sync_keep(&rt, None, &nc()).unwrap_err();
+    assert!(err.is(ErrorKind::InvalidInput), "{err}");
+
+    // Interactive Drive mount consent flow: cancel leaves it unmounted, confirm mounts it.
+    match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => {
+            assert!(flow.auth_url().starts_with("https://"));
+            flow.cancel().unwrap();
+        }
+        DriveMountStart::Mounted => panic!("expected consent URL on first mount"),
+    }
+    let (_, _) = f.listed_watchdog("keep-drive");
+    let rt_view = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-drive"))
+        .unwrap();
+    assert!(
+        !rt_view
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.mounted)
+    );
+
+    match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => {
+            flow.confirm(&nc()).unwrap();
+        }
+        DriveMountStart::Mounted => panic!("expected consent URL"),
+    }
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/a.txt": "hello"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+}
+
+#[test]
+fn keep_plan_drive_silent_exit_zero_failure_never_marks_mounted_and_force_stop_releases() {
+    use colab_playground_core::backend::DriveMountStart;
+    use colab_playground_core::keep::{KeepPlan, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("drive-fail", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("drive-fail"))
+        .unwrap()
+        .id;
+
+    // Even if `colab drivemount` exits 0 with its propagation failure message, verify ismount catches it.
+    f.knob("drive_mount_fails", json!(true));
+    let err = match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => flow.confirm(&nc()).unwrap_err(),
+        DriveMountStart::Mounted => panic!("must not report mounted on silent failure"),
+    };
+    assert!(!err.detail.is_empty(), "{err}");
+    let listed = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("drive-fail"))
+        .unwrap();
+    assert!(
+        !listed
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.mounted)
+    );
+
+    // With force_on_keep_error = true, stop still proceeds after Keep Plan failure.
+    let save_dir = f.root.join("force-stop-dir");
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/missing".into()],
+            local: Some(LocalKeepTarget {
+                folder: save_dir.to_string_lossy().into_owned(),
+            }),
+            hf: None,
+            drive: None,
+        }),
+        &nc(),
+    )
+    .unwrap();
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: true,
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn watchdog_script_runs_periodic_and_idle_winddown_hooks() {
+    use colab_playground_core::watchdog::{WATCHDOG_PY, WatchdogHook};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let wd_py = tmp.path().join("watchdog.py");
+    std::fs::write(&wd_py, WATCHDOG_PY).unwrap();
+    let cfg_path = tmp.path().join("watchdog.json");
+    let log_path = tmp.path().join("watchdog.log");
+    let marker = tmp.path().join("periodic.txt");
+    let idle_marker = tmp.path().join("idle.txt");
+
+    // Start a tiny stdlib HTTP server to accept POST /unassign when idle triggers.
+    let driver = tmp.path().join("run_wd.py");
+    std::fs::write(
+        &driver,
+        r#"import http.server, json, os, subprocess, sys, threading, time
+tmp, wd_py = sys.argv[1], sys.argv[2]
+hits = []
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        hits.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
+port = srv.server_address[1]
+cfg = {
+    "deadline_epoch": None,
+    "idle_timeout_s": 1.2,
+    "cancelled": False,
+    "runtime_addr": f"127.0.0.1:{port}",
+    "heartbeat": os.path.join(tmp, "heartbeat"),
+    "log": os.path.join(tmp, "watchdog.log"),
+    "poll_s": 0.2,
+    "grace_s": 10,
+    "started": time.time() - 2.0,
+}
+cfg_path = os.path.join(tmp, "watchdog.json")
+with open(cfg_path, "w") as fh:
+    json.dump(cfg, fh)
+hooks = json.loads(sys.stdin.read())
+p = subprocess.Popen(
+    [sys.executable, "-B", wd_py, "--config", cfg_path, "--hooks-stdin"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+out, err = p.communicate(json.dumps(hooks).encode(), timeout=30)
+srv.shutdown()
+assert p.returncode == 0, (p.returncode, out, err)
+assert "/unassign" in hits, hits
+print("OK")
+"#,
+    )
+    .unwrap();
+
+    let hooks = vec![WatchdogHook {
+        argv: vec![
+            "python3".into(),
+            "-c".into(),
+            format!(
+                "import pathlib, sys; pathlib.Path({:?}).write_text('periodic'); pathlib.Path({:?}).write_text('idle')",
+                marker.to_string_lossy(),
+                idle_marker.to_string_lossy()
+            ),
+        ],
+        env: BTreeMap::new(),
+        timeout_s: 15,
+        interval_s: Some(1),
+    }];
+    let mut child = Command::new("python3")
+        .args(["-B", driver.to_str().unwrap(), tmp.path().to_str().unwrap(), wd_py.to_str().unwrap()])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&hooks).unwrap().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && stdout.contains("OK"), "stdout={stdout}\nstderr={stderr}\ncfg={cfg_path:?}\nlog={:?}", std::fs::read_to_string(&log_path));
+    assert!(marker.exists(), "periodic hook must have executed");
+    assert!(idle_marker.exists(), "wind-down hook must have run before idle release");
+}

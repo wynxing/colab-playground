@@ -7,13 +7,21 @@ use std::time::{Duration, SystemTime};
 use colab_playground::{
     i18n::{self, Language},
     route::Route,
-    state::{EndReason, Overlay, ProvisionPhase, ProvisionProgress},
+    state::{DriveMountPhase, EndReason, Overlay, ProvisionPhase, ProvisionProgress},
     ui::{
         overlays::{
-            FORWARD_BODY, FORWARD_SUBMIT, NEW_SESSION_FORM, NEW_SESSION_LIMIT, NEW_SESSION_START,
-            RESERVED_NOTE,
+            DRIVE_MOUNT_CONFIRM, FORWARD_BODY, FORWARD_SUBMIT, KEEP_DRIVE_TOGGLE,
+            KEEP_DRIVE_WARNING, KEEP_LOCAL_TOGGLE, KEEP_SUBMIT, NEW_SESSION_FORM,
+            NEW_SESSION_LIMIT, NEW_SESSION_START, RESERVED_NOTE, STOP_FORCE_CONFIRM,
+            STOP_KEEP_TOGGLE, VM_UPLOAD_SUBMIT,
         },
-        pages::sessions::{NEW_SESSION_SELECTOR, forward_selector, stop_selector},
+        pages::{
+            plugins::RUN_KEEP_CONFIGURE,
+            sessions::{
+                NEW_SESSION_SELECTOR, drive_mount_selector, forward_selector, keep_selector,
+                keep_summary_selector, stop_selector, sync_keep_selector, upload_selector,
+            },
+        },
         progress, provision_form,
     },
 };
@@ -1400,4 +1408,219 @@ fn an_emptied_name_field_after_a_failed_attempt_starts_under_a_suggested_name(
         panic!("expected a ready runtime, got {:?}", phase(&mut app));
     };
     assert!(outcome.name.starts_with("h100-"), "{}", outcome.name);
+}
+
+#[gpui::test]
+fn keep_plan_local_sync_and_vm_upload_work_from_session_card(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let local_file = tmp.path().join("weights.bin");
+    std::fs::write(&local_file, b"demo-weights").expect("write local upload file");
+    let keep_dir = tmp.path().join("kept");
+
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+
+    app.click(&upload_selector("a100-7f3a"));
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::VmUpload(_))
+    ));
+    app.fill(
+        |inputs| inputs.upload_local.clone(),
+        &local_file.to_string_lossy(),
+    );
+    app.fill(
+        |inputs| inputs.upload_remote.clone(),
+        "/content/out/weights.bin",
+    );
+    app.click(VM_UPLOAD_SUBMIT);
+    assert!(
+        app.read(|state, _| state.overlay().is_none()),
+        "upload dialog closes on success"
+    );
+
+    app.click(&keep_selector("a100-7f3a"));
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::KeepPlan(_))
+    ));
+    app.fill(|inputs| inputs.keep_paths.clone(), "/content/out");
+    app.click(KEEP_LOCAL_TOGGLE);
+    app.fill(
+        |inputs| inputs.keep_local_folder.clone(),
+        &keep_dir.to_string_lossy(),
+    );
+    app.click(KEEP_SUBMIT);
+    assert!(
+        app.read(|state, _| state.overlay().is_none()),
+        "keep plan dialog closes on save"
+    );
+    assert!(app.shown(&keep_summary_selector("a100-7f3a")));
+    assert!(app.shown(&sync_keep_selector("a100-7f3a")));
+
+    app.click(&sync_keep_selector("a100-7f3a"));
+    let report = app.read(|state, _| {
+        state
+            .runtimes()
+            .ready()
+            .and_then(|v| {
+                v.runtimes
+                    .iter()
+                    .find(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+                    .and_then(|r| r.tracked.as_ref())
+                    .and_then(|t| t.last_keep_sync.clone())
+            })
+    });
+    let report = report.expect("last_keep_sync recorded");
+    assert!(report.all_succeeded(), "{report:?}");
+}
+
+#[gpui::test]
+fn drive_mount_is_opt_in_with_warning_and_handles_cancel_and_confirm(cx: &mut TestAppContext) {
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+
+    app.click(&keep_selector("a100-7f3a"));
+    assert!(
+        !app.shown(KEEP_DRIVE_WARNING),
+        "Drive is off by default until opted in"
+    );
+    app.fill(|inputs| inputs.keep_paths.clone(), "/content/out");
+    app.click(KEEP_DRIVE_TOGGLE);
+    assert!(
+        app.shown(KEEP_DRIVE_WARNING),
+        "opting into Drive shows explicit exposure warning"
+    );
+    app.click(KEEP_SUBMIT);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    assert!(app.shown(&drive_mount_selector("a100-7f3a")));
+
+    app.click(&drive_mount_selector("a100-7f3a"));
+    let Some(Overlay::DriveMount(dialog)) = app.read(|state, _| state.overlay().cloned()) else {
+        panic!("expected Drive mount dialog");
+    };
+    let DriveMountPhase::Consent { url } = dialog.phase else {
+        panic!("expected consent URL phase, got {:?}", dialog.phase);
+    };
+    assert_eq!(app.opened_url().as_deref(), Some(url.as_str()));
+    assert!(app.shown(KEEP_DRIVE_WARNING));
+    assert!(app.shown(DRIVE_MOUNT_CONFIRM));
+
+    app.click("overlay-cancel");
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    let mounted_after_cancel = app.read(|state, _| {
+        state
+            .runtimes()
+            .ready()
+            .and_then(|v| {
+                v.runtimes
+                    .iter()
+                    .find(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+                    .and_then(|r| r.tracked.as_ref())
+                    .and_then(|t| t.keep_plan.as_ref())
+                    .and_then(|p| p.drive.as_ref())
+                    .map(|d| d.mounted)
+            })
+            .unwrap_or(false)
+    });
+    assert!(!mounted_after_cancel, "cancelling consent must not mount Drive");
+
+    app.click(&drive_mount_selector("a100-7f3a"));
+    app.click(DRIVE_MOUNT_CONFIRM);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    let mounted_after_confirm = app.read(|state, _| {
+        state
+            .runtimes()
+            .ready()
+            .and_then(|v| {
+                v.runtimes
+                    .iter()
+                    .find(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+                    .and_then(|r| r.tracked.as_ref())
+                    .and_then(|t| t.keep_plan.as_ref())
+                    .and_then(|p| p.drive.as_ref())
+                    .map(|d| d.mounted)
+            })
+            .unwrap_or(false)
+    });
+    assert!(mounted_after_confirm, "confirming consent mounts Drive");
+    assert!(!app.shown(&drive_mount_selector("a100-7f3a")));
+}
+
+#[gpui::test]
+fn pre_stop_keep_plan_failure_aborts_stop_until_user_forces_stop(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keep_dir = tmp.path().join("kept");
+
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+
+    app.click(&keep_selector("a100-7f3a"));
+    app.fill(|inputs| inputs.keep_paths.clone(), "/content/out");
+    app.click(KEEP_LOCAL_TOGGLE);
+    app.fill(
+        |inputs| inputs.keep_local_folder.clone(),
+        &keep_dir.to_string_lossy(),
+    );
+    app.click(KEEP_SUBMIT);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+
+    app.set_failures(MockFailures {
+        keep_sync_fails: true,
+        ..MockFailures::default()
+    });
+
+    app.click(&stop_selector("a100-7f3a"));
+    let Some(Overlay::Stop(prompt)) = app.read(|state, _| state.overlay().cloned()) else {
+        panic!("expected stop confirmation dialog");
+    };
+    assert!(prompt.has_keep_plan && prompt.save_keep);
+    assert!(app.shown(STOP_KEEP_TOGGLE));
+
+    app.click(STOP_CONFIRM);
+    let Some(Overlay::Stop(prompt)) = app.read(|state, _| state.overlay().cloned()) else {
+        panic!("stop dialog must remain open on Keep Plan failure");
+    };
+    assert!(prompt.keep_failed && prompt.error.is_some());
+    assert!(
+        runtime_names(&mut app).contains(&"a100-7f3a".to_owned()),
+        "runtime must stay running when Keep Plan fails before stop"
+    );
+    assert!(app.shown(STOP_FORCE_CONFIRM));
+
+    app.click(STOP_FORCE_CONFIRM);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    assert!(
+        !runtime_names(&mut app).contains(&"a100-7f3a".to_owned()),
+        "forcing stop releases the runtime without saving"
+    );
+}
+
+#[gpui::test]
+fn plugin_run_form_configures_keep_plan_from_manifest_paths(cx: &mut TestAppContext) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let keep_dir = tmp.path().join("plugin-kept");
+
+    let mut app = TestApp::with(cx, Options::scenario(MockScenario::single()));
+    app.click(Route::Plugins.nav_selector());
+    app.click("plugin-run comfyui");
+    app.click(RUN_KEEP_CONFIGURE);
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::KeepPlan(_))
+    ));
+    let paths = app.read_root(|root, cx| root.inputs().keep_paths.read(cx).text().to_owned());
+    assert_eq!(paths, "/content/ComfyUI/output");
+
+    app.click(KEEP_LOCAL_TOGGLE);
+    app.fill(
+        |inputs| inputs.keep_local_folder.clone(),
+        &keep_dir.to_string_lossy(),
+    );
+    app.click(KEEP_SUBMIT);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    let attached = app.read(|state, _| state.run_form().and_then(|f| f.keep_plan.clone()));
+    let plan = attached.expect("Keep Plan attached to run form");
+    assert_eq!(plan.paths, vec!["/content/ComfyUI/output".to_owned()]);
+    assert!(plan.local.is_some());
 }
