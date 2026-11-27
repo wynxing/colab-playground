@@ -253,6 +253,53 @@ fn wait_for<T>(rx: &Receiver<T>, secs: u64, mut pred: impl FnMut(&T) -> bool) ->
 }
 
 #[test]
+fn fake_cli_url_returns_existing_session_url() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("url-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "url".into(), "-s".into(), "url-test".into(),
+    ]);
+    req.env = f.cfg.base_env.clone();
+    req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+    let out = Host::Local.run_quiet(req, &nc()).unwrap();
+    assert!(out.success(), "fake CLI failed: {}", out.stderr);
+    assert!(out.stdout.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="));
+    assert_eq!(f.assignments("alice").len(), 1);
+}
+
+#[test]
+fn fake_cli_restart_kernel_and_ssh_force_work_for_existing_session() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("ops-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let run_cli = |args: Vec<String>| {
+        let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(args);
+        req.env = f.cfg.base_env.clone();
+        req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+        Host::Local.run_quiet(req, &nc()).unwrap()
+    };
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "restart-kernel".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "restart-kernel failed: {}", out.stderr);
+
+    f.knob("ssh_busy", json!(true));
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "ssh".into(), "--force".into(), "--proxy-mode".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "ssh --force failed: {}", out.stderr);
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+}
+
+#[test]
 fn cli_version_and_missing_toolchain() {
     let f = fixture();
     let tc = f.cfg.toolchain.clone().unwrap();
@@ -1951,4 +1998,93 @@ fn probe_blames_the_configured_path_when_nothing_runs_there() {
     // `NotInstalled` would make the checklist offer an install that cannot help.
     let error = backend.probe(&nc()).unwrap_err();
     assert!(error.is(ErrorKind::InvalidInput), "{error}");
+}
+
+#[test]
+fn real_backend_session_controls_work_and_leave_user_ssh_config_untouched() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    let outcome = f.provision("ctrl-test", Accelerator::None);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("ctrl-test"))
+        .unwrap();
+    assert_eq!(rt.id.name.as_deref(), Some(outcome.name.as_str()));
+
+    let url = f.b.open_in_browser(&rt.id, &nc()).unwrap();
+    assert!(
+        url.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="),
+        "{url}"
+    );
+    assert!(url.contains(&rt.id.endpoint), "{url}");
+
+    f.b.restart_kernel(&rt.id, &nc()).unwrap();
+    assert_eq!(
+        f.assignments("alice")[&rt.id.endpoint]["restarted_kernels"],
+        json!(1)
+    );
+    f.knob("restart_kernel_fails", json!(true));
+    assert!(
+        f.b.restart_kernel(&rt.id, &nc())
+            .unwrap_err()
+            .is(ErrorKind::ConnectionLost)
+    );
+    f.knob("restart_kernel_fails", json!(false));
+
+    // Reset SSH via `colab ssh --force --proxy-mode`, then also verify 0.8.0 fallback.
+    f.knob("ssh_busy", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_force", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_force", json!(false));
+
+    // Post-0.8.0 `--force` kills stale sshd children even if no ~/.ssh/*.pub key exists yet.
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_pubkey", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_pubkey", json!(false));
+
+    // Cost trap guard: resetting a missing session must never auto-create a VM.
+    let missing = RuntimeRef {
+        account: alice.id.clone(),
+        endpoint: String::new(),
+        name: Some("missing-session".into()),
+    };
+    assert!(
+        f.b.reset_ssh_sessions(&missing, &nc())
+            .unwrap_err()
+            .is(ErrorKind::SessionGone)
+    );
+    assert_eq!(f.assignments("alice").len(), 1);
+
+    // Remote-SSH snippet and explicit temp config must never create or edit ~/.ssh/config.
+    let user_ssh_config = f.root.join("home/.ssh/config");
+    assert!(!user_ssh_config.exists());
+    let ssh = f.b.remote_ssh(&rt.id, &nc()).unwrap();
+    assert_eq!(ssh.host_alias, "colab-ctrl-test");
+    assert!(ssh.state_file.contains(alice.id.as_str()));
+    assert!(ssh.command.contains("ProxyCommand="));
+    assert!(ssh.config_snippet.contains("--config"));
+    assert!(!user_ssh_config.exists());
+
+    let temp_conf = f.b.write_temp_ssh_config(&rt.id, &nc()).unwrap();
+    assert!(temp_conf.starts_with(&f.cfg.local_dir));
+    assert!(
+        temp_conf
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-", alice.id.as_str()))
+    );
+    assert!(std::fs::read_to_string(&temp_conf).unwrap().contains("Host colab-ctrl-test"));
+    assert!(!user_ssh_config.exists());
 }
