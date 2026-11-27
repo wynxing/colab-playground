@@ -301,6 +301,22 @@ def cmd_exec(state_path, args):
         else:
             i += 1
     s, ep, a = lookup(state_path, name, session)
+    cli_fail = s["knobs"].get("exec_failure")
+    if cli_fail == "session_lost":
+        out("[colab] Session '%s' appears to be lost (404/401). Cleaning up." % session)
+        return 1
+    if cli_fail == "connection_lost":
+        err("RuntimeError: Connection was lost.")
+        return 1
+    if cli_fail == "kernel_dead":
+        err("RuntimeError: Kernel dead before the code finished.")
+        return 1
+    if cli_fail == "timeout":
+        if fc.knob("new_cli"):
+            err("TimeoutError: Timeout waiting for output: no message from the kernel for 30s. Use --timeout to allow longer silences.")
+        else:
+            err("TimeoutError: Timeout waiting for reply: no message")
+        return 1
     code = sys.stdin.read()
     if not code.strip():
         return 0
@@ -308,12 +324,28 @@ def cmd_exec(state_path, args):
         compile(code, "<cell>", "exec")
     except SyntaxError as exc:
         err("Traceback (most recent call last):\nSyntaxError: %s" % exc)
-        return 0
+        return 1 if fc.knob("new_cli") else 0
     result = simulate(code, env, s, ep, a)
     fc.save_server(s)
     if result is not None:
         out(MARK + json.dumps(result))
     record_history(session, env, code, result)
+    if result is None:
+        raise_m = re.search(r"(?m)^\s*raise\s+([A-Za-z_]\w*)\((.*)\)", code)
+        if raise_m:
+            err("Traceback (most recent call last):\n%s: %s" % (raise_m.group(1), raise_m.group(2).strip("'\"")))
+            return 1 if fc.knob("new_cli") else 0
+        exit_m = re.search(r"(?m)^\s*sys\.exit\((.*)\)", code)
+        if exit_m:
+            arg = exit_m.group(1).strip()
+            if arg in ("", "None", "0"):
+                return 0
+            try:
+                exit_code = int(arg)
+            except ValueError:
+                err(arg.strip("'\""))
+                exit_code = 1
+            return exit_code if fc.knob("new_cli") else 0
     return 0
 
 
@@ -341,7 +373,7 @@ def cmd_stop(state_path, args):
     rec = records.get(session)
     if rec is None:
         out("[colab] Session '%s' not found." % session)
-        return 0
+        return 1 if fc.knob("new_cli") else 0
     out("[colab] Stopping session '%s'..." % session)
     s = fc.server()
     mine = fc.account_state(s, name)["assignments"]
@@ -351,7 +383,7 @@ def cmd_stop(state_path, args):
         del records[session]
         save_state(state_path, records)
         out("[colab] Session '%s' not found." % session)
-        return 0
+        return 1 if fc.knob("new_cli") else 0
     del mine[rec["endpoint"]]
     fc.save_server(s)
     del records[session]
@@ -391,7 +423,21 @@ def cmd_ssh(state_path, args):
         records[session] = {"name": session, "token": "t", "url": "u", "endpoint": ep}
         save_state(state_path, records)
     if s["knobs"]["ssh_busy"]:
-        err("[colab] Already-active SSH session (HTTP 429): another `colab ssh` is connected to this runtime. Disconnect it and retry.")
+        limit = s["knobs"].get("ssh_busy_limit")
+        if limit is not None:
+            err(
+                "[colab] SSH session limit reached (HTTP 429): %d of %d SSH sessions in use on this runtime. "
+                "Close another `colab ssh` or IDE connection to it and retry. "
+                "If the previous client died, retry with `--force`. The limit depends on your Colab plan."
+                % (limit, limit)
+            )
+        elif fc.knob("new_cli"):
+            err(
+                "[colab] Already-active SSH session (HTTP 429): another `colab ssh` is connected to this runtime. "
+                "Disconnect it and retry. If the previous client died, retry with `--force`."
+            )
+        else:
+            err("[colab] Already-active SSH session (HTTP 429): another `colab ssh` is connected to this runtime. Disconnect it and retry.")
         return 1
     # Bridge: stay connected until ssh closes our stdin.
     while sys.stdin.buffer.read(1024):

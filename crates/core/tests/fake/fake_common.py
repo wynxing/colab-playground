@@ -45,6 +45,9 @@ DEFAULT_KNOBS = {
     "plugin_log_backlog": 0,        # lines a plugin run writes on top of the one read by each poll
     "plugin_log_skipped": 0,        # bytes the first poll of a plugin run reports as left out
     "ssh_busy": False,              # proxy-mode answers HTTP 429
+    "ssh_busy_limit": None,         # optional session limit N in post-0.8.0 HTTP 429
+    "new_cli": False,               # simulate post-0.8.0 exit codes and messages
+    "exec_failure": None,           # optional CLI-level exec failure kind
     "watchdog_start_fails": False,  # a started watchdog exits at once
     "keyring_locked": False,        # keyring reads fail
     "cli_api_broken": False,        # colab_cli.client cannot be imported

@@ -1,9 +1,10 @@
 //! Typed wrapper over the `colab` CLI.
 //!
 //! Failures are classified by [`classify_failure`] from the CLI's own messages
-//! (see `google-colab-cli` sources), because exit codes are unreliable:
-//! `colab stop` of a missing session exits 0, and `colab exec` exits 0 even
-//! when the remote code raised.
+//! (see `google-colab-cli` sources), because exit codes vary across versions:
+//! in `0.8.0`, `colab stop` of a missing session and `colab exec` after a
+//! remote Python exception exit `0`, whereas post-`0.8.0` exits `1` (or
+//! propagates `SystemExit` codes).
 
 use std::time::Duration;
 
@@ -263,6 +264,31 @@ pub fn find_result(stdout: &str) -> Option<serde_json::Value> {
         .and_then(|j| serde_json::from_str(j.trim()).ok())
 }
 
+/// Parses `"N of M [SSH] sessions in use"` from a post-0.8.0 `colab ssh` HTTP 429 message.
+pub(crate) fn parse_ssh_session_limit(text: &str) -> Option<u32> {
+    let (before, _) = text.split_once(" sessions in use")?;
+    let before = before.strip_suffix(" SSH").unwrap_or(before);
+    let mut rev = before.split_whitespace().rev();
+    let limit = rev.next()?.parse::<u32>().ok()?;
+    let of = rev.next()?;
+    let used = rev.next()?.parse::<u32>().ok()?;
+    (of == "of" && used > 0 && limit > 0).then_some(limit)
+}
+
+fn is_local_cli_exec_failure(out: &ScriptOutput) -> bool {
+    if out.code.is_none() {
+        return true;
+    }
+    let all = format!("{}\n{}", out.stdout, out.stderr);
+    all.contains("Usage: ")
+        || all.contains("[colab] Invalid --env")
+        || all.contains("[colab] Error: No input provided")
+        || all.contains("No such command")
+        || all.contains("No such option")
+        || all.contains("colab_cli")
+        || all.contains("ColabRequestError")
+}
+
 pub fn classify_failure(out: &ScriptOutput) -> Error {
     let all = format!("{}\n{}", out.stdout, out.stderr);
     let has = |s: &str| all.contains(s);
@@ -285,10 +311,17 @@ pub fn classify_failure(out: &ScriptOutput) -> Error {
         ErrorKind::SshBusy
     } else if has("appears to be lost") || (has("ession '") && has("' not found")) {
         ErrorKind::SessionGone
-    } else if has("Connection was lost") {
+    } else if has("Connection was lost")
+        || has("Kernel dead before")
+        || has("Kernel restarting before")
+    {
         ErrorKind::ConnectionLost
     } else if has("Timeout waiting for") {
         ErrorKind::ExecTimeout
+    } else if (has("Download failed:") || has("Upload failed:"))
+        && (has("ReadTimeout") || has("ConnectTimeout") || has("timed out"))
+    {
+        ErrorKind::Timeout
     } else {
         ErrorKind::Other
     };
@@ -298,6 +331,11 @@ pub fn classify_failure(out: &ScriptOutput) -> Error {
         &out.stderr
     };
     let mut e = Error::new(kind).detail(tail(detail, 800));
+    if kind == ErrorKind::SshBusy
+        && let Some(limit) = parse_ssh_session_limit(&all)
+    {
+        e = e.with("limit", limit);
+    }
     if let Some(code) = out.code {
         e = e.with("exit_code", code);
     }
@@ -321,7 +359,7 @@ fn allocation_read_timed_out(stderr: &str) -> bool {
 pub enum StopOutcome {
     /// "Session terminated."
     Terminated,
-    /// The CLI had no local record (it prints "not found" and exits 0).
+    /// The CLI had no local record (it prints "not found" and exits 0 in 0.8.0 or 1 in newer versions).
     NotFound,
 }
 
@@ -496,11 +534,15 @@ impl Cli {
         let stdin = StdinMode::Bytes(format!("{EXEC_PREAMBLE}{code}").into_bytes());
         let overall = Duration::from_secs(u64::from(timeout_secs.max(30)) * 4 + 120);
         let out = self.run(Some(state), &cmd, stdin, Some(overall), cancel, &mut |_| {})?;
-        // CLI-level failures (lost session, dropped connection, idle timeout)
-        // exit non-zero; exceptions raised by `code` itself exit 0, so their
-        // tracebacks are never misread as CLI failures.
+        // CLI-level failures (lost session, dropped connection, idle timeout,
+        // local usage/CLI errors) fail here; exceptions or `SystemExit` raised
+        // by remote `code` exit 0 in 0.8.0 and non-zero in newer CLIs, and are
+        // returned as `ExecOutput` without a `result`.
         if !out.success() {
-            return Err(classify_failure(&out));
+            let err = classify_failure(&out);
+            if err.kind != ErrorKind::Other || is_local_cli_exec_failure(&out) {
+                return Err(err);
+            }
         }
         Ok(ExecOutput {
             result: find_result(&out.stdout),
@@ -537,10 +579,13 @@ impl Cli {
         )?;
         if out.success() && out.stdout.contains("Session terminated") {
             Ok(StopOutcome::Terminated)
-        } else if out.success() && out.stdout.contains("not found") {
-            Ok(StopOutcome::NotFound)
         } else {
-            Err(classify_failure(&out))
+            let err = classify_failure(&out);
+            if err.kind == ErrorKind::SessionGone && matches!(out.code, Some(0 | 1)) {
+                Ok(StopOutcome::NotFound)
+            } else {
+                Err(err)
+            }
         }
     }
 
@@ -845,7 +890,41 @@ A new version of colab-cli is available
             ErrorKind::SessionGone
         );
         assert_eq!(
+            k(out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            )),
+            ErrorKind::SshBusy
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            ))
+            .param("limit"),
+            Some("5")
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] Already-active SSH session (HTTP 429): retry 1 of 2"
+            ))
+            .param("limit"),
+            None
+        );
+        assert_eq!(
             k(out(1, "", "RuntimeError: Connection was lost.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel dead before the code finished.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel restarting before the code finished.")),
             ErrorKind::ConnectionLost
         );
         assert_eq!(
@@ -855,6 +934,22 @@ A new version of colab-cli is available
                 "TimeoutError: Timeout waiting for reply: no message"
             )),
             ErrorKind::ExecTimeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "",
+                "TimeoutError: Timeout waiting for output: no message from the kernel for 30s. Use --timeout to allow longer silences."
+            )),
+            ErrorKind::ExecTimeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Download failed: HTTPSConnectionPool(host='x', port=443): Read timed out. (read timeout=300)",
+                ""
+            )),
+            ErrorKind::Timeout
         );
         assert_eq!(
             k(out(
