@@ -293,6 +293,55 @@ fn accounts_switch_schema() -> Value {
     })
 }
 
+fn account_use_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": string_property(
+                "The account's address, as accounts_list reports it in email. Not a token."
+            )
+        },
+        "required": ["name"],
+        "additionalProperties": false
+    })
+}
+
+fn job_run_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "plugin": string_property(
+                "The plugin id, as plugin_list answers it. The plugin's run mode must be job."
+            ),
+            "session": string_property(
+                "The runtime to run it on. The run form's own choice is used when this is absent, \
+                 which opens a runtime."
+            ),
+            "inputs": {
+                "type": "object",
+                "description": "The plugin's own inputs, by the names its manifest gives them. A \
+                                secret is not an argument: the app keeps those and refuses a call \
+                                that sends one."
+            }
+        },
+        "required": ["plugin"],
+        "additionalProperties": false
+    })
+}
+
+fn downstream_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "plugin": string_property(
+                "The plugin id, as plugin_list answers it. Every forwarded service is included \
+                 when this is absent."
+            )
+        },
+        "additionalProperties": false
+    })
+}
+
 fn plugin_enable_schema() -> Value {
     json!({
         "type": "object",
@@ -451,9 +500,30 @@ pub fn all() -> &'static [Tool] {
         Tool {
             name: "accounts_list",
             description: "The Google accounts signed in on this machine and which one is active. \
-                          Read-only; accounts_switch is what changes it.",
+                          Read-only: each entry is the address and the active flag, never a token. \
+                          account_use is what selects one.",
             input: empty_schema,
             kind: Kind::Read(accounts_list),
+            read_only: true,
+        },
+        Tool {
+            name: "job_status",
+            description: "One job the app is running or has just finished: its plugin, session, \
+                          stage and state. Read-only. A plugin that is not a job is not here.",
+            input: plugin_schema,
+            kind: Kind::Read(job_status),
+            read_only: true,
+        },
+        Tool {
+            name: "downstream_config",
+            description: "A read-only connection note for a service this app has forwarded onto \
+                          this computer, such as a llama.cpp API at http://127.0.0.1:<port>/v1. \
+                          It names that local address, the model id when the run published one, \
+                          and whether the health check passed. It contains no token, proxy address \
+                          or API key. An empty list means nothing is forwarded yet. Connect only \
+                          when healthy is true.",
+            input: downstream_schema,
+            kind: Kind::Read(downstream_config),
             read_only: true,
         },
         Tool {
@@ -563,6 +633,39 @@ pub fn all() -> &'static [Tool] {
             description: "Closes a port forward that is open. Answers when it is gone.",
             input: forward_close_schema,
             kind: Kind::Write(forward_close),
+            read_only: false,
+        },
+        Tool {
+            name: "account_use",
+            description: "Selects a signed-in account by the address accounts_list reports, and \
+                          makes it the active one for what runs next. The account's token stays \
+                          in the app: this tool neither takes it nor returns it. Selecting an \
+                          account does not itself start billing.",
+            input: account_use_schema,
+            kind: Kind::Write(account_use),
+            read_only: false,
+        },
+        Tool {
+            name: "job_run",
+            description: "Starts a plugin whose run mode is job, on the app's existing job \
+                          lifecycle (it persists what the plugin keeps, then stops a runtime this \
+                          run opened). While asking is switched on, the app asks the user in its \
+                          own window first — even when the session is already open, because \
+                          starting a job bills — and holds this call open until they answer; \
+                          being refused is final, so do not call again. Do not send a token or a \
+                          secret: the app keeps those, and a call that includes one is refused. \
+                          Answers when the job has reached a stage, not when it finishes.",
+            input: job_run_schema,
+            kind: Kind::Write(job_run),
+            read_only: false,
+        },
+        Tool {
+            name: "job_cancel",
+            description: "Stops a job the app is running. The app does this at once and does not \
+                          ask: cancelling does not open a new charge. A plugin that is not a job, \
+                          or a job that is not running, is refused.",
+            input: plugin_schema,
+            kind: Kind::Write(job_cancel),
             read_only: false,
         },
     ]
@@ -697,7 +800,61 @@ fn settings_get(snapshot: &Snapshot, args: &Args) -> Result<Value> {
 
 fn accounts_list(snapshot: &Snapshot, args: &Args) -> Result<Value> {
     args.only(&[])?;
-    Ok(json!({ "accounts": snapshot.accounts }))
+    let accounts: Vec<Value> = snapshot
+        .accounts
+        .iter()
+        .map(|account| json!({ "email": account.email, "active": account.active }))
+        .collect();
+    let value = json!({ "accounts": accounts });
+    super::view::ensure_public(&value)?;
+    Ok(value)
+}
+
+fn job_status(snapshot: &Snapshot, args: &Args) -> Result<Value> {
+    args.only(&["plugin"])?;
+    let plugin = args.string("plugin")?;
+    let job = snapshot
+        .jobs
+        .iter()
+        .find(|job| job.plugin == plugin)
+        .ok_or_else(|| Error::invalid("plugin", format!("no job of {plugin}")))?;
+    let value = json!({
+        "plugin": job.plugin,
+        "session": job.session,
+        "state": job.state,
+        "stage": job.stage,
+    });
+    super::view::ensure_public(&value)?;
+    Ok(value)
+}
+
+fn downstream_config(snapshot: &Snapshot, args: &Args) -> Result<Value> {
+    args.only(&["plugin"])?;
+    let plugin = args.maybe_string("plugin")?;
+    let tools: Vec<Value> = snapshot
+        .downstream
+        .iter()
+        .filter(|item| plugin.is_none_or(|name| item.plugin == name))
+        .filter(|item| super::view::loopback_http(&item.base_url))
+        .map(|item| {
+            let model = if super::view::model_id_is_public(&item.model) {
+                item.model.as_str()
+            } else {
+                ""
+            };
+            json!({
+                "plugin": item.plugin,
+                "endpoint": item.endpoint,
+                "kind": item.kind,
+                "base_url": item.base_url,
+                "model": model,
+                "healthy": item.healthy,
+            })
+        })
+        .collect();
+    let value = json!({ "tools": tools });
+    super::view::ensure_public(&value)?;
+    Ok(value)
 }
 
 fn forwards_list(snapshot: &Snapshot, args: &Args) -> Result<Value> {
@@ -773,6 +930,47 @@ fn accounts_switch(args: &Args) -> Result<Action> {
     })
 }
 
+/// An account address, not a credential. One `@`, a dotted host, no scheme and no spaces.
+fn account_name(value: &str) -> Result<&str> {
+    if value.contains("://")
+        || value.contains(char::is_whitespace)
+        || value.contains('/')
+        || value.matches('@').count() != 1
+    {
+        return Err(Error::invalid("name", "not an account address"));
+    }
+    let (local, host) = value
+        .split_once('@')
+        .ok_or_else(|| Error::invalid("name", "not an account address"))?;
+    if local.is_empty() || !host.contains('.') || host.starts_with('.') || host.ends_with('.') {
+        return Err(Error::invalid("name", "not an account address"));
+    }
+    Ok(value)
+}
+
+fn account_use(args: &Args) -> Result<Action> {
+    args.only(&["name"])?;
+    Ok(Action::AccountUse {
+        name: account_name(args.string("name")?)?.to_owned(),
+    })
+}
+
+fn job_run(args: &Args) -> Result<Action> {
+    args.only(&["plugin", "session", "inputs"])?;
+    Ok(Action::JobRun {
+        plugin: args.string("plugin")?.to_owned(),
+        session: args.maybe_string("session")?.map(str::to_owned),
+        inputs: args.maybe_object("inputs")?,
+    })
+}
+
+fn job_cancel(args: &Args) -> Result<Action> {
+    args.only(&["plugin"])?;
+    Ok(Action::JobCancel {
+        plugin: args.string("plugin")?.to_owned(),
+    })
+}
+
 fn plugin_enable(args: &Args) -> Result<Action> {
     args.only(&["plugin", "enabled"])?;
     Ok(Action::PluginEnable {
@@ -812,7 +1010,7 @@ mod tests {
     use super::*;
     use crate::{
         error::{Denial, ErrorKind},
-        mcp::view::{Output, Plugin, Run, Session, Workflow},
+        mcp::view::{Account, Downstream, Job, Output, Plugin, Run, Session, Workflow},
     };
 
     /// An executor that records what it was asked, and answers the way the app would.
@@ -877,6 +1075,12 @@ mod tests {
                 enabled: true,
                 bundled: true,
             }],
+            jobs: vec![Job {
+                plugin: "batch".to_owned(),
+                session: "run-1".to_owned(),
+                state: "running".to_owned(),
+                stage: "train".to_owned(),
+            }],
             ..Snapshot::default()
         }
     }
@@ -894,6 +1098,11 @@ mod tests {
                 json!({ "plugin": "comfyui", "session": "run-1", "inputs": { "quant": "auto" } })
             }
             "accounts_switch" => json!({ "account": "a@b.c" }),
+            "account_use" => json!({ "name": "a@b.c" }),
+            "job_run" => {
+                json!({ "plugin": "batch", "session": "run-1", "inputs": { "path": "job.ipynb" } })
+            }
+            "job_cancel" | "job_status" => json!({ "plugin": "batch" }),
             "settings_set" => json!({ "changes": { "language": "en-US" } }),
             "session_start" => {
                 json!({ "name": "run-2", "hardware": "T4", "auto_stop_minutes": 30 })
@@ -943,6 +1152,17 @@ mod tests {
             "accounts_switch" => Action::AccountsSwitch {
                 account: "a@b.c".to_owned(),
             },
+            "account_use" => Action::AccountUse {
+                name: "a@b.c".to_owned(),
+            },
+            "job_run" => Action::JobRun {
+                plugin: "batch".to_owned(),
+                session: Some("run-1".to_owned()),
+                inputs: Map::from_iter([("path".to_owned(), json!("job.ipynb"))]),
+            },
+            "job_cancel" => Action::JobCancel {
+                plugin: "batch".to_owned(),
+            },
             "plugin_enable" => Action::PluginEnable {
                 plugin: "comfyui".to_owned(),
                 enabled: false,
@@ -974,10 +1194,13 @@ mod tests {
             .iter()
             .filter(|tool| matches!(tool.kind, Kind::Read(_)))
             .count();
-        assert_eq!(reads, 9, "the read tools of slice 1");
+        assert_eq!(
+            reads, 11,
+            "slice 1's nine reads, plus job_status and downstream_config"
+        );
         assert_eq!(
             count - reads,
-            13,
+            16,
             "the tools that ask the app to do something"
         );
         for tool in all() {
@@ -997,7 +1220,7 @@ mod tests {
     #[test]
     fn tools_list_reports_what_the_table_holds() {
         let listed = descriptors();
-        assert_eq!(listed["tools"].as_array().expect("tools").len(), 22);
+        assert_eq!(listed["tools"].as_array().expect("tools").len(), 27);
         let names: Vec<&str> = listed["tools"]
             .as_array()
             .expect("tools")
@@ -1184,14 +1407,17 @@ mod tests {
                 .description
                 .to_owned()
         };
-        for name in ["session_start", "session_extend", "plugin_run"] {
+        for name in ["session_start", "session_extend", "plugin_run", "job_run"] {
             assert!(
                 text(name).contains("asks the user in its own window"),
                 "{name} must say the user is asked"
             );
         }
         for tool in all() {
-            if matches!(tool.name, "session_start" | "session_extend" | "plugin_run") {
+            if matches!(
+                tool.name,
+                "session_start" | "session_extend" | "plugin_run" | "job_run"
+            ) {
                 continue;
             }
             assert!(
@@ -1215,6 +1441,12 @@ mod tests {
             !expected("plugin_run").needs_approval(),
             "the sample plugin_run names a session, so it does not ask"
         );
+        assert!(
+            expected("job_run").needs_approval(),
+            "the sample job_run names a session and still asks, because a job bills"
+        );
+        assert!(!expected("job_cancel").needs_approval());
+        assert!(!expected("account_use").needs_approval());
     }
 
     #[test]
@@ -1245,6 +1477,16 @@ mod tests {
                 json!({ "plugin": "comfyui", "enabled": "yes" }),
             ),
             ("session_start", json!({ "auto_stop_minutes": "30" })),
+            ("account_use", json!({})),
+            ("account_use", json!({ "name": "" })),
+            ("account_use", json!({ "name": "ya29.secret-token" })),
+            (
+                "account_use",
+                json!({ "name": "http://token@127.0.0.1/v1" }),
+            ),
+            ("job_run", json!({})),
+            ("job_cancel", json!({})),
+            ("job_run", json!({ "plugin": "batch", "inputs": [] })),
         ] {
             let error = call(&snapshot, &probe, name, Some(&bad), "a client")
                 .expect_err("refused before anything was asked");
@@ -1327,6 +1569,109 @@ mod tests {
         )
         .expect("answers");
         assert!(quiet.get("notes").is_none());
+    }
+
+    #[test]
+    fn the_control_plane_answers_without_credentials() {
+        let snapshot = Snapshot {
+            accounts: vec![
+                Account {
+                    email: "a@b.c".to_owned(),
+                    active: true,
+                },
+                Account {
+                    email: "c@d.e".to_owned(),
+                    active: false,
+                },
+            ],
+            jobs: vec![Job {
+                plugin: "batch".to_owned(),
+                session: "run-1".to_owned(),
+                state: "running".to_owned(),
+                stage: "train".to_owned(),
+            }],
+            downstream: vec![
+                Downstream {
+                    plugin: "llama-cpp".to_owned(),
+                    endpoint: "api".to_owned(),
+                    kind: "openai".to_owned(),
+                    base_url: "http://127.0.0.1:8000/v1".to_owned(),
+                    model: "org/Qwen3-0.6B".to_owned(),
+                    healthy: true,
+                },
+                Downstream {
+                    plugin: "llama-cpp".to_owned(),
+                    endpoint: "leaky".to_owned(),
+                    kind: "openai".to_owned(),
+                    base_url: "http://127.0.0.1:8000/v1?colab-runtime-proxy-token=secret"
+                        .to_owned(),
+                    model: "refresh_token=abc".to_owned(),
+                    healthy: true,
+                },
+                Downstream {
+                    plugin: "other".to_owned(),
+                    endpoint: "api".to_owned(),
+                    kind: "http".to_owned(),
+                    base_url: "http://example.invalid:8000/v1".to_owned(),
+                    model: "m".to_owned(),
+                    healthy: false,
+                },
+            ],
+            ..Snapshot::default()
+        };
+        let probe = Probe::default();
+        let accounts =
+            call(&snapshot, &probe, "accounts_list", None, "a client").expect("accounts");
+        assert_eq!(accounts["accounts"][0]["email"], "a@b.c");
+        assert_eq!(accounts["accounts"][0]["active"], true);
+        assert!(accounts["accounts"][0].get("token").is_none());
+        let job = call(
+            &snapshot,
+            &probe,
+            "job_status",
+            Some(&json!({ "plugin": "batch" })),
+            "a client",
+        )
+        .expect("job");
+        assert_eq!(job["state"], "running");
+        assert_eq!(job["stage"], "train");
+        let missing = call(
+            &snapshot,
+            &probe,
+            "job_status",
+            Some(&json!({ "plugin": "llama-cpp" })),
+            "a client",
+        )
+        .expect_err("a service is not a job");
+        assert_eq!(missing.kind, ErrorKind::InvalidInput);
+        let config =
+            call(&snapshot, &probe, "downstream_config", None, "a client").expect("config");
+        let tools = config["tools"].as_array().expect("tools");
+        assert_eq!(
+            tools.len(),
+            1,
+            "a public host and a tokenised URL are dropped: {config}"
+        );
+        assert_eq!(tools[0]["base_url"], "http://127.0.0.1:8000/v1");
+        assert_eq!(tools[0]["model"], "org/Qwen3-0.6B");
+        assert_eq!(tools[0]["healthy"], true);
+        assert!(!config.to_string().contains("proxy"), "{config}");
+        assert!(!config.to_string().contains("token"), "{config}");
+        let blanked = Snapshot {
+            downstream: vec![Downstream {
+                plugin: "llama-cpp".to_owned(),
+                endpoint: "api".to_owned(),
+                kind: "openai".to_owned(),
+                base_url: "http://127.0.0.1:8000/v1".to_owned(),
+                model: "refresh_token=abc".to_owned(),
+                healthy: false,
+            }],
+            ..Snapshot::default()
+        };
+        let hidden = call(&blanked, &probe, "downstream_config", None, "a client").expect("kept");
+        assert_eq!(hidden["tools"][0]["model"], "");
+        assert_eq!(hidden["tools"][0]["base_url"], "http://127.0.0.1:8000/v1");
+        assert!(probe.asked().is_empty(), "these reads never reach the app");
     }
 
     #[test]

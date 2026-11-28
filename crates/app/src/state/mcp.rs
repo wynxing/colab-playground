@@ -21,11 +21,12 @@ use colab_playground_core::{
         Config, Endpoint,
         actions::Action,
         view::{
-            Account, AppSettings, Forward, Node, Output, Plugin, Run, Session, Snapshot, Source,
-            Usage, Workflow,
+            Account, AppSettings, Downstream, Forward, Job, Node, Output, Plugin, Run, Session,
+            Snapshot, Source, Usage, Workflow, loopback_http, model_id_is_public,
         },
     },
-    plugins::PluginSource,
+    plugins::{PluginSource, RunMode},
+    tunnel::TunnelState,
     usage::published_rate,
 };
 use serde_json::{Value, json};
@@ -183,6 +184,8 @@ pub(crate) fn snapshot_of(state: &AppState) -> Snapshot {
         runs: runs_of(state),
         plugins: plugins_of(state),
         accounts: accounts_of(state),
+        jobs: jobs_of(state),
+        downstream: downstream_of(state),
         forwards: forwards_of(state),
         settings: settings_of(state),
         notes: notes_of(state),
@@ -261,6 +264,85 @@ fn usage_of(state: &AppState) -> Vec<Usage> {
 /// The run the app is watching, if any.
 pub(crate) fn runs_of(state: &AppState) -> Vec<Run> {
     state.plugin_run.iter().map(run_of).collect()
+}
+
+/// The job view of a run. The caller has already decided the run is a job.
+pub(crate) fn job_of(run: &super::runs::PluginRun) -> Job {
+    let view = run_of(run);
+    Job {
+        plugin: view.plugin,
+        session: view.session,
+        state: phase_name(&run.phase).to_owned(),
+        stage: view.stage,
+    }
+}
+
+/// Jobs only. A service run stays on [`runs_of`].
+fn jobs_of(state: &AppState) -> Vec<Job> {
+    let Some(run) = &state.plugin_run else {
+        return Vec::new();
+    };
+    let job = state
+        .plugin(&run.plugin)
+        .is_some_and(|info| info.manifest.run.mode == RunMode::Job);
+    if !job {
+        return Vec::new();
+    }
+    vec![job_of(run)]
+}
+
+/// The model id a run published, when it is safe to repeat. Other outputs stay out: a file path
+/// or a metric is not a connection note, and a credential must not become one by being nearby.
+fn published_model(run: &super::runs::PluginRun) -> String {
+    let Some(text) = run
+        .status
+        .as_ref()
+        .and_then(|status| status.outputs.get("model_id"))
+        .and_then(|value| value.as_str())
+    else {
+        return String::new();
+    };
+    if model_id_is_public(text) {
+        text.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// Connection notes for forwards that are up. A tunnel that is still starting, or whose address
+/// is not loopback, is left out rather than handed to an agent as if it could connect.
+fn downstream_of(state: &AppState) -> Vec<Downstream> {
+    let Some(run) = &state.plugin_run else {
+        return Vec::new();
+    };
+    let Some(session) = run.session.as_deref().filter(|session| !session.is_empty()) else {
+        return Vec::new();
+    };
+    let model = published_model(run);
+    let mut notes = Vec::new();
+    for endpoint in &run.endpoints {
+        let Some(tunnel) = state.tunnels().find(|tunnel| {
+            tunnel.spec.session == session
+                && tunnel.spec.remote_port == endpoint.remote_port
+                && matches!(tunnel.state, TunnelState::Up)
+        }) else {
+            continue;
+        };
+        let path = endpoint.path.trim_end_matches('/');
+        let base_url = format!("http://127.0.0.1:{}{path}", tunnel.spec.local_port);
+        if !loopback_http(&base_url) {
+            continue;
+        }
+        notes.push(Downstream {
+            plugin: run.plugin.clone(),
+            endpoint: endpoint.id.clone(),
+            kind: endpoint.kind.clone(),
+            base_url,
+            model: model.clone(),
+            healthy: tunnel.healthy == Some(true),
+        });
+    }
+    notes
 }
 
 pub(crate) fn run_of(run: &super::runs::PluginRun) -> Run {
@@ -562,6 +644,22 @@ pub(crate) fn answer_for_action(action: &Action, state: &AppState) -> Result<Val
                 .accounts()
                 .ready()
                 .and_then(|view| view.active_email.clone()),
+        }),
+        Action::AccountUse { name } => {
+            colab_playground_core::mcp::view::account_use_answer(name, &accounts_of(state))?
+        }
+        Action::JobRun { plugin, .. } => {
+            let run = state
+                .plugin_run()
+                .filter(|run| &run.plugin == plugin)
+                .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
+            let value = json!({ "job": job_of(run) });
+            colab_playground_core::mcp::view::ensure_public(&value)?;
+            value
+        }
+        Action::JobCancel { plugin } => json!({
+            "plugin": plugin,
+            "cancel_requested": true,
         }),
         Action::PluginEnable { plugin, enabled } => json!({
             "plugin": plugin,

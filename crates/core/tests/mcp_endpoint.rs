@@ -199,10 +199,15 @@ fn a_client_can_name_itself_list_the_tools_and_call_one() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name").to_owned())
         .collect();
-    assert_eq!(names.len(), 22, "{names:?}");
+    assert_eq!(names.len(), 27, "{names:?}");
     assert!(names.contains(&"sessions_list".to_owned()), "{names:?}");
     assert!(names.contains(&"session_start".to_owned()), "{names:?}");
     assert!(names.contains(&"session_watch".to_owned()), "{names:?}");
+    assert!(names.contains(&"account_use".to_owned()), "{names:?}");
+    assert!(names.contains(&"job_run".to_owned()), "{names:?}");
+    assert!(names.contains(&"job_status".to_owned()), "{names:?}");
+    assert!(names.contains(&"job_cancel".to_owned()), "{names:?}");
+    assert!(names.contains(&"downstream_config".to_owned()), "{names:?}");
 
     let called = post(
         &mut client,
@@ -455,7 +460,8 @@ fn get_event_stream_enforces_auth_origin_and_session_rules() {
     let endpoint = endpoint();
     let sse = |token: Option<&str>, origin: Option<&str>, session: Option<&str>| -> Answer {
         let mut reader = connect(endpoint.addr());
-        let mut req = format!("GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n");
+        let mut req =
+            format!("GET {PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\n");
         if let Some(token) = token {
             req.push_str(&format!("Authorization: Bearer {token}\r\n"));
         }
@@ -478,8 +484,5 @@ fn get_event_stream_enforces_auth_origin_and_session_rules() {
         sse(Some(TOKEN), Some("http://a-page.example"), None).status,
         403
     );
-    assert_eq!(
-        sse(Some(TOKEN), None, Some("0123456789abcdef")).status,
-        404
-    );
+    assert_eq!(sse(Some(TOKEN), None, Some("0123456789abcdef")).status, 404);
 }

@@ -11,10 +11,15 @@ ideas and the reasoning are not lost.
 
 An agent on this computer can drive the app, through a local MCP endpoint it turns on in
 Settings → Agents. It reads what the window knows — `sessions_list`, `session_usage`, `runs_list`,
-`run_status`, `run_outputs`, `plugin_list`, `settings_get`, `accounts_list`, `forwards_list` — and
+`run_status`, `run_outputs`, `plugin_list`, `settings_get`, `accounts_list`, `job_status`,
+`downstream_config`, `forwards_list` — and
 it does the app's own jobs: `session_start`, `session_stop`, `session_extend`, `plugin_run`,
-`run_download`, `settings_set`, `accounts_switch`, `plugin_enable`, `plugin_install`,
-`forward_open` and `forward_close`. It listens on `127.0.0.1` only, refuses a request that did not
+`run_download`, `settings_set`, `accounts_switch`, `account_use`, `job_run`, `job_cancel`,
+`plugin_enable`, `plugin_install`,
+`forward_open` and `forward_close`. `account_use` selects an account by the address
+`accounts_list` shows and does not return its token. `job_run` asks before it starts, because a
+job bills. `downstream_config` is a loopback address for a forwarded service, such as llama.cpp,
+with no token or proxy URL in it. It listens on `127.0.0.1` only, refuses a request that did not
 come from its own window, and wants the token that section shows. Pointing an agent at it:
 [USAGE.md](USAGE.md#point-an-agent-at-the-app).
 
