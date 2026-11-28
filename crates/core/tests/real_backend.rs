@@ -300,6 +300,116 @@ fn fake_cli_restart_kernel_and_ssh_force_work_for_existing_session() {
 }
 
 #[test]
+fn stop_not_found_across_cli_versions() {
+    use colab_playground_core::cli::StopOutcome;
+    let f = fixture();
+    f.adopt_alice();
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.root.join("sessions.json").to_string_lossy().into_owned());
+    let scratch = HostPath::new(f.root.join("scratch").to_string_lossy().into_owned());
+    std::fs::create_dir_all(f.root.join("scratch")).unwrap();
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        let missing = cli.stop(&state, "missing", &nc()).unwrap();
+        assert_eq!(missing, StopOutcome::NotFound);
+        // A stale local record whose endpoint is no longer assigned to the active account
+        // is pruned and also reports NotFound across 0.8.0 (exit 0) and post-0.8.0 (exit 1).
+        let stale = json!({
+            "stale": {
+                "name": "stale",
+                "token": "t",
+                "url": "http://127.0.0.1:9/",
+                "endpoint": "gone-ep",
+            }
+        });
+        std::fs::write(f.root.join("sessions.json"), stale.to_string()).unwrap();
+        let stale_out = cli.stop(&state, "stale", &nc()).unwrap();
+        assert_eq!(stale_out, StopOutcome::NotFound);
+        assert!(!cli.reap_endpoint(&scratch, "unowned-ep", &nc()).unwrap());
+        f.knob("stop_failure", json!("api_error"));
+        let err = cli.stop(&state, "missing", &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Other), "newer={newer}: {err}");
+        f.knob("stop_failure", Value::Null);
+    }
+}
+
+#[test]
+fn exec_distinguishes_remote_failures_from_cli_failures_across_cli_versions() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    f.provision("ex", Accelerator::T4);
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.state_file(&alice.id).to_string_lossy().into_owned());
+    let exec = |session, code| cli.exec(&state, session, &[], code, 30, &nc());
+    let exec_json = |session, code| cli.exec_json(&state, session, &[], code, 30, &nc());
+
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        f.knob("exec_failure", Value::Null);
+
+        let syntax = exec("ex", "def broken(:").unwrap();
+        assert!(syntax.result.is_none());
+        assert!(syntax.stderr.contains("SyntaxError"), "{}", syntax.stderr);
+        let syntax_json = exec_json("ex", "def broken(:").unwrap_err();
+        assert!(syntax_json.is(ErrorKind::Parse), "{syntax_json}");
+
+        let raised = exec("ex", "raise ValueError('bad value')").unwrap();
+        assert!(raised.result.is_none());
+        assert!(raised.stderr.contains("ValueError"), "{}", raised.stderr);
+        let raised_json = exec_json("ex", "raise ValueError('bad value')").unwrap_err();
+        assert!(raised_json.is(ErrorKind::Parse), "{raised_json}");
+
+        let exit0 = exec("ex", "sys.exit(0)").unwrap();
+        assert!(exit0.result.is_none());
+        let exit2 = exec("ex", "sys.exit(2)").unwrap();
+        assert!(exit2.result.is_none());
+        let exit_msg = exec("ex", "sys.exit('boom')").unwrap();
+        assert!(exit_msg.stderr.contains("boom"), "{}", exit_msg.stderr);
+        assert!(exit_msg.result.is_none());
+
+        let code_127 = "print('not found', file=sys.stderr)\nsys.exit(127)";
+        let remote_127 = exec("ex", code_127).unwrap();
+        assert!(remote_127.result.is_none());
+        assert!(remote_127.stderr.contains("not found"));
+
+        let code_429 = "print('(HTTP 429)', file=sys.stderr)\nsys.exit(1)";
+        let remote_429 = exec("ex", code_429).unwrap();
+        assert!(remote_429.result.is_none());
+        assert!(remote_429.stderr.contains("(HTTP 429)"));
+
+        let code_usage = "print('Usage: foo', file=sys.stderr)\nsys.exit(2)";
+        let remote_usage = exec("ex", code_usage).unwrap();
+        assert!(remote_usage.result.is_none());
+        assert!(remote_usage.stderr.contains("Usage: foo"));
+
+        if newer {
+            let marker_code = "print('__CPG_RESULT__ {\"ok\": 1}')\nsys.exit(1)";
+            let crashed = exec("ex", marker_code).unwrap();
+            assert!(crashed.result.is_none());
+            let crashed_json = exec_json("ex", marker_code).unwrap_err();
+            assert!(crashed_json.is(ErrorKind::Parse), "{crashed_json}");
+        }
+
+        let missing = exec("missing", "print(1)").unwrap_err();
+        assert!(missing.is(ErrorKind::SessionGone), "{missing}");
+        for (knob, expected) in [
+            ("session_lost", ErrorKind::SessionGone),
+            ("connection_lost", ErrorKind::ConnectionLost),
+            ("kernel_dead", ErrorKind::ConnectionLost),
+            ("timeout", ErrorKind::ExecTimeout),
+            ("invalid_env", ErrorKind::Other),
+            ("local_error", ErrorKind::Other),
+        ] {
+            f.knob("exec_failure", json!(knob));
+            let err = exec("ex", "print(1)").unwrap_err();
+            assert!(err.is(expected), "newer={newer} knob={knob}: {err}");
+        }
+    }
+}
+
+#[test]
 fn cli_version_and_missing_toolchain() {
     let f = fixture();
     let tc = f.cfg.toolchain.clone().unwrap();
@@ -1107,10 +1217,61 @@ fn tunnel_reports_429_and_port_in_use() {
         Some(TunnelEvent::State {
             state: TunnelState::Failed { error },
             ..
-        }) => assert!(error.is(ErrorKind::SshBusy), "{error}"),
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("new_cli", json!(true));
+    f.knob("ssh_busy_limit", json!(5));
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), Some("5"));
+            let detail = &error.detail;
+            assert!(detail.contains("5 of 5 SSH sessions in use"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("ssh_busy_limit", Value::Null);
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+            let detail = &error.detail;
+            assert!(detail.contains("--force"), "{detail}");
+        }
         other => panic!("{other:?}"),
     }
     f.knob("ssh_busy", json!(false));
+    f.knob("ssh_busy_limit", Value::Null);
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let (tx, rx) = channel();
     let spec = TunnelSpec {
