@@ -1,8 +1,8 @@
 //! HTTP and WebSocket transports for the direct backend.
 //!
 //! `http://` and `ws://` use the standard library, which is what the in-crate mock
-//! speaks. `https://` uses `ureq` when the `http` feature is on. `wss://` is refused:
-//! this build does not bundle a TLS WebSocket client.
+//! speaks. `https://` uses `ureq` when the `http` feature is on. `wss://` uses
+//! `rustls` with the public root set, plus any extra roots a test supplies.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -71,8 +71,12 @@ impl HttpExchange for AutoHttp {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct StdWs;
+/// WebSocket dialer. `extra_roots` are DER trust anchors added to the public set,
+/// so a test can speak `wss://` to a local certificate. Production leaves this empty.
+#[derive(Debug, Clone, Default)]
+pub struct StdWs {
+    pub extra_roots: Vec<Vec<u8>>,
+}
 
 impl WsDial for StdWs {
     fn open(
@@ -81,18 +85,18 @@ impl WsDial for StdWs {
         headers: &[(String, String)],
         timeout: Duration,
     ) -> Result<Box<dyn WsConn>> {
-        if url.starts_with("wss://") {
-            return Err(Error::new(ErrorKind::Unsupported)
-                .detail("direct backend has no TLS websocket in this build"));
-        }
-        if !url.starts_with("ws://") {
+        if !url.starts_with("ws://") && !url.starts_with("wss://") {
             return Err(Error::new(ErrorKind::InvalidInput)
                 .with("field", "url")
-                .detail("websocket url must be ws://"));
+                .detail("websocket url must be ws:// or wss://"));
         }
-        let http_url = format!("http://{}", &url["ws://".len()..]);
-        let parts = parse_http_url(&http_url)?;
-        let mut stream = connect_tcp(&parts.host, parts.port, timeout)?;
+        let parts = parse_http_url(url)?;
+        let tcp = connect_tcp(&parts.host, parts.port, timeout)?;
+        let mut stream: Box<dyn ByteIo> = if url.starts_with("wss://") {
+            Box::new(tls_client(tcp, &parts.host, &self.extra_roots)?)
+        } else {
+            Box::new(PlainSock(tcp))
+        };
         let key = websocket_key();
         let mut head = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n",
@@ -128,8 +132,112 @@ impl WsDial for StdWs {
     }
 }
 
+trait ByteIo: Read + Write + Send {
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()>;
+}
+
+struct PlainSock(TcpStream);
+
+impl Read for PlainSock {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for PlainSock {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl ByteIo for PlainSock {
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        self.0.set_nonblocking(nonblocking)
+    }
+}
+
+struct TlsSock {
+    inner: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
+}
+
+impl Read for TlsSock {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Write for TlsSock {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl ByteIo for TlsSock {
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        self.inner.sock.set_nonblocking(nonblocking)
+    }
+}
+
+fn tls_client(tcp: TcpStream, host: &str, extra_roots: &[Vec<u8>]) -> Result<TlsSock> {
+    let name = server_name(host)?;
+    let config = tls_config(extra_roots)?;
+    let conn =
+        rustls::ClientConnection::new(std::sync::Arc::new(config), name).map_err(|error| {
+            Error::new(ErrorKind::Io).detail(format!("tls handshake setup failed: {error}"))
+        })?;
+    Ok(TlsSock {
+        inner: rustls::StreamOwned::new(conn, tcp),
+    })
+}
+
+pub(crate) fn ring_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    static PROVIDER: std::sync::OnceLock<std::sync::Arc<rustls::crypto::CryptoProvider>> =
+        std::sync::OnceLock::new();
+    PROVIDER
+        .get_or_init(|| std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .clone()
+}
+
+fn server_name(host: &str) -> Result<rustls::pki_types::ServerName<'static>> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let ip = rustls::pki_types::IpAddr::from(ip);
+        return Ok(rustls::pki_types::ServerName::IpAddress(ip));
+    }
+    rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| {
+        Error::new(ErrorKind::InvalidInput)
+            .with("field", "url")
+            .detail("websocket host is not a dns name or ip")
+    })
+}
+
+fn tls_config(extra_roots: &[Vec<u8>]) -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for der in extra_roots {
+        roots
+            .add(rustls::pki_types::CertificateDer::from(der.clone()))
+            .map_err(|error| {
+                Error::new(ErrorKind::InvalidInput)
+                    .detail(format!("trust anchor rejected: {error}"))
+            })?;
+    }
+    Ok(rustls::ClientConfig::builder_with_provider(ring_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|error| Error::new(ErrorKind::Io).detail(format!("tls versions: {error}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth())
+}
+
 struct TcpWs {
-    stream: TcpStream,
+    stream: Box<dyn ByteIo>,
     pending: Vec<u8>,
     pending_pos: usize,
 }
@@ -152,6 +260,7 @@ impl Read for TcpWs {
 
 impl WsConn for TcpWs {
     fn send(&mut self, opcode: u8, data: &[u8]) -> Result<()> {
+        self.stream.set_nonblocking(false)?;
         write_frame(&mut self.stream, opcode, data, true)
     }
 
@@ -426,7 +535,7 @@ fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<TcpStream> {
 
 /// Headers, then the body only when the status is not `101`. A successful upgrade
 /// leaves the following bytes for websocket frames.
-fn read_upgrade(stream: &mut TcpStream) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+fn read_upgrade(stream: &mut impl Read) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
     let (status, headers, leftover) = read_headers(stream)?;
     if status == 101 {
         return Ok((status, headers, leftover));
@@ -451,7 +560,7 @@ fn read_upgrade(stream: &mut TcpStream) -> Result<(u16, Vec<(String, String)>, V
     Ok((status, headers, body))
 }
 
-fn read_headers(stream: &mut TcpStream) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+fn read_headers(stream: &mut impl Read) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 1024];
     let split_at = loop {

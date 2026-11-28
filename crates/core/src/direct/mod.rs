@@ -98,6 +98,10 @@ pub struct DirectConfig {
     pub retry_delays: Vec<Duration>,
     pub upload_chunk_bytes: usize,
     pub ssh_pubkey: Option<String>,
+    /// Private key OpenSSH uses for `-L`. `None` lets `ssh` pick its default identity.
+    pub ssh_identity: Option<PathBuf>,
+    /// Login on the runtime sshd. `None` is `root`, which Colab expects.
+    pub ssh_user: Option<String>,
     pub adc_path: Option<PathBuf>,
     pub defaults: Defaults,
 }
@@ -125,10 +129,28 @@ struct LiveSession {
     connection: Option<ConnectionInfo>,
 }
 
+/// Resource name and endpoint from a listing. No proxy token.
+struct ListedSlot {
+    resource: String,
+    endpoint: String,
+}
+
 struct LiveTunnel {
     spec: TunnelSpec,
     state: TunnelState,
     stop: Arc<AtomicBool>,
+    ssh: Option<SshProcess>,
+}
+
+struct SshProcess(Option<std::process::Child>);
+
+impl Drop for SshProcess {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 struct State {
@@ -139,6 +161,8 @@ struct State {
     usage: BTreeMap<AccountId, AccountUsage>,
     access: BTreeMap<AccountId, Access>,
     sessions: BTreeMap<(AccountId, String), LiveSession>,
+    /// Every runtime last listed, keyed by account and endpoint, including ones with no ledger row.
+    listed: BTreeMap<(AccountId, String), ListedSlot>,
     tunnels: BTreeMap<u64, LiveTunnel>,
     next_tunnel: u64,
 }
@@ -153,6 +177,8 @@ pub struct DirectBackend {
     oauth: Arc<Mutex<Option<OAuthClient>>>,
     upload_chunk_bytes: usize,
     ssh_pubkey: Mutex<Option<String>>,
+    ssh_identity: Option<PathBuf>,
+    ssh_user: String,
     adc_path: Option<PathBuf>,
     data_dir: Option<PathBuf>,
 }
@@ -201,12 +227,15 @@ impl DirectBackend {
                 usage: BTreeMap::new(),
                 access: BTreeMap::new(),
                 sessions: BTreeMap::new(),
+                listed: BTreeMap::new(),
                 tunnels: BTreeMap::new(),
                 next_tunnel: 1,
             })),
             oauth: Arc::new(Mutex::new(config.oauth)),
             upload_chunk_bytes: config.upload_chunk_bytes.max(1),
             ssh_pubkey: Mutex::new(config.ssh_pubkey),
+            ssh_identity: config.ssh_identity,
+            ssh_user: config.ssh_user.unwrap_or_else(|| "root".to_owned()),
             adc_path: config.adc_path,
             data_dir: config.data_dir,
         })
@@ -232,7 +261,7 @@ impl DirectBackend {
         Self::open(DirectConfig {
             clock: Arc::new(SystemClock),
             http: Arc::new(AutoHttp),
-            ws: Arc::new(StdWs),
+            ws: Arc::new(StdWs::default()),
             vault: Arc::new(SecretToolVault::new()),
             data_dir: Some(data_dir),
             endpoints: Endpoints::google(),
@@ -244,6 +273,8 @@ impl DirectBackend {
             ],
             upload_chunk_bytes: 1024 * 1024,
             ssh_pubkey: None,
+            ssh_identity: None,
+            ssh_user: None,
             adc_path,
             defaults,
         })
@@ -503,6 +534,16 @@ impl DirectBackend {
             .map_err(protocol::ApiFailure::into_error)?;
         self.with_state(|state| {
             for runtime in &listed {
+                if runtime.listed.endpoint.is_empty() || runtime.listed.resource.is_empty() {
+                    continue;
+                }
+                state.listed.insert(
+                    (account.clone(), runtime.listed.endpoint.clone()),
+                    ListedSlot {
+                        resource: runtime.listed.resource.clone(),
+                        endpoint: runtime.listed.endpoint.clone(),
+                    },
+                );
                 if let Some(connection) = &runtime.connection {
                     attach_connection(state, account, runtime, connection);
                 }
@@ -1354,9 +1395,27 @@ impl Backend for DirectBackend {
                 error
             })?;
         self.api.record("GET", "/colab/ssh", 101);
-        let listener = TcpListener::bind(("127.0.0.1", spec.local_port))?;
-        listener.set_nonblocking(true)?;
+        // One websocket is the SSH transport. OpenSSH `-L` opens a channel per local
+        // connection to 127.0.0.1:remote_port on the runtime. Bytes are not echoed.
+        let transport = TcpListener::bind(("127.0.0.1", 0))?;
+        transport.set_nonblocking(true)?;
+        let transport_port = transport.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
+        let socket = Arc::new(Mutex::new(socket));
+        let stop_loop = stop.clone();
+        thread::spawn(move || accept_ssh_transport(transport, socket, stop_loop));
+        let ssh = match spawn_ssh_forward(
+            &spec,
+            transport_port,
+            self.ssh_identity.as_deref(),
+            &self.ssh_user,
+        ) {
+            Ok(child) => child,
+            Err(error) => {
+                stop.store(true, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
         let id = self.with_state(|state| {
             let id = state.next_tunnel;
             state.next_tunnel += 1;
@@ -1366,6 +1425,7 @@ impl Backend for DirectBackend {
                     spec: spec.clone(),
                     state: TunnelState::Up,
                     stop: stop.clone(),
+                    ssh: Some(ssh),
                 },
             );
             id
@@ -1375,17 +1435,13 @@ impl Backend for DirectBackend {
             id: tunnel_id,
             state: TunnelState::Up,
         });
-        let socket = Arc::new(Mutex::new(socket));
-        let stop_loop = stop.clone();
-        thread::spawn(move || tunnel_loop(listener, socket, stop_loop));
         Ok(tunnel_id)
     }
 
     fn close_tunnel(&self, id: TunnelId) -> Result<()> {
         let stopped = self.with_state(|state| {
             state.tunnels.get_mut(&id.0).map(|tunnel| {
-                tunnel.stop.store(true, Ordering::Relaxed);
-                tunnel.state = TunnelState::Stopped;
+                halt_tunnel(tunnel);
             })
         });
         if stopped.is_some() {
@@ -1918,6 +1974,17 @@ impl DirectBackend {
                         target.endpoint.clone(),
                     ));
                 }
+                if let Some(slot) = state
+                    .listed
+                    .get(&(target.account.clone(), target.endpoint.clone()))
+                {
+                    let name = target
+                        .name
+                        .clone()
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| slot.endpoint.clone());
+                    return Some((name, slot.resource.clone(), slot.endpoint.clone()));
+                }
             }
             None
         })
@@ -1933,8 +2000,7 @@ impl DirectBackend {
         self.with_state(|state| {
             for tunnel in state.tunnels.values_mut() {
                 if &tunnel.spec.account == account {
-                    tunnel.stop.store(true, Ordering::Relaxed);
-                    tunnel.state = TunnelState::Stopped;
+                    halt_tunnel(tunnel);
                 }
             }
         });
@@ -1944,8 +2010,7 @@ impl DirectBackend {
         self.with_state(|state| {
             for tunnel in state.tunnels.values_mut() {
                 if &tunnel.spec.account == account && tunnel.spec.session == name {
-                    tunnel.stop.store(true, Ordering::Relaxed);
-                    tunnel.state = TunnelState::Stopped;
+                    halt_tunnel(tunnel);
                 }
             }
         });
@@ -1984,20 +2049,127 @@ impl DirectOps<'_> {
     }
 }
 
-fn tunnel_loop(listener: TcpListener, socket: Arc<Mutex<Box<dyn WsConn>>>, stop: Arc<AtomicBool>) {
-    while !stop.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let socket = socket.clone();
-                let stop = stop.clone();
-                thread::spawn(move || bridge_one(stream, socket, stop));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Err(_) => break,
+fn halt_tunnel(tunnel: &mut LiveTunnel) {
+    tunnel.stop.store(true, Ordering::Relaxed);
+    tunnel.state = TunnelState::Stopped;
+    if let Some(ssh) = tunnel.ssh.as_mut() {
+        if let Some(child) = ssh.0.as_mut() {
+            let _ = child.kill();
         }
     }
+}
+
+/// Accepts the one OpenSSH client and bridges it to the runtime websocket.
+fn accept_ssh_transport(
+    listener: TcpListener,
+    socket: Arc<Mutex<Box<dyn WsConn>>>,
+    stop: Arc<AtomicBool>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                bridge_one(stream, socket, stop);
+                return;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn ssh_bin() -> &'static str {
+    if Path::new("/usr/bin/ssh").exists() {
+        "/usr/bin/ssh"
+    } else {
+        "ssh"
+    }
+}
+
+/// `ssh -N -L 127.0.0.1:local:127.0.0.1:remote` through the websocket bridge.
+fn spawn_ssh_forward(
+    spec: &TunnelSpec,
+    transport_port: u16,
+    identity: Option<&Path>,
+    user: &str,
+) -> Result<SshProcess> {
+    let mut command = std::process::Command::new(ssh_bin());
+    command
+        .arg("-N")
+        .arg("-T")
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("GlobalKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=30")
+        .arg("-o")
+        .arg("ServerAliveCountMax=3")
+        .arg("-o")
+        .arg("ConnectTimeout=10")
+        .arg("-p")
+        .arg(transport_port.to_string())
+        .arg("-L")
+        .arg(format!(
+            "127.0.0.1:{}:127.0.0.1:{}",
+            spec.local_port, spec.remote_port
+        ));
+    if let Some(path) = identity {
+        command.arg("-i").arg(path);
+        command.arg("-o").arg("IdentitiesOnly=yes");
+    }
+    command.arg(format!("{user}@127.0.0.1"));
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        Error::new(ErrorKind::NotInstalled).detail(format!("ssh failed to start: {error}"))
+    })?;
+    let log = Arc::new(Mutex::new(String::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let log = log.clone();
+        thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            let mut slot = log.lock().unwrap_or_else(|error| error.into_inner());
+            slot.push_str(&buf);
+            if slot.len() > 1500 {
+                slot.truncate(1500);
+            }
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(Error::from)? {
+            thread::sleep(Duration::from_millis(20));
+            let detail = log
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            return Err(Error::new(ErrorKind::Io).detail(format!("ssh exited {status}: {detail}")));
+        }
+        if crate::http::local_port_in_use(spec.local_port, Duration::from_millis(40)) {
+            return Ok(SshProcess(Some(child)));
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+    let _ = child.kill();
+    let detail = log
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    Err(Error::new(ErrorKind::Timeout).detail(format!("ssh forward did not listen: {detail}")))
 }
 
 fn bridge_one(

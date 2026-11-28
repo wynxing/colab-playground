@@ -76,7 +76,7 @@ impl AppState {
         self.sessions.tunnels.get(&id)
     }
 
-    /// Opens the forward dialog for `target` (a named runtime on the active account).
+    /// Opens the forward dialog for a named runtime. Direct mode does not require the active account.
     pub fn open_forward_dialog(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
         let Some(session) = target.name.clone() else {
             return;

@@ -68,6 +68,12 @@ impl AppState {
         }));
     }
 
+    /// Direct API is selected. Other accounts' named sessions can extend and forward
+    /// without switching; the CLI backend still requires the switch.
+    pub fn uses_direct_control(&self) -> bool {
+        self.settings.control_plane == crate::settings::ControlPlane::Direct
+    }
+
     /// Switches between the CLI and the direct API, then rebuilds a real backend.
     pub fn set_control_plane(
         &mut self,

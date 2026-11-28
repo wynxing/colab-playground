@@ -2,11 +2,15 @@
 //! Nothing here contacts Google.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -57,6 +61,8 @@ struct World {
     email: String,
     hits: Vec<Hit>,
     kernel_codes: Vec<String>,
+    sshd_port: u16,
+    keys_path: PathBuf,
 }
 
 impl World {
@@ -85,6 +91,8 @@ impl World {
             email: "ada@example.com".into(),
             hits: Vec::new(),
             kernel_codes: Vec::new(),
+            sshd_port: 0,
+            keys_path: PathBuf::new(),
         }
     }
 
@@ -131,6 +139,30 @@ impl World {
 pub struct MockColab {
     pub origin: String,
     world: Arc<Mutex<World>>,
+    sshd: Option<SshdProc>,
+    cert_der: Vec<u8>,
+    sshd_error: String,
+}
+
+struct SshdProc {
+    child: Child,
+    dir: PathBuf,
+    port: u16,
+    keys: PathBuf,
+}
+
+impl Drop for SshdProc {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl Drop for MockColab {
+    fn drop(&mut self) {
+        self.sshd.take();
+    }
 }
 
 impl MockColab {
@@ -147,7 +179,61 @@ impl MockColab {
                 thread::spawn(move || serve(stream, world));
             }
         });
-        MockColab { origin, world }
+        let (sshd, sshd_error) = match start_sshd() {
+            Ok(sshd) => {
+                let mut world = world.lock().unwrap_or_else(|error| error.into_inner());
+                world.sshd_port = sshd.port;
+                world.keys_path = sshd.keys.clone();
+                (Some(sshd), String::new())
+            }
+            Err(error) => (None, error),
+        };
+        MockColab {
+            origin,
+            world,
+            sshd,
+            cert_der: Vec::new(),
+            sshd_error,
+        }
+    }
+
+    /// HTTPS origin. The certificate is self-signed for 127.0.0.1; [`Self::cert_der`]
+    /// is the trust anchor a `wss://` client must add.
+    pub fn start_tls() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls mock");
+        let port = listener.local_addr().expect("tls port").port();
+        let origin = format!("https://127.0.0.1:{port}");
+        let (config, cert_der) = test_tls().expect("test certificate");
+        let world = Arc::new(Mutex::new(World::new(origin.clone())));
+        let shared = world.clone();
+        let config = Arc::new(config);
+        thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(stream) = conn else { break };
+                let world = shared.clone();
+                let config = config.clone();
+                thread::spawn(move || serve_tls(stream, config, world));
+            }
+        });
+        MockColab {
+            origin,
+            world,
+            sshd: None,
+            cert_der,
+            sshd_error: String::new(),
+        }
+    }
+
+    pub fn cert_der(&self) -> Vec<u8> {
+        self.cert_der.clone()
+    }
+
+    pub fn sshd_port(&self) -> u16 {
+        self.lock().sshd_port
+    }
+
+    pub fn sshd_error(&self) -> String {
+        self.sshd_error.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, World> {
@@ -235,6 +321,36 @@ impl MockColab {
     }
 }
 
+enum Sock {
+    Plain(TcpStream),
+    Tls(rustls::StreamOwned<rustls::ServerConnection, TcpStream>),
+}
+
+impl Read for Sock {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Sock::Plain(stream) => stream.read(buf),
+            Sock::Tls(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for Sock {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sock::Plain(stream) => stream.write(buf),
+            Sock::Tls(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sock::Plain(stream) => stream.flush(),
+            Sock::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
 struct Incoming {
     method: String,
     path: String,
@@ -242,7 +358,7 @@ struct Incoming {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     pending: Vec<u8>,
-    stream: TcpStream,
+    stream: Sock,
 }
 
 impl Incoming {
@@ -274,6 +390,19 @@ impl Incoming {
 
 fn serve(stream: TcpStream, world: Arc<Mutex<World>>) {
     let _ = stream.set_nodelay(true);
+    serve_sock(Sock::Plain(stream), world);
+}
+
+fn serve_tls(stream: TcpStream, config: Arc<rustls::ServerConfig>, world: Arc<Mutex<World>>) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));
+    let Ok(conn) = rustls::ServerConnection::new(config) else {
+        return;
+    };
+    serve_sock(Sock::Tls(rustls::StreamOwned::new(conn, stream)), world);
+}
+
+fn serve_sock(stream: Sock, world: Arc<Mutex<World>>) {
     let Ok(mut req) = read_incoming(stream) else {
         return;
     };
@@ -290,7 +419,7 @@ fn serve(stream: TcpStream, world: Arc<Mutex<World>>) {
                 let _ = write_reply(&mut req.stream, &reply);
             }
             WsAction::Kernel => kernel_session(&mut req, &world),
-            WsAction::Ssh => ssh_session(&mut req),
+            WsAction::Ssh => ssh_session(&mut req, &world),
         }
         return;
     }
@@ -669,13 +798,13 @@ fn json_reply(status: u16, body: Vec<u8>) -> Reply {
     }
 }
 
-struct Conn {
-    stream: TcpStream,
+struct Conn<'a> {
+    stream: &'a mut Sock,
     pending: Vec<u8>,
     pending_pos: usize,
 }
 
-impl Read for Conn {
+impl Read for Conn<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.pending_pos < self.pending.len() {
             let n = (self.pending.len() - self.pending_pos).min(buf.len());
@@ -687,7 +816,7 @@ impl Read for Conn {
     }
 }
 
-impl Write for Conn {
+impl Write for Conn<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.stream.write(buf)
     }
@@ -703,11 +832,10 @@ fn kernel_session(req: &mut Incoming, world: &Arc<Mutex<World>>) {
         return;
     }
     let mut conn = Conn {
-        stream: req.stream.try_clone().expect("clone mock socket"),
+        stream: &mut req.stream,
         pending: std::mem::take(&mut req.pending),
         pending_pos: 0,
     };
-    let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
     loop {
         let Ok((opcode, payload)) = read_frame(&mut conn) else {
             break;
@@ -757,35 +885,107 @@ fn kernel_session(req: &mut Incoming, world: &Arc<Mutex<World>>) {
     }
 }
 
-fn ssh_session(req: &mut Incoming) {
+/// Bridges `/colab/ssh` to the local sshd. The bytes are the SSH transport, not an echo,
+/// so `ssh -L` can open `127.0.0.1:remote_port` on this machine.
+fn ssh_session(req: &mut Incoming, world: &Arc<Mutex<World>>) {
+    let (port, keys) = {
+        let world = world.lock().unwrap_or_else(|error| error.into_inner());
+        (world.sshd_port, world.keys_path.clone())
+    };
+    let pubkey = req
+        .header("x-colab-ssh-pubkey")
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    if port != 0 && !pubkey.is_empty() && !keys.as_os_str().is_empty() {
+        let _ = fs::write(&keys, format!("{pubkey}\n"));
+    }
     let key = req.header("sec-websocket-key").unwrap_or("").to_owned();
+    let Sock::Plain(tcp) = &req.stream else {
+        let _ = write_handshake(&mut req.stream, &key);
+        return;
+    };
+    let Ok(writer_tcp) = tcp.try_clone() else {
+        return;
+    };
     if write_handshake(&mut req.stream, &key).is_err() {
         return;
     }
+    if port == 0 {
+        return;
+    }
+    let Ok(mut sshd) = TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_secs(2),
+    ) else {
+        return;
+    };
+    let Ok(mut sshd_reader) = sshd.try_clone() else {
+        return;
+    };
+    let _ = sshd.set_nodelay(true);
+    let _ = sshd_reader.set_nodelay(true);
+    let _ = writer_tcp.set_nodelay(true);
+    let writer = Arc::new(Mutex::new(writer_tcp));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_w = stop.clone();
+    let writer_w = writer.clone();
+    thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        let _ = sshd_reader.set_read_timeout(Some(Duration::from_millis(200)));
+        while !stop_w.load(Ordering::Relaxed) {
+            match sshd_reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut guard = writer_w.lock().unwrap_or_else(|error| error.into_inner());
+                    if write_frame(&mut *guard, 0x2, &buf[..n], false).is_err() {
+                        break;
+                    }
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(_) => break,
+            }
+        }
+        stop_w.store(true, Ordering::Relaxed);
+    });
+    if let Sock::Plain(tcp) = &req.stream {
+        let _ = tcp.set_read_timeout(Some(Duration::from_secs(20)));
+    }
     let mut conn = Conn {
-        stream: req.stream.try_clone().expect("clone mock socket"),
+        stream: &mut req.stream,
         pending: std::mem::take(&mut req.pending),
         pending_pos: 0,
     };
-    let _ = conn.stream.set_read_timeout(Some(Duration::from_secs(5)));
     loop {
-        let Ok((opcode, payload)) = read_frame(&mut conn) else {
-            break;
-        };
-        if opcode == 0x8 {
+        if stop.load(Ordering::Relaxed) {
             break;
         }
-        if opcode == 0x9 {
-            let _ = write_frame(&mut conn, 0xA, &payload, false);
-            continue;
-        }
-        if write_frame(&mut conn, opcode, &payload, false).is_err() {
-            break;
+        match read_frame(&mut conn) {
+            Ok((0x8, _)) => break,
+            Ok((0x9, payload)) => {
+                let mut guard = writer.lock().unwrap_or_else(|error| error.into_inner());
+                if write_frame(&mut *guard, 0xA, &payload, false).is_err() {
+                    break;
+                }
+            }
+            Ok((_, payload)) => {
+                if sshd.write_all(&payload).is_err() {
+                    break;
+                }
+            }
+            Err(error) if idle_io(&error) => continue,
+            Err(_) => break,
         }
     }
+    stop.store(true, Ordering::Relaxed);
 }
 
-fn write_handshake(stream: &mut TcpStream, key: &str) -> std::io::Result<()> {
+fn write_handshake(stream: &mut impl Write, key: &str) -> std::io::Result<()> {
     let accept = transport::accept_key(key);
     let head = format!(
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nContent-Length: 0\r\n\r\n"
@@ -794,8 +994,10 @@ fn write_handshake(stream: &mut TcpStream, key: &str) -> std::io::Result<()> {
     stream.flush()
 }
 
-fn read_incoming(mut stream: TcpStream) -> std::io::Result<Incoming> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+fn read_incoming(mut stream: Sock) -> std::io::Result<Incoming> {
+    if let Sock::Plain(tcp) = &stream {
+        let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
+    }
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let header_end = loop {
@@ -862,7 +1064,7 @@ fn read_incoming(mut stream: TcpStream) -> std::io::Result<Incoming> {
     })
 }
 
-fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
+fn write_reply(stream: &mut impl Write, reply: &Reply) -> std::io::Result<()> {
     let reason = match reply.status {
         200 => "OK",
         204 => "No Content",
@@ -907,4 +1109,166 @@ fn decode_component(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn idle_io(error: &crate::error::Error) -> bool {
+    if error.kind != crate::error::ErrorKind::Io {
+        return false;
+    }
+    let detail = error.detail.to_ascii_lowercase();
+    detail.contains("timed out")
+        || detail.contains("would block")
+        || detail.contains("temporarily unavailable")
+}
+
+pub(super) fn login_user() -> String {
+    if let Ok(output) = Command::new("id").arg("-un").output()
+        && output.status.success()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    std::env::var("USER").unwrap_or_else(|_| "openbot".into())
+}
+
+fn start_sshd() -> Result<SshdProc, String> {
+    let sshd = ["/usr/sbin/sshd", "/usr/bin/sshd"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .ok_or_else(|| "sshd is not installed".to_owned())?;
+    let keygen = if Path::new("/usr/bin/ssh-keygen").exists() {
+        "/usr/bin/ssh-keygen"
+    } else {
+        "ssh-keygen"
+    };
+    let dir = std::env::temp_dir().join(format!("cpg-sshd-{}", crate::accounts::nonce()));
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let host_key = dir.join("host_ed25519");
+    let keys = dir.join("authorized_keys");
+    let pid = dir.join("sshd.pid");
+    let config_path = dir.join("sshd_config");
+    let err_path = dir.join("sshd.err");
+    let fail = |dir: PathBuf, message: String| -> Result<SshdProc, String> {
+        let _ = fs::remove_dir_all(dir);
+        Err(message)
+    };
+    if let Err(error) = fs::write(&keys, b"") {
+        return fail(dir, error.to_string());
+    }
+    let generated = Command::new(keygen)
+        .args(["-t", "ed25519", "-f"])
+        .arg(&host_key)
+        .args(["-N", "", "-q"])
+        .status();
+    if !matches!(generated, Ok(status) if status.success()) {
+        return fail(dir, "ssh-keygen failed for the test sshd host key".into());
+    }
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) => return fail(dir, error.to_string()),
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(error) => return fail(dir, error.to_string()),
+    };
+    drop(listener);
+    let config = format!(
+        "Port {port}\n\
+         ListenAddress 127.0.0.1\n\
+         HostKey {host}\n\
+         PidFile {pid}\n\
+         AuthorizedKeysFile {keys}\n\
+         PasswordAuthentication no\n\
+         KbdInteractiveAuthentication no\n\
+         PubkeyAuthentication yes\n\
+         UsePAM no\n\
+         AllowTcpForwarding yes\n\
+         X11Forwarding no\n\
+         PrintMotd no\n\
+         PrintLastLog no\n\
+         UseDNS no\n\
+         StrictModes no\n\
+         PermitRootLogin no\n\
+         LogLevel ERROR\n",
+        host = host_key.display(),
+        pid = pid.display(),
+        keys = keys.display(),
+    );
+    if let Err(error) = fs::write(&config_path, config) {
+        return fail(dir, error.to_string());
+    }
+    let err_file = match fs::File::create(&err_path) {
+        Ok(file) => file,
+        Err(error) => return fail(dir, error.to_string()),
+    };
+    let mut child = match Command::new(sshd)
+        .arg("-f")
+        .arg(&config_path)
+        .arg("-D")
+        .arg("-e")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(err_file))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return fail(dir, error.to_string()),
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(50),
+        )
+        .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        let note = fs::read_to_string(&err_path).unwrap_or_default();
+        return fail(dir, format!("sshd did not listen: {note}"));
+    }
+    Ok(SshdProc {
+        child,
+        dir,
+        port,
+        keys,
+    })
+}
+
+fn test_tls() -> Result<(rustls::ServerConfig, Vec<u8>), String> {
+    let mut params =
+        rcgen::CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        )));
+    let key = rcgen::KeyPair::generate().map_err(|error| error.to_string())?;
+    let cert = params
+        .self_signed(&key)
+        .map_err(|error| error.to_string())?;
+    let cert_der = cert.der().to_vec();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into());
+    let config = rustls::ServerConfig::builder_with_provider(super::transport::ring_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|error| error.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![rustls::pki_types::CertificateDer::from(cert_der.clone())],
+            key_der,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok((config, cert_der))
 }

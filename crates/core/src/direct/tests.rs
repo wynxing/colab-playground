@@ -3,8 +3,10 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use crate::backend::{Backend, RuntimeRef, StopOptions};
@@ -15,7 +17,7 @@ use crate::provision::ProvisionSpec;
 use crate::sessions::Accelerator;
 use crate::tunnel::TunnelSpec;
 
-use super::mock_colab::{MockColab, PROXY_TOKEN};
+use super::mock_colab::{self, MockColab, PROXY_TOKEN};
 use super::protocol::{ConnectionInfo, Endpoints};
 use super::transport::{AutoHttp, HttpExchange, StdWs, WsDial};
 use super::vault::{self, FailVault, MemoryVault, TokenVault};
@@ -52,9 +54,21 @@ fn open_backend(
     vault: Arc<dyn TokenVault>,
     pubkey: &str,
 ) -> DirectBackend {
+    open_configured(origin, dir, vault, pubkey, StdWs::default(), None, None)
+}
+
+fn open_configured(
+    origin: &str,
+    dir: &Path,
+    vault: Arc<dyn TokenVault>,
+    pubkey: &str,
+    ws: StdWs,
+    ssh_identity: Option<PathBuf>,
+    ssh_user: Option<String>,
+) -> DirectBackend {
     let clock: Arc<dyn Clock> = Arc::new(ManualClock::fixed());
     let http: Arc<dyn HttpExchange> = Arc::new(AutoHttp);
-    let ws: Arc<dyn WsDial> = Arc::new(StdWs);
+    let ws: Arc<dyn WsDial> = Arc::new(ws);
     DirectBackend::open(DirectConfig {
         clock,
         http,
@@ -69,10 +83,28 @@ fn open_backend(
         retry_delays: vec![Duration::ZERO, Duration::ZERO, Duration::ZERO],
         upload_chunk_bytes: 4,
         ssh_pubkey: Some(pubkey.to_owned()),
+        ssh_identity,
+        ssh_user,
         adc_path: None,
         defaults: Defaults::default(),
     })
     .expect("open direct backend")
+}
+
+fn ed25519_keypair(dir: &Path) -> (PathBuf, String) {
+    let private = dir.join("id_ed25519");
+    let status = Command::new("/usr/bin/ssh-keygen")
+        .args(["-t", "ed25519", "-f"])
+        .arg(&private)
+        .args(["-N", "", "-q"])
+        .status()
+        .expect("ssh-keygen");
+    assert!(status.success(), "ssh-keygen failed");
+    let public = fs::read_to_string(format!("{}.pub", private.display()))
+        .expect("public key")
+        .trim()
+        .to_owned();
+    (private, public)
 }
 
 fn spec(name: &str, accelerator: Accelerator, attempts: u32) -> ProvisionSpec {
@@ -344,6 +376,146 @@ fn already_exists_adopts_the_listed_runtime() {
 
 #[test]
 fn another_accounts_runtime_can_be_extended_forwarded_and_stopped() {
+    let mock = MockColab::start();
+    assert_ne!(
+        mock.sshd_port(),
+        0,
+        "local sshd did not start: {}",
+        mock.sshd_error()
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (identity, pubkey) = ed25519_keypair(dir.path());
+    let vault = Arc::new(MemoryVault::new());
+    let backend = open_configured(
+        &mock.origin,
+        dir.path(),
+        vault,
+        &pubkey,
+        StdWs::default(),
+        Some(identity),
+        Some(mock_colab::login_user()),
+    );
+    let cancel = CancelToken::new();
+    let active = backend
+        .seed_account("ada@example.com", ACCESS, REFRESH, true)
+        .unwrap();
+    let other = backend
+        .seed_account("bea@example.com", "access-bbb", "refresh-bbb", false)
+        .unwrap();
+    mock.insert_runtime(
+        "access-bbb",
+        "r-b",
+        "ep-b",
+        Accelerator::A100,
+        "proxy-b-secret",
+    );
+    backend
+        .remember_runtime(
+            &other,
+            "bee-1",
+            "runtimes/r-b",
+            "ep-b",
+            Accelerator::A100,
+            "proxy-b-secret",
+            &mock.origin,
+        )
+        .unwrap();
+    let target = RuntimeRef {
+        account: other.clone(),
+        endpoint: "ep-b".into(),
+        name: Some("bee-1".into()),
+    };
+    let extension = backend
+        .extend_session(&target, Duration::from_secs(90), &cancel)
+        .expect("extend");
+    assert!(extension.watchdog.armed);
+    assert!(
+        mock.kernel_codes()
+            .iter()
+            .all(|code| !code.contains("proxy-b-secret"))
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("vm port");
+    let remote_port = listener.local_addr().unwrap().port();
+    let (got_tx, got_rx) = mpsc::channel();
+    thread::spawn(move || {
+        // The port check opens one empty connection. Keep accepting until the marker arrives.
+        let marker = b"to-the-vm-port";
+        loop {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 64];
+            while buf.len() < marker.len() {
+                match sock.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            if buf.is_empty() {
+                continue;
+            }
+            let _ = sock.write_all(b"vm-reply-bytes");
+            let _ = got_tx.send(buf);
+            return;
+        }
+    });
+    let local_port = free_port();
+    let (tx, _rx) = mpsc::channel();
+    backend
+        .open_tunnel(
+            TunnelSpec {
+                account: other.clone(),
+                session: "bee-1".into(),
+                local_port,
+                remote_port,
+                health_path: None,
+            },
+            tx,
+        )
+        .expect("tunnel");
+    let mut stream =
+        std::net::TcpStream::connect(("127.0.0.1", local_port)).expect("local forward");
+    let _ = stream.set_nodelay(true);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(8)))
+        .unwrap();
+    stream.write_all(b"to-the-vm-port").unwrap();
+    let mut reply = [0u8; 32];
+    let n = stream.read(&mut reply).expect("reply from the vm port");
+    assert_eq!(&reply[..n], b"vm-reply-bytes");
+    let arrived = got_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("vm got bytes");
+    assert_eq!(arrived, b"to-the-vm-port");
+
+    backend
+        .stop_session(&target, StopOptions::default(), &cancel)
+        .expect("stop other");
+    let delete = mock
+        .hits()
+        .into_iter()
+        .find(|hit| hit.method == "DELETE" && hit.path == "/v1beta/runtimes/r-b")
+        .expect("delete");
+    assert_eq!(delete.bearer, "access-bbb");
+    assert_eq!(backend.accounts(&cancel).unwrap().active, Some(active));
+    let calls = backend.recent_calls().join("\n");
+    let files = disk_text(dir.path());
+    for secret in ["access-bbb", "refresh-bbb", "proxy-b-secret", PROXY_TOKEN] {
+        assert!(!calls.contains(secret), "call log contains a secret");
+        assert!(!files.contains(secret), "data dir contains a secret");
+        assert!(!format!("{backend:?}").contains(secret));
+    }
+}
+
+#[test]
+fn listed_runtime_without_a_ledger_row_can_be_stopped() {
     let lab = lab();
     let cancel = CancelToken::new();
     let active = lab
@@ -356,78 +528,94 @@ fn another_accounts_runtime_can_be_extended_forwarded_and_stopped() {
         .unwrap();
     lab.mock.insert_runtime(
         "access-bbb",
-        "r-b",
-        "ep-b",
-        Accelerator::A100,
+        "r-listed",
+        "ep-listed",
+        Accelerator::None,
         "proxy-b-secret",
     );
+    let view = lab.backend.runtimes(&cancel).expect("list");
+    assert!(view.runtimes.iter().any(|runtime| {
+        runtime.id.endpoint == "ep-listed"
+            && runtime.id.account == other
+            && runtime.id.name.is_none()
+    }));
     lab.backend
-        .remember_runtime(
-            &other,
-            "bee-1",
-            "runtimes/r-b",
-            "ep-b",
-            Accelerator::A100,
-            "proxy-b-secret",
-            &lab.mock.origin,
-        )
-        .unwrap();
-    let target = RuntimeRef {
-        account: other.clone(),
-        endpoint: "ep-b".into(),
-        name: Some("bee-1".into()),
-    };
-    let extension = lab
-        .backend
-        .extend_session(&target, Duration::from_secs(90), &cancel)
-        .expect("extend");
-    assert!(extension.watchdog.armed);
-    assert!(
-        lab.mock
-            .kernel_codes()
-            .iter()
-            .all(|code| !code.contains("proxy-b-secret"))
-    );
-
-    let port = free_port();
-    let (tx, _rx) = mpsc::channel();
-    lab.backend
-        .open_tunnel(
-            TunnelSpec {
-                account: other.clone(),
-                session: "bee-1".into(),
-                local_port: port,
-                remote_port: 7860,
-                health_path: None,
+        .stop_session(
+            &RuntimeRef {
+                account: other,
+                endpoint: "ep-listed".into(),
+                name: None,
             },
-            tx,
+            StopOptions::default(),
+            &cancel,
         )
-        .expect("tunnel");
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect tunnel");
-    let _ = stream.set_nodelay(true);
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    stream.write_all(b"ping-bytes").unwrap();
-    let mut buf = [0u8; 16];
-    let n = stream.read(&mut buf).expect("echo");
-    assert_eq!(&buf[..n], b"ping-bytes");
-
-    lab.backend
-        .stop_session(&target, StopOptions::default(), &cancel)
-        .expect("stop other");
+        .expect("stop from the list");
     let delete = lab
         .mock
         .hits()
         .into_iter()
-        .find(|hit| hit.method == "DELETE" && hit.path == "/v1beta/runtimes/r-b")
+        .find(|hit| hit.method == "DELETE" && hit.path == "/v1beta/runtimes/r-listed")
         .expect("delete");
     assert_eq!(delete.bearer, "access-bbb");
     assert_eq!(lab.backend.accounts(&cancel).unwrap().active, Some(active));
     assert_secrets_absent(&lab, &["access-bbb", "refresh-bbb", "proxy-b-secret"]);
+}
+
+#[test]
+fn https_proxy_kernel_handshake_reaches_the_runtime() {
+    let api = MockColab::start();
+    let tls = MockColab::start_tls();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vault = Arc::new(MemoryVault::new());
+    let backend = open_configured(
+        &api.origin,
+        dir.path(),
+        vault,
+        PUBKEY,
+        StdWs {
+            extra_roots: vec![tls.cert_der()],
+        },
+        None,
+        None,
+    );
+    let cancel = CancelToken::new();
+    let account = backend
+        .seed_account("ada@example.com", ACCESS, REFRESH, true)
+        .unwrap();
+    backend
+        .remember_runtime(
+            &account,
+            "tls-1",
+            "runtimes/r-tls",
+            "ep-tls",
+            Accelerator::None,
+            PROXY_TOKEN,
+            &tls.origin,
+        )
+        .unwrap();
+    let output = backend
+        .execute_code(
+            &RuntimeRef {
+                account,
+                endpoint: "ep-tls".into(),
+                name: Some("tls-1".into()),
+            },
+            "print('wss-handshake')",
+            &cancel,
+        )
+        .expect("wss kernel");
+    assert!(
+        tls.kernel_codes()
+            .iter()
+            .any(|code| code.contains("wss-handshake")),
+        "cell did not reach the https proxy"
+    );
+    assert!(!output.contains(PROXY_TOKEN));
+    let calls = backend.recent_calls().join("\n");
+    let files = disk_text(dir.path());
+    assert!(!calls.contains(PROXY_TOKEN), "call log contains a secret");
+    assert!(!files.contains(PROXY_TOKEN), "data dir contains a secret");
+    assert!(!format!("{backend:?}").contains(PROXY_TOKEN));
 }
 
 #[test]
