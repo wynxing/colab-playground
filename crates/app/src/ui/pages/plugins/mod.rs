@@ -28,7 +28,7 @@ use crate::{
     ui::{Inputs, error_view, tagged},
 };
 
-pub use form::{RUN_START, hf_result_selector};
+pub use form::{RUN_KEEP_CONFIGURE, RUN_START, hf_result_selector};
 pub use run::{
     ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, RUN_CANCEL, RUN_SESSION_UNKNOWN_SELECTOR,
     RUN_STOP,

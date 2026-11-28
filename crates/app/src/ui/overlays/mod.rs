@@ -6,6 +6,7 @@
 mod approval;
 mod feedback;
 mod forward;
+mod keep;
 mod new_session;
 mod plugin;
 mod quit;
@@ -27,6 +28,10 @@ use crate::{
 pub use approval::{APPROVAL_ALLOW, APPROVAL_REFUSE};
 pub use feedback::{FEEDBACK_GIVE, FEEDBACK_PROMPT, FEEDBACK_STAR};
 pub use forward::{FORWARD_BODY, FORWARD_RESET_SSH, FORWARD_SUBMIT, RESERVED_NOTE};
+pub use keep::{
+    DRIVE_MOUNT_CONFIRM, DRIVE_MOUNT_OPEN_AGAIN, KEEP_BODY, KEEP_DRIVE_TOGGLE, KEEP_DRIVE_WARNING,
+    KEEP_HF_TOGGLE, KEEP_LOCAL_TOGGLE, KEEP_SUBMIT, VM_UPLOAD_SUBMIT,
+};
 pub use new_session::{
     NEW_SESSION_CANCEL_RUN, NEW_SESSION_FORM, NEW_SESSION_LIMIT, NEW_SESSION_START,
 };
@@ -36,7 +41,7 @@ pub use session_controls::{
     REMOTE_SSH_BODY, REMOTE_SSH_RESET_SSH, REMOTE_SSH_TEMP_COMMAND, REMOTE_SSH_WRITE_TEMP,
     RESTART_KERNEL_CONFIRM,
 };
-pub use stop::{CANCEL_AUTO_STOP_CONFIRM, STOP_CONFIRM};
+pub use stop::{CANCEL_AUTO_STOP_CONFIRM, STOP_CONFIRM, STOP_FORCE_CONFIRM, STOP_KEEP_TOGGLE};
 pub use update::{
     ProgressLine, UPDATE_CANCEL, UPDATE_CONFIRM, UPDATE_OPEN_PAGE, UPDATE_QUIT, UPDATE_RETRY,
     progress_line, unsupported_reason,
@@ -61,6 +66,9 @@ pub fn render(
         Overlay::RemoteSsh(prompt) => session_controls::remote_ssh(prompt, state, handle, cx),
         Overlay::NewSession => new_session::render(state, handle, inputs, cx)?,
         Overlay::Forward(form) => forward::render(form, state, handle, inputs, cx),
+        Overlay::KeepPlan(dialog) => keep::keep_plan(dialog, state, handle, inputs, cx),
+        Overlay::DriveMount(dialog) => keep::drive_mount(dialog, state, handle, cx),
+        Overlay::VmUpload(dialog) => keep::vm_upload(dialog, state, handle, inputs, cx),
         Overlay::InstallPlugin(prompt) => plugin::install(prompt, state, handle, cx),
         Overlay::RemovePlugin(prompt) => plugin::remove(prompt, handle, cx),
         Overlay::Quit(prompt) => quit::render(prompt, state, handle, cx),

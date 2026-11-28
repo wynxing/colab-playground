@@ -18,6 +18,7 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::guard::Decision;
 use crate::hf::HfModel;
 use crate::host::{Line, ProbeReport};
+use crate::keep::{KeepPlan, KeepSyncReport, KeepTargetId};
 use crate::plugins::{InputValue, PluginInfo, PluginPreview, ResolvedEndpoint};
 use crate::provision::{ProvisionEvent, ProvisionOutcome, ProvisionSpec};
 use crate::quant::GgufListing;
@@ -59,6 +60,21 @@ pub trait LoginFlow: Send {
     fn submit_code(self: Box<Self>, code: &str, cancel: &CancelToken) -> Result<Account>;
     /// Aborts and restores the previous credential.
     fn cancel(self: Box<Self>) -> Result<()>;
+}
+
+/// Interactive `colab drivemount` consent flow. Dropping it without confirming
+/// kills the mount process and leaves Drive unmounted.
+pub trait DriveMountFlow: Send {
+    fn auth_url(&self) -> &str;
+    fn confirm(self: Box<Self>, cancel: &CancelToken) -> Result<()>;
+    fn cancel(self: Box<Self>) -> Result<()>;
+}
+
+pub enum DriveMountStart {
+    /// Already authorized and mounted without needing a consent step.
+    Mounted,
+    /// User must open `auth_url()` in a browser, approve, and call `confirm()`.
+    NeedsConsent(Box<dyn DriveMountFlow>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,12 +138,25 @@ pub struct Extension {
 pub struct StopOptions {
     /// Why it is stopped (recorded in the ledger).
     pub reason: StopReason,
+    /// Run the session's Keep Plan before stopping, if one is configured.
+    #[serde(default)]
+    pub save_keep: bool,
+    /// Continue stopping the runtime even if the pre-stop Keep Plan sync fails.
+    #[serde(default)]
+    pub force_on_keep_error: bool,
+    /// Optional timeout for the pre-stop Keep Plan sync (used by `guard_poll` so
+    /// cost protection cannot be stalled by a slow upload or download).
+    #[serde(default, with = "crate::clock::serde_dur::option")]
+    pub keep_timeout: Option<Duration>,
 }
 
 impl Default for StopOptions {
     fn default() -> Self {
         StopOptions {
             reason: StopReason::User,
+            save_keep: false,
+            force_on_keep_error: false,
+            keep_timeout: None,
         }
     }
 }
@@ -209,6 +238,9 @@ pub struct PluginRunSpec {
     /// The script is a server: it keeps running after it reports ready, and
     /// the app keeps reading its status.
     pub keep_alive: bool,
+    /// Optional Keep Plan to attach to the session for this run.
+    #[serde(default)]
+    pub keep_plan: Option<KeepPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,6 +285,13 @@ pub struct VmFile {
     pub path: String,
     /// Its size in bytes.
     pub size: u64,
+}
+
+/// An entry in a VM directory (`colab ls`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VmEntry {
+    pub name: String,
+    pub is_dir: bool,
 }
 
 /// Copyable Remote-SSH details for connecting VS Code, Cursor, or Zed without
@@ -333,6 +372,13 @@ pub trait Backend: Send + Sync {
     ) -> Result<()>;
     /// Lists the files under a path on the VM.
     fn vm_ls(&self, target: &RuntimeRef, path: &str, cancel: &CancelToken) -> Result<Vec<VmFile>>;
+    /// Lists immediate entries of a VM directory using `colab ls`.
+    fn vm_list_dir(
+        &self,
+        target: &RuntimeRef,
+        path: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<VmEntry>>;
     /// Downloads a file from the VM to this computer.
     fn vm_download(
         &self,
@@ -341,6 +387,36 @@ pub trait Backend: Send + Sync {
         local: &str,
         cancel: &CancelToken,
     ) -> Result<()>;
+    /// Uploads a local file to the VM using `colab upload`.
+    fn vm_upload(
+        &self,
+        target: &RuntimeRef,
+        local: &str,
+        remote: &str,
+        cancel: &CancelToken,
+    ) -> Result<()>;
+    /// Sets or updates a session's Keep Plan and refreshes VM watchdog wind-down hooks.
+    fn set_keep_plan(
+        &self,
+        target: &RuntimeRef,
+        plan: Option<KeepPlan>,
+        cancel: &CancelToken,
+    ) -> Result<()>;
+    /// Runs the session's Keep Plan for `targets` (all enabled targets if `None`).
+    /// Records the report on the session and returns `Err` if any target failed.
+    fn sync_keep(
+        &self,
+        target: &RuntimeRef,
+        targets: Option<Vec<KeepTargetId>>,
+        cancel: &CancelToken,
+    ) -> Result<KeepSyncReport>;
+    /// Starts `colab drivemount` for the active session, returning a consent flow if needed.
+    fn begin_drive_mount(
+        &self,
+        target: &RuntimeRef,
+        mount_path: &str,
+        cancel: &CancelToken,
+    ) -> Result<DriveMountStart>;
     /// Moves the auto-stop `by` later than where the session has it (active
     /// account only). A session without an auto-stop, or with one that has
     /// passed, gets one `by` from now, so the stop never moves earlier.
@@ -546,6 +622,7 @@ pub fn run_template(info: &PluginInfo, defaults: &Defaults, taken: &[String]) ->
         target: RunTarget::Provision(spec),
         stop_on_failure: true,
         keep_alive: m.run.keep_alive,
+        keep_plan: None,
     }
 }
 

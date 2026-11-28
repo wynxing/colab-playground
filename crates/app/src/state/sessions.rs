@@ -65,6 +65,9 @@ pub struct StopPrompt {
     pub target: RuntimeRef,
     pub label: String,
     pub email: Option<String>,
+    pub has_keep_plan: bool,
+    pub save_keep: bool,
+    pub keep_failed: bool,
     pub error: Option<Error>,
 }
 
@@ -234,13 +237,30 @@ impl AppState {
         let Some(runtime) = self.runtime(&target) else {
             return;
         };
+        let has_keep_plan = runtime
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .is_some_and(|p| p.has_enabled_target() && !p.paths.is_empty());
         self.overlay = Some(Overlay::Stop(StopPrompt {
             label: runtime_label(runtime),
             email: runtime.account_email.clone(),
+            has_keep_plan,
+            save_keep: has_keep_plan,
+            keep_failed: false,
             target,
             error: None,
         }));
         cx.notify();
+    }
+
+    pub fn toggle_stop_save_keep(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(Overlay::Stop(prompt)) = &mut self.overlay {
+            prompt.save_keep = on;
+            prompt.keep_failed = false;
+            prompt.error = None;
+            cx.notify();
+        }
     }
 
     pub fn confirm_stop(&mut self, cx: &mut Context<Self>) {
@@ -248,11 +268,45 @@ impl AppState {
             return;
         };
         let prompt = prompt.clone();
-        self.stop_runtime(prompt.target.clone(), cx);
+        self.stop_runtime_with(
+            prompt.target,
+            StopOptions {
+                save_keep: prompt.save_keep,
+                force_on_keep_error: false,
+                ..StopOptions::default()
+            },
+            cx,
+        );
+    }
+
+    /// Stops `target` without saving Keep Plan outputs after a pre-stop Keep Plan failure.
+    pub fn force_stop(&mut self, cx: &mut Context<Self>) {
+        let Some(Overlay::Stop(prompt)) = &self.overlay else {
+            return;
+        };
+        let target = prompt.target.clone();
+        self.stop_runtime_with(
+            target,
+            StopOptions {
+                save_keep: false,
+                force_on_keep_error: true,
+                ..StopOptions::default()
+            },
+            cx,
+        );
     }
 
     /// Stops `target` now (the caller has confirmed).
     pub(crate) fn stop_runtime(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        self.stop_runtime_with(target, StopOptions::default(), cx);
+    }
+
+    pub(crate) fn stop_runtime_with(
+        &mut self,
+        target: RuntimeRef,
+        options: StopOptions,
+        cx: &mut Context<Self>,
+    ) {
         let label = self
             .runtime(&target)
             .map(runtime_label)
@@ -260,12 +314,13 @@ impl AppState {
         let email = self
             .runtime(&target)
             .and_then(|runtime| runtime.account_email.clone());
+        let save_keep = options.save_keep;
         let work_target = target.clone();
         self.run_backend(
             Op::Stop(key_of(&target)),
             cx,
             move |backend, cancel| {
-                backend.stop_session(&work_target, StopOptions::default(), cancel)?;
+                backend.stop_session(&work_target, options, cancel)?;
                 Ok(backend.now())
             },
             move |state, result, cx| {
@@ -292,6 +347,9 @@ impl AppState {
                         log::warn!("sessions: stopping {label} failed: {error}");
                         if prompt_open && let Some(Overlay::Stop(prompt)) = &mut state.overlay {
                             prompt.error = Some(error);
+                            if save_keep {
+                                prompt.keep_failed = true;
+                            }
                         } else {
                             state.toast_error(&error, cx);
                         }
@@ -355,6 +413,9 @@ impl AppState {
         self.overlay = Some(Overlay::CancelAutoStop(StopPrompt {
             label: runtime_label(runtime),
             email: runtime.account_email.clone(),
+            has_keep_plan: false,
+            save_keep: false,
+            keep_failed: false,
             target,
             error: None,
         }));

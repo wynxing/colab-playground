@@ -817,6 +817,7 @@ impl AppState {
             existing_account: None,
             target_lost: None,
             stop_on_failure: template.stop_on_failure,
+            keep_plan: template.keep_plan,
             hf: super::HfLookup::default(),
             error: None,
         });

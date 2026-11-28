@@ -31,6 +31,7 @@ use crate::{
 };
 
 pub const RUN_START: &str = "run-start";
+pub const RUN_KEEP_CONFIGURE: &str = "run-keep-configure";
 /// Selector of a Hugging Face search result: `hf-result <repo>`.
 pub fn hf_result_selector(repo: &str) -> String {
     format!("hf-result {repo}")
@@ -83,6 +84,7 @@ pub(super) fn render(
         page = page.child(InlineMessage::new(Severity::Info, text));
     }
     page = page.child(target_card(form, state, handle, inputs, cx));
+    page = page.child(run_keep_card(form, info, handle, cx));
     if let Some(error) = &form.error {
         page = page.child(error_view::alert("run-form", None, error, None, handle, cx));
     }
@@ -556,4 +558,63 @@ fn target_card(
         card = card.child(Caption::new(tr(cx, keys::RUN_EXISTING_NOTE)));
     }
     card.w_full().into_any_element()
+}
+
+fn run_keep_card(
+    form: &RunForm,
+    info: &PluginInfo,
+    handle: &Entity<AppState>,
+    cx: &App,
+) -> AnyElement {
+    let summary = match &form.keep_plan {
+        Some(plan) if !plan.is_empty() => {
+            let mut targets = Vec::new();
+            if plan.local.is_some() {
+                targets.push(tr(cx, keys::KEEP_TARGET_LOCAL).to_string());
+            }
+            if plan.hf.is_some() {
+                targets.push(tr(cx, keys::KEEP_TARGET_HF).to_string());
+            }
+            if plan.drive.as_ref().is_some_and(|d| d.consented) {
+                targets.push(tr(cx, keys::KEEP_TARGET_DRIVE).to_string());
+            }
+            let targets_joined = if targets.is_empty() {
+                "—".to_owned()
+            } else {
+                targets.join(", ")
+            };
+            let count = plan.paths.len().to_string();
+            Caption::new(tr_args(
+                cx,
+                keys::KEEP_CARD_SUMMARY,
+                &[("paths", &count), ("targets", &targets_joined)],
+            ))
+        }
+        _ if !info.manifest.keep.is_empty() => {
+            let count = info.manifest.keep.len().to_string();
+            Caption::new(tr_args(
+                cx,
+                keys::KEEP_CARD_SUMMARY,
+                &[("paths", &count), ("targets", "—")],
+            ))
+        }
+        _ => Caption::new(tr(cx, keys::KEEP_CARD_NONE)),
+    };
+    let configure = handle.clone();
+    Card::new()
+        .header(CardHeader::new(tr(cx, keys::KEEP_TITLE)).description(tr(cx, keys::KEEP_SUBTITLE)))
+        .child(summary)
+        .child(
+            div().flex().child(tagged(
+                RUN_KEEP_CONFIGURE,
+                Button::new(RUN_KEEP_CONFIGURE, tr(cx, keys::KEEP_CONFIGURE_ACTION))
+                    .variant(ButtonVariant::Ghost)
+                    .icon(IconName::Settings)
+                    .on_click(move |_, _, cx| {
+                        configure.update(cx, |state, cx| state.open_run_keep_plan(cx))
+                    }),
+            )),
+        )
+        .w_full()
+        .into_any_element()
 }

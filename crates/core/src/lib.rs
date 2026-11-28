@@ -14,6 +14,7 @@ pub mod hf;
 pub mod host;
 pub mod hostfs;
 pub mod http;
+pub mod keep;
 pub mod mcp;
 pub mod mock;
 pub mod paths;

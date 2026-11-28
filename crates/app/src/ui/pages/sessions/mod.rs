@@ -28,9 +28,10 @@ use crate::{
 };
 
 pub use card::{
-    cancel_auto_stop_selector, extend_selector, forward_selector, ide_ssh_selector,
-    open_browser_selector, reset_ssh_selector, restart_kernel_selector, runtime_selector,
-    set_auto_stop_selector, stop_selector, switch_selector,
+    cancel_auto_stop_selector, drive_mount_selector, extend_selector, forward_selector,
+    ide_ssh_selector, keep_selector, keep_summary_selector, open_browser_selector,
+    reset_ssh_selector, restart_kernel_selector, runtime_selector, set_auto_stop_selector,
+    stop_selector, switch_selector, sync_keep_selector, upload_selector,
 };
 
 pub const NEW_SESSION_SELECTOR: &str = "sessions-new";

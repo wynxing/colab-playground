@@ -48,6 +48,13 @@ pub const ENV_LOG_OFFSET: &str = "CPG_LOG_OFFSET";
 /// from the CLI's local history of executed cells).
 pub const ENV_SECRET_KEYS: &str = "CPG_SECRET_KEYS";
 
+pub const ENV_KEEP_PATHS: &str = "CPG_KEEP_PATHS";
+pub const ENV_KEEP_ARCHIVE: &str = "CPG_KEEP_ARCHIVE";
+pub const ENV_KEEP_REPO: &str = "CPG_KEEP_REPO";
+pub const ENV_KEEP_SUBPATH: &str = "CPG_KEEP_SUBPATH";
+pub const ENV_KEEP_MOUNT: &str = "CPG_KEEP_MOUNT";
+pub const ENV_KEEP_DRIVE_DEST: &str = "CPG_KEEP_DRIVE_DEST";
+
 pub fn run_dir(run_id: &str) -> String {
     format!("{VM_BASE}/runs/{run_id}")
 }
@@ -215,6 +222,254 @@ pub fn parse_vm_files(value: &serde_json::Value) -> Vec<crate::backend::VmFile> 
         .unwrap_or_default()
 }
 
+/// Archives existing files under `CPG_KEEP_PATHS` into `CPG_KEEP_ARCHIVE` (`.tar.gz`).
+pub fn keep_archive_snippet() -> String {
+    format!(
+        r#"import json, os, tarfile
+_paths = json.loads(os.environ.pop("{ENV_KEEP_PATHS}", "[]"))
+_out = os.environ.pop("{ENV_KEEP_ARCHIVE}")
+os.makedirs(os.path.dirname(_out), exist_ok=True)
+_tmp = _out + ".tmp"
+_files = 0
+_bytes = 0
+_seen = set()
+with tarfile.open(_tmp, "w:gz") as _tar:
+    for _p in _paths:
+        if not os.path.exists(_p):
+            continue
+        if os.path.isfile(_p):
+            _arc = _p.lstrip("/") or os.path.basename(_p)
+            if _p not in _seen:
+                _seen.add(_p)
+                _tar.add(_p, arcname=_arc, recursive=False)
+                _files += 1
+                try:
+                    _bytes += os.path.getsize(_p)
+                except OSError:
+                    pass
+        else:
+            for _root, _dirs, _names in os.walk(_p):
+                for _name in sorted(_names):
+                    _full = os.path.join(_root, _name)
+                    if os.path.isfile(_full) and _full not in _seen:
+                        _seen.add(_full)
+                        _arc = _full.lstrip("/") or _name
+                        _tar.add(_full, arcname=_arc, recursive=False)
+                        _files += 1
+                        try:
+                            _bytes += os.path.getsize(_full)
+                        except OSError:
+                            pass
+if _files == 0:
+    try:
+        os.remove(_tmp)
+    except OSError:
+        pass
+    print("__CPG_RESULT__ " + json.dumps({{"empty": True, "files": 0, "bytes": 0}}))
+else:
+    os.replace(_tmp, _out)
+    print("__CPG_RESULT__ " + json.dumps({{"empty": False, "archive": _out, "files": _files, "bytes": os.path.getsize(_out)}}))
+"#
+    )
+}
+
+/// Removes a temporary Keep Plan archive from the VM after download.
+pub fn keep_remove_snippet() -> String {
+    format!(
+        r#"import json, os
+_p = os.environ.pop("{ENV_KEEP_ARCHIVE}", "")
+_removed = False
+if _p:
+    try:
+        os.remove(_p)
+        _removed = True
+    except OSError:
+        pass
+print("__CPG_RESULT__ " + json.dumps({{"removed": _removed}}))
+"#
+    )
+}
+
+/// Uploads `CPG_KEEP_PATHS` to `CPG_KEEP_REPO` using `HF_TOKEN` from memory only.
+pub fn keep_hf_upload_snippet() -> String {
+    format!(
+        r#"import json, os, shutil, subprocess, tempfile
+_paths = json.loads(os.environ.pop("{ENV_KEEP_PATHS}", "[]"))
+_repo = os.environ.pop("{ENV_KEEP_REPO}", "")
+_sub = os.environ.pop("{ENV_KEEP_SUBPATH}", "").strip("/")
+_tok = os.environ.pop("HF_TOKEN", "")
+def _scrub(msg):
+    return msg.replace(_tok, "***") if _tok else msg
+_files = 0
+_bytes = 0
+_items = []
+for _p in _paths:
+    if not os.path.exists(_p):
+        continue
+    if os.path.isfile(_p):
+        _items.append((_p, os.path.basename(_p)))
+        _files += 1
+        try:
+            _bytes += os.path.getsize(_p)
+        except OSError:
+            pass
+    else:
+        for _root, _dirs, _names in os.walk(_p):
+            for _name in sorted(_names):
+                _full = os.path.join(_root, _name)
+                if os.path.isfile(_full):
+                    _rel = os.path.relpath(_full, _p)
+                    _base = os.path.basename(_p.rstrip("/")) or "keep"
+                    _items.append((_full, os.path.join(_base, _rel)))
+                    _files += 1
+                    try:
+                        _bytes += os.path.getsize(_full)
+                    except OSError:
+                        pass
+if not _tok:
+    print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": "HF_TOKEN is missing"}}))
+elif _files == 0:
+    print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": "no files found at keep paths"}}))
+else:
+    _stage = tempfile.mkdtemp(prefix="cpg-hf-")
+    try:
+        _err = None
+        for _src, _rel in _items:
+            _dst = os.path.join(_stage, _rel)
+            os.makedirs(os.path.dirname(_dst), exist_ok=True)
+            shutil.copy2(_src, _dst)
+        try:
+            from huggingface_hub import HfApi
+            HfApi(token=_tok).upload_folder(
+                folder_path=_stage,
+                repo_id=_repo,
+                path_in_repo=_sub or None,
+                commit_message="colab-playground keep plan sync",
+            )
+        except ImportError:
+            _cmd = ["hf", "upload", _repo, _stage] + ([_sub] if _sub else [])
+            _env = dict(os.environ)
+            _env["HF_TOKEN"] = _tok
+            _r = subprocess.run(_cmd, env=_env, capture_output=True, text=True, timeout=600)
+            if _r.returncode != 0:
+                _err = _scrub((_r.stderr or _r.stdout or "hf upload failed").strip())
+        if _err:
+            print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": _err}}))
+        else:
+            print("__CPG_RESULT__ " + json.dumps({{"ok": True, "files": _files, "bytes": _bytes}}))
+    except Exception as _e:
+        print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": _scrub(f"{{type(_e).__name__}}: {{_e}}")}}))
+    finally:
+        shutil.rmtree(_stage, ignore_errors=True)
+"#
+    )
+}
+
+/// Copies `CPG_KEEP_PATHS` into a verified Google Drive mount at `CPG_KEEP_MOUNT`.
+pub fn keep_drive_copy_snippet() -> String {
+    format!(
+        r#"import json, os, shutil
+_paths = json.loads(os.environ.pop("{ENV_KEEP_PATHS}", "[]"))
+_mount = os.environ.pop("{ENV_KEEP_MOUNT}", "/content/drive")
+_dest = os.environ.pop("{ENV_KEEP_DRIVE_DEST}", "MyDrive/colab-playground").strip("/")
+_files = 0
+_bytes = 0
+if not os.path.ismount(_mount):
+    print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": "Google Drive is not mounted at " + _mount}}))
+else:
+    _target = os.path.join(_mount, _dest)
+    try:
+        for _p in _paths:
+            if not os.path.exists(_p):
+                continue
+            if os.path.isfile(_p):
+                _dst = os.path.join(_target, os.path.basename(_p))
+                os.makedirs(os.path.dirname(_dst), exist_ok=True)
+                shutil.copy2(_p, _dst)
+                _files += 1
+                _bytes += os.path.getsize(_dst)
+            else:
+                _base = os.path.basename(_p.rstrip("/")) or "keep"
+                for _root, _dirs, _names in os.walk(_p):
+                    for _name in sorted(_names):
+                        _full = os.path.join(_root, _name)
+                        if os.path.isfile(_full):
+                            _rel = os.path.relpath(_full, _p)
+                            _dst = os.path.join(_target, _base, _rel)
+                            os.makedirs(os.path.dirname(_dst), exist_ok=True)
+                            shutil.copy2(_full, _dst)
+                            _files += 1
+                            _bytes += os.path.getsize(_dst)
+        if _files == 0:
+            print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": "no files found at keep paths"}}))
+        else:
+            print("__CPG_RESULT__ " + json.dumps({{"ok": True, "files": _files, "bytes": _bytes, "destination": _target}}))
+    except Exception as _e:
+        print("__CPG_RESULT__ " + json.dumps({{"ok": False, "files": 0, "bytes": 0, "error": f"{{type(_e).__name__}}: {{_e}}"}}))
+"#
+    )
+}
+
+/// Checks whether `CPG_KEEP_MOUNT` is currently an active mount point on the VM.
+pub fn keep_check_drive_mount_snippet() -> String {
+    format!(
+        r#"import json, os
+_mount = os.environ.pop("{ENV_KEEP_MOUNT}", "/content/drive")
+print("__CPG_RESULT__ " + json.dumps({{"mounted": os.path.ismount(_mount), "path": _mount}}))
+"#
+    )
+}
+
+/// Builds VM watchdog wind-down and periodic hooks for the VM-side targets of `plan`.
+pub fn watchdog_hooks_for_keep_plan(
+    plan: &crate::keep::KeepPlan,
+    session: &str,
+    hf_token: Option<&str>,
+) -> Vec<crate::watchdog::WatchdogHook> {
+    if plan.paths.is_empty() {
+        return Vec::new();
+    }
+    let paths_json = serde_json::to_string(&plan.paths).unwrap_or_else(|_| "[]".into());
+    let mut hooks = Vec::new();
+    if let Some(hf) = &plan.hf
+        && let Some(token) = hf_token.filter(|t| !t.trim().is_empty())
+    {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(ENV_KEEP_PATHS.into(), paths_json.clone());
+        env.insert(ENV_KEEP_REPO.into(), hf.repo.clone());
+        env.insert(
+            ENV_KEEP_SUBPATH.into(),
+            hf.path_in_repo.clone().unwrap_or_default(),
+        );
+        env.insert("HF_TOKEN".into(), token.to_owned());
+        hooks.push(crate::watchdog::WatchdogHook {
+            argv: vec!["python3".into(), "-c".into(), keep_hf_upload_snippet()],
+            env,
+            timeout_s: 240,
+            interval_s: hf.interval_minutes.map(|m| u64::from(m) * 60),
+        });
+    }
+    if let Some(drive) = &plan.drive
+        && drive.consented
+        && drive.mounted
+    {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert(ENV_KEEP_PATHS.into(), paths_json);
+        env.insert(ENV_KEEP_MOUNT.into(), drive.mount_path.clone());
+        env.insert(
+            ENV_KEEP_DRIVE_DEST.into(),
+            format!("{}/{}", drive.dest_subpath.trim_end_matches('/'), session),
+        );
+        hooks.push(crate::watchdog::WatchdogHook {
+            argv: vec!["python3".into(), "-c".into(), keep_drive_copy_snippet()],
+            env,
+            timeout_s: 240,
+            interval_s: None,
+        });
+    }
+    hooks
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunState {
@@ -379,5 +634,42 @@ mod tests {
         let snippet = vm_ls_snippet("/content/ComfyUI/output");
         assert!(snippet.contains("/content/ComfyUI/output"));
         assert!(snippet.contains("os.walk"));
+    }
+
+    #[test]
+    fn keep_snippets_and_hooks_respect_secrets_and_drive_consent() {
+        use crate::keep::{DriveKeepTarget, HfKeepTarget, KeepPlan};
+
+        assert!(keep_archive_snippet().contains("tarfile"));
+        let hf = keep_hf_upload_snippet();
+        assert!(hf.contains("os.environ.pop(\"HF_TOKEN\""));
+        assert!(hf.contains("_scrub"));
+        assert!(keep_drive_copy_snippet().contains("os.path.ismount"));
+        assert!(keep_check_drive_mount_snippet().contains("os.path.ismount"));
+
+        let mut plan = KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: None,
+            hf: Some(HfKeepTarget {
+                repo: "alice/ckpt".into(),
+                path_in_repo: Some("run1".into()),
+                interval_minutes: Some(15),
+            }),
+            drive: Some(DriveKeepTarget {
+                mount_path: "/content/drive".into(),
+                dest_subpath: "MyDrive/out".into(),
+                consented: false,
+                mounted: true,
+            }),
+        };
+        let hooks = watchdog_hooks_for_keep_plan(&plan, "sess-1", Some("hf_secret"));
+        assert_eq!(hooks.len(), 1, "unconsented Drive must never become a hook");
+        assert_eq!(hooks[0].interval_s, Some(900));
+        assert_eq!(hooks[0].env.get("HF_TOKEN").map(String::as_str), Some("hf_secret"));
+
+        plan.drive.as_mut().unwrap().consented = true;
+        let hooks = watchdog_hooks_for_keep_plan(&plan, "sess-1", Some("hf_secret"));
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[1].interval_s, None);
     }
 }

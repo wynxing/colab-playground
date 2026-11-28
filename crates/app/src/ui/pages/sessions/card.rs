@@ -55,6 +55,21 @@ pub fn set_auto_stop_selector(label: &str) -> String {
 pub fn switch_selector(label: &str) -> String {
     format!("runtime-switch {label}")
 }
+pub fn keep_selector(label: &str) -> String {
+    format!("runtime-keep {label}")
+}
+pub fn sync_keep_selector(label: &str) -> String {
+    format!("runtime-keep-sync {label}")
+}
+pub fn drive_mount_selector(label: &str) -> String {
+    format!("runtime-drive-mount {label}")
+}
+pub fn upload_selector(label: &str) -> String {
+    format!("runtime-upload {label}")
+}
+pub fn keep_summary_selector(label: &str) -> String {
+    format!("runtime-keep-summary {label}")
+}
 pub fn open_browser_selector(label: &str) -> String {
     format!("runtime-open-browser {label}")
 }
@@ -281,6 +296,67 @@ pub(super) fn render(
         }
         card = card.child(forwards);
     }
+    if let Some(tracked) = &runtime.tracked
+        && let Some(plan) = tracked.keep_plan.as_ref().filter(|p| !p.is_empty())
+    {
+        let mut target_names = Vec::new();
+        if plan.local.is_some() {
+            target_names.push(tr(cx, keys::KEEP_TARGET_LOCAL).to_string());
+        }
+        if plan.hf.is_some() {
+            target_names.push(tr(cx, keys::KEEP_TARGET_HF).to_string());
+        }
+        if let Some(drive) = &plan.drive
+            && drive.consented
+        {
+            target_names.push(tr(cx, keys::KEEP_TARGET_DRIVE).to_string());
+        }
+        let targets_joined = if target_names.is_empty() {
+            "—".to_owned()
+        } else {
+            target_names.join(", ")
+        };
+        let path_count = plan.paths.len().to_string();
+        let mut summary_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(Caption::new(tr_args(
+                cx,
+                keys::KEEP_CARD_SUMMARY,
+                &[("paths", &path_count), ("targets", &targets_joined)],
+            )));
+        if let Some(drive) = &plan.drive
+            && drive.consented
+        {
+            summary_row = summary_row.child(if drive.mounted {
+                Badge::new(tr(cx, keys::KEEP_DRIVE_MOUNTED_BADGE)).tone(Tone::Success)
+            } else {
+                Badge::new(tr(cx, keys::KEEP_DRIVE_UNMOUNTED_BADGE)).tone(Tone::Warning)
+            });
+        }
+        let mut block = div().flex().flex_col().gap_1().child(summary_row);
+        if let Some(report) = &tracked.last_keep_sync {
+            let line = if let Some(err) = report.first_error() {
+                Caption::new(tr_args(
+                    cx,
+                    keys::KEEP_CARD_LAST_ERR,
+                    &[("why", &errors::explain(err, false, cx).message)],
+                ))
+            } else {
+                let files: u64 = report.results.iter().map(|(_, r)| r.files).sum();
+                let files_str = files.to_string();
+                Caption::new(tr_args(
+                    cx,
+                    keys::KEEP_CARD_LAST_OK,
+                    &[("files", &files_str)],
+                ))
+            };
+            block = block.child(line);
+        }
+        card = card.child(tagged(keep_summary_selector(&label), block));
+    }
     card = card.child(actions(runtime, &label, stopping, state, handle, cx));
     tagged(runtime_selector(&label), card)
         .w_full()
@@ -454,7 +530,7 @@ fn actions(
             state.open_forward_dialog(forward_target.clone(), cx)
         })
     });
-    row.child(tagged(
+    let mut row = row.child(tagged(
         open_browser_selector(label),
         named_action(named, format!("open-browser-wrap-{key}"), open_browser, cx),
     ))
@@ -474,8 +550,85 @@ fn actions(
     .child(tagged(
         forward_selector(label),
         named_action(named, format!("forward-wrap-{key}"), forward, cx),
-    ))
-    .into_any_element()
+    ));
+    if named {
+        let (upload_handle, upload_target) = (handle.clone(), target.clone());
+        let uploading = state.is_uploading(&target);
+        row = row.child(tagged(
+            upload_selector(label),
+            Button::new(
+                SharedString::from(format!("upload-{key}")),
+                tr(cx, keys::VM_UPLOAD_ACTION),
+            )
+            .variant(ButtonVariant::Ghost)
+            .icon(IconName::Plus)
+            .size(ControlSize::Sm)
+            .loading(uploading)
+            .on_click(move |_, _, cx| {
+                upload_handle.update(cx, |state, cx| {
+                    state.open_upload_dialog(upload_target.clone(), cx)
+                })
+            }),
+        ));
+    }
+    if named && runtime.tracked.is_some() {
+        let (keep_handle, keep_target) = (handle.clone(), target.clone());
+        row = row.child(tagged(
+            keep_selector(label),
+            Button::new(
+                SharedString::from(format!("keep-{key}")),
+                tr(cx, keys::KEEP_CONFIGURE),
+            )
+            .variant(ButtonVariant::Ghost)
+            .icon(IconName::Settings)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                keep_handle.update(cx, |state, cx| state.open_keep_plan(keep_target.clone(), cx))
+            }),
+        ));
+        let plan = runtime.tracked.as_ref().and_then(|t| t.keep_plan.as_ref());
+        if plan.is_some_and(|p| p.has_enabled_target() && !p.paths.is_empty()) {
+            let (sync_handle, sync_target) = (handle.clone(), target.clone());
+            let syncing = state.is_syncing_keep(&target);
+            row = row.child(tagged(
+                sync_keep_selector(label),
+                Button::new(
+                    SharedString::from(format!("keep-sync-{key}")),
+                    tr(cx, keys::KEEP_SYNC_NOW),
+                )
+                .size(ControlSize::Sm)
+                .icon(IconName::Download)
+                .loading(syncing)
+                .disabled(syncing)
+                .on_click(move |_, _, cx| {
+                    sync_handle.update(cx, |state, cx| state.sync_keep(sync_target.clone(), cx))
+                }),
+            ));
+        }
+        if plan
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.consented && !d.mounted)
+        {
+            let (drive_handle, drive_target) = (handle.clone(), target.clone());
+            let mounting = state.is_mounting_drive(&target);
+            row = row.child(tagged(
+                drive_mount_selector(label),
+                Button::new(
+                    SharedString::from(format!("drive-mount-{key}")),
+                    tr(cx, keys::KEEP_DRIVE_MOUNT_ACTION),
+                )
+                .size(ControlSize::Sm)
+                .loading(mounting)
+                .disabled(mounting)
+                .on_click(move |_, _, cx| {
+                    drive_handle.update(cx, |state, cx| {
+                        state.begin_drive_mount(drive_target.clone(), None, cx)
+                    })
+                }),
+            ));
+        }
+    }
+    row.into_any_element()
 }
 
 fn named_action(named: bool, wrap_id: String, button: Button, cx: &App) -> AnyElement {

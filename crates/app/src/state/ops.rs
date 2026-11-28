@@ -84,6 +84,14 @@ pub enum Op {
     HfFiles(u64),
     /// Saving what a run produced on the VM (keyed by the path).
     DownloadOutputs(u64),
+    /// Updating the Keep Plan or watchdog hooks for a session (keyed by runtime).
+    KeepPlan(u64),
+    /// Running a session's Keep Plan now (keyed by runtime).
+    KeepSync(u64),
+    /// Mounting Google Drive on a runtime (keyed by runtime).
+    DriveMount(u64),
+    /// Uploading a local file to a runtime (keyed by runtime).
+    VmUpload(u64),
     /// Stopping every runtime before quitting.
     StopAll,
     /// Checking GitHub for a newer release.

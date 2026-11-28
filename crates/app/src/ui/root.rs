@@ -27,6 +27,7 @@ pub const PAGE_SELECTOR: &str = "page-area";
 /// Draw order of the title strip: above Ely's dialog backdrops (priority 0).
 const TITLE_STRIP_PRIORITY: usize = 1;
 const PORT_DIGITS: usize = u16::MAX.ilog10() as usize + 1;
+const INTERVAL_DIGITS: usize = 4;
 
 pub struct RootView {
     focus: FocusHandle,
@@ -131,6 +132,69 @@ impl RootView {
                 keys::HF_TOKEN_FIELD,
                 keys::HF_TOKEN_PLACEHOLDER,
                 true,
+                window,
+                cx,
+            ),
+            keep_paths: plain(
+                keys::KEEP_PATHS,
+                keys::KEEP_PATHS_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            keep_local_folder: plain(
+                keys::KEEP_LOCAL_FOLDER,
+                keys::KEEP_LOCAL_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            keep_hf_repo: plain(
+                keys::KEEP_HF_REPO,
+                keys::KEEP_HF_REPO_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            keep_hf_subpath: plain(
+                keys::KEEP_HF_SUBPATH,
+                keys::KEEP_HF_SUBPATH_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            keep_hf_interval: cx.new(|cx| {
+                TextInput::new(window, cx)
+                    .label_key(keys::KEEP_HF_INTERVAL)
+                    .placeholder_key(keys::KEEP_HF_INTERVAL_PLACEHOLDER)
+                    .filter(|c| c.is_ascii_digit())
+                    .max_len(INTERVAL_DIGITS)
+            }),
+            keep_drive_mount: plain(
+                keys::KEEP_DRIVE_MOUNT_PATH,
+                keys::KEEP_DRIVE_MOUNT_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            keep_drive_subpath: plain(
+                keys::KEEP_DRIVE_SUBPATH,
+                keys::KEEP_DRIVE_SUBPATH_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            upload_local: plain(
+                keys::VM_UPLOAD_LOCAL,
+                keys::VM_UPLOAD_LOCAL_PLACEHOLDER,
+                false,
+                window,
+                cx,
+            ),
+            upload_remote: plain(
+                keys::VM_UPLOAD_REMOTE,
+                keys::VM_UPLOAD_REMOTE_PLACEHOLDER,
+                false,
                 window,
                 cx,
             ),

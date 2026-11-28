@@ -80,6 +80,29 @@ pub enum CliCommand {
         /// Where the file lands on this computer.
         local: String,
     },
+    /// `colab ls -s NAME PATH`.
+    Ls {
+        /// Session name.
+        name: String,
+        /// Directory or file path on the VM.
+        path: String,
+    },
+    /// `colab upload -s NAME LOCAL REMOTE`.
+    Upload {
+        /// Session name.
+        name: String,
+        /// Local file path on the host.
+        local: String,
+        /// Target path on the VM.
+        remote: String,
+    },
+    /// `colab drivemount -s NAME PATH`.
+    DriveMount {
+        /// Session name.
+        name: String,
+        /// Mount path on the VM (e.g. `/content/drive`).
+        path: String,
+    },
     /// `colab version`.
     Version,
     /// `colab whoami` (triggers login when no credential exists).
@@ -175,6 +198,35 @@ pub fn build_argv(state_file: Option<&HostPath>, cmd: &CliCommand) -> Result<Vec
                 remote.clone(),
                 local.clone(),
             ]);
+        }
+        CliCommand::Ls { name, path } => {
+            validate_session_name(name)?;
+            if path.trim().is_empty() || path.contains('\0') {
+                return Err(Error::invalid("ls", "the path may not be empty"));
+            }
+            argv.extend(["ls".into(), "-s".into(), name.clone(), path.clone()]);
+        }
+        CliCommand::Upload {
+            name,
+            local,
+            remote,
+        } => {
+            validate_session_name(name)?;
+            if local.is_empty() || remote.is_empty() {
+                return Err(Error::invalid("upload", "the path may not be empty"));
+            }
+            argv.extend([
+                "upload".into(),
+                "-s".into(),
+                name.clone(),
+                local.clone(),
+                remote.clone(),
+            ]);
+        }
+        CliCommand::DriveMount { name, path } => {
+            validate_session_name(name)?;
+            crate::keep::validate_vm_path("drive_mount_path", path)?;
+            argv.extend(["drivemount".into(), "-s".into(), name.clone(), path.clone()]);
         }
     }
     Ok(argv)
@@ -273,6 +325,9 @@ fn describe(cmd: &CliCommand) -> String {
         CliCommand::RestartKernel { name } => format!("restart-kernel -s {name}"),
         CliCommand::SshReset { name } => format!("ssh --force --proxy-mode -s {name}"),
         CliCommand::Download { name, remote, .. } => format!("download -s {name} {remote} <here>"),
+        CliCommand::Ls { name, path } => format!("ls -s {name} {path}"),
+        CliCommand::Upload { name, remote, .. } => format!("upload -s {name} <here> {remote}"),
+        CliCommand::DriveMount { name, path } => format!("drivemount -s {name} {path}"),
         CliCommand::Exec {
             name,
             env,
@@ -289,6 +344,32 @@ fn describe(cmd: &CliCommand) -> String {
             )
         }
     }
+}
+
+/// Parses `colab ls` output (`name/` for directories, `name` for files).
+pub fn parse_ls(stdout: &str) -> Vec<crate::backend::VmEntry> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("[colab]")
+                && !line.starts_with("A new version of colab-cli")
+        })
+        .map(|line| {
+            if let Some(dir) = line.strip_suffix('/') {
+                crate::backend::VmEntry {
+                    name: dir.to_owned(),
+                    is_dir: true,
+                }
+            } else {
+                crate::backend::VmEntry {
+                    name: line.to_owned(),
+                    is_dir: false,
+                }
+            }
+        })
+        .collect()
 }
 
 /// Extracts the JSON value printed after [`RESULT_MARKER`] (last one wins).
@@ -420,6 +501,12 @@ pub fn classify_failure(out: &ScriptOutput) -> Error {
             || has("connect timeout="))
     {
         ErrorKind::Timeout
+    } else if has("Local file '") && has("' not found.")
+        || has("File or directory not found:")
+        || has("Upload failed:")
+        || has("Download failed:")
+    {
+        ErrorKind::Io
     } else {
         ErrorKind::Other
     };
@@ -708,6 +795,54 @@ impl Cli {
         Ok(())
     }
 
+    /// `colab ls -s NAME PATH`: lists entries in a VM directory.
+    pub fn ls(
+        &self,
+        state: &HostPath,
+        name: &str,
+        path: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<crate::backend::VmEntry>> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Ls {
+                name: name.to_owned(),
+                path: path.to_owned(),
+            },
+            120,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(parse_ls(&out.stdout))
+    }
+
+    /// `colab upload -s NAME LOCAL REMOTE`: sends a local file to the VM.
+    pub fn upload(
+        &self,
+        state: &HostPath,
+        name: &str,
+        local: &str,
+        remote: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Upload {
+                name: name.to_owned(),
+                local: local.to_owned(),
+                remote: remote.to_owned(),
+            },
+            900,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(())
+    }
+
     pub fn url(&self, state: &HostPath, name: &str, cancel: &CancelToken) -> Result<String> {
         let out = self.run_simple(
             Some(state),
@@ -787,7 +922,6 @@ impl Cli {
         }
         Err(classify_failure(&out))
     }
-
     pub fn version(&self, cancel: &CancelToken) -> Result<String> {
         let out = self.run_simple(None, &CliCommand::Version, 60, cancel)?;
         if !out.success() {
@@ -1172,7 +1306,7 @@ A new version of colab-cli is available
                 "[colab] Download failed: timed out waiting for user",
                 ""
             )),
-            ErrorKind::Other
+            ErrorKind::Io
         );
         assert_eq!(
             k(out(
@@ -1305,6 +1439,100 @@ Read timed out. (read timeout=120)";
             .kind,
             ErrorKind::Other,
             "only `colab new` turns it into AllocationTimeout"
+        );
+        assert!(
+            classify_failure(&out(
+                1,
+                "[colab] Local file '/tmp/missing' not found.",
+                ""
+            ))
+            .kind
+                == ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Upload failed: permission denied", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Download failed: bad path", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Error: File or directory not found: x", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            parse_ls("A new version of colab-cli is available\nsubdir/\nmodel.safetensors\n[colab] Note\n"),
+            vec![
+                crate::backend::VmEntry {
+                    name: "subdir".into(),
+                    is_dir: true,
+                },
+                crate::backend::VmEntry {
+                    name: "model.safetensors".into(),
+                    is_dir: false,
+                },
+            ]
+        );
+        let state = HostPath::new("/d/accounts/a1/sessions.json");
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::Ls {
+                    name: "s1".into(),
+                    path: "content/out".into(),
+                }
+            )
+            .unwrap(),
+            ["--config", "/d/accounts/a1/sessions.json", "ls", "-s", "s1", "content/out"]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::Upload {
+                    name: "s1".into(),
+                    local: "/tmp/a.bin".into(),
+                    remote: "content/a.bin".into(),
+                }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "upload",
+                "-s",
+                "s1",
+                "/tmp/a.bin",
+                "content/a.bin",
+            ]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::DriveMount {
+                    name: "s1".into(),
+                    path: "/content/drive".into(),
+                }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "drivemount",
+                "-s",
+                "s1",
+                "/content/drive",
+            ]
+        );
+        assert!(
+            build_argv(
+                None,
+                &CliCommand::DriveMount {
+                    name: "s1".into(),
+                    path: "relative/drive".into(),
+                }
+            )
+            .is_err()
         );
     }
 }
