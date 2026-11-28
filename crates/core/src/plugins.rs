@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -920,7 +921,118 @@ pub fn bundled() -> Vec<(&'static str, &'static [u8])> {
             include_str!("../../../plugins/comfyui/plugin.toml"),
             include_bytes!("../../../plugins/comfyui/worker.py"),
         ),
+        (
+            include_str!("../../../plugins/vllm/plugin.toml"),
+            include_bytes!("../../../plugins/vllm/worker.py"),
+        ),
+        (
+            include_str!("../../../plugins/whisper/plugin.toml"),
+            include_bytes!("../../../plugins/whisper/worker.py"),
+        ),
+        (
+            include_str!("../../../plugins/llm-train/plugin.toml"),
+            include_bytes!("../../../plugins/llm-train/worker.py"),
+        ),
+        (
+            include_str!("../../../plugins/civitai/plugin.toml"),
+            include_bytes!("../../../plugins/civitai/worker.py"),
+        ),
     ]
+}
+
+/// One row of the compiled-in workload catalog (`plugins/registry.json`).
+///
+/// This is not a plugin manifest and it is not fetched. The Plugins page
+/// shows it beside the installed list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexEntry {
+    pub id: String,
+    pub version: String,
+    /// `service` or `job`, matching the manifest's run mode.
+    pub mode: String,
+    /// An [`Accelerator`] name (`A100`, `NONE`, …).
+    pub accelerator: String,
+    pub min_vram_mib: u32,
+    /// `bundled` for a plugin shipped in the app.
+    pub source: String,
+    /// The catalog's pinned revision. For a bundled plugin this is its version.
+    pub rev: String,
+    pub name: LocalizedText,
+    pub summary: LocalizedText,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexFile {
+    entries: Vec<IndexEntry>,
+}
+
+const REGISTRY_JSON: &str = include_str!("../../../plugins/registry.json");
+
+/// The official workload catalog. Parsed once. Nothing is downloaded.
+pub fn official_index() -> Result<&'static [IndexEntry]> {
+    static INDEX: OnceLock<Result<Vec<IndexEntry>, String>> = OnceLock::new();
+    match INDEX.get_or_init(|| parse_index(REGISTRY_JSON).map_err(|error| error.to_string())) {
+        Ok(entries) => Ok(entries.as_slice()),
+        Err(reason) => Err(invalid("registry", reason)),
+    }
+}
+
+/// True when an installed copy is older or otherwise different from the pin.
+/// A plugin that is not installed is not an update.
+pub fn index_has_update(installed: Option<&str>, pinned: &str) -> bool {
+    installed.is_some_and(|version| version != pinned)
+}
+
+fn parse_index(text: &str) -> Result<Vec<IndexEntry>> {
+    let file: IndexFile = serde_json::from_str(text)
+        .map_err(|error| invalid("registry", "schema").detail(error.to_string()))?;
+    if file.entries.is_empty() {
+        return Err(invalid("registry", "no entries"));
+    }
+    let mut ids = BTreeSet::new();
+    for (i, entry) in file.entries.iter().enumerate() {
+        let field = |name: &str| format!("entries[{i}].{name}");
+        if !is_slug(&entry.id, 48, false) || entry.id.contains('_') {
+            return Err(invalid(
+                &field("id"),
+                "use lower-case letters, digits and '-'",
+            ));
+        }
+        if !ids.insert(entry.id.clone()) {
+            return Err(invalid(&field("id"), "duplicate id"));
+        }
+        if entry.version.is_empty()
+            || entry.version.len() > 32
+            || !entry
+                .version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ".+-".contains(c))
+        {
+            return Err(invalid(&field("version"), "invalid version"));
+        }
+        if entry.mode != "service" && entry.mode != "job" {
+            return Err(invalid(&field("mode"), "service or job"));
+        }
+        let accelerator = Accelerator::ALL
+            .iter()
+            .copied()
+            .find(|item| item.as_str() == entry.accelerator)
+            .ok_or_else(|| invalid(&field("accelerator"), "unknown accelerator"))?;
+        if entry.min_vram_mib > 0 && !accelerator.is_gpu() {
+            return Err(invalid(&field("min_vram_mib"), "needs a GPU accelerator"));
+        }
+        if entry.source.is_empty() || entry.source.len() > 32 {
+            return Err(invalid(&field("source"), "missing source"));
+        }
+        if entry.rev.is_empty() || entry.rev.len() > 64 {
+            return Err(invalid(&field("rev"), "missing revision"));
+        }
+        check_text(&field("name"), &entry.name, true)?;
+        check_text(&field("summary"), &entry.summary, true)?;
+    }
+    Ok(file.entries)
 }
 
 /// A plugin directory after validation: manifest, script bytes, static assets.
@@ -1781,6 +1893,108 @@ script = "main.py"
         let ep = &p.manifest.endpoints[0];
         assert_eq!(ep.port_input.as_deref(), Some("port"));
         assert_eq!(p.manifest.keep[0].path, "/content/ComfyUI/output");
+    }
+
+    #[test]
+    fn bundled_workload_plugins_match_the_static_index() {
+        let store = PluginStore::load(None, None).unwrap();
+        let index = official_index().expect("plugins/registry.json");
+        assert_eq!(index.len(), 4, "the catalog is the four workload plugins");
+        let locales = ["en", "zh-CN", "zh-TW", "ja", "ko"];
+        for entry in index {
+            let plugin = store
+                .get(&entry.id)
+                .unwrap_or_else(|| panic!("{} is bundled", entry.id));
+            assert_eq!(plugin.source, PluginSource::Bundled);
+            plugin.manifest.validate().unwrap();
+            assert!(!plugin.script.is_empty());
+            let script = std::str::from_utf8(&plugin.script).expect("utf-8 script");
+            assert!(
+                script.contains("PLUGIN_RUN_DIR"),
+                "{} refuses to run outside a host launch",
+                entry.id
+            );
+            assert_eq!(entry.version, plugin.manifest.version);
+            assert_eq!(entry.rev, plugin.manifest.version);
+            assert_eq!(entry.source, "bundled");
+            assert!(!index_has_update(
+                Some(plugin.manifest.version.as_str()),
+                &entry.version
+            ));
+            assert!(index_has_update(Some("0.0.0"), &entry.version));
+            assert!(!index_has_update(None, &entry.version));
+            for tag in locales {
+                assert!(
+                    plugin.manifest.name.get(tag).is_some_and(|s| !s.is_empty()),
+                    "{} name {tag}",
+                    entry.id
+                );
+                assert!(entry.summary.get(tag).is_some_and(|s| !s.is_empty()));
+            }
+        }
+
+        let vllm = &store.get("vllm").unwrap().manifest;
+        assert_eq!(vllm.run.mode, RunMode::Service);
+        assert!(vllm.run.keep_alive);
+        assert!(!vllm.run.keep_on_failure);
+        assert_eq!(vllm.provision.accelerator, Some(Accelerator::A100));
+        assert!(vllm.provision.min_vram_mib > 0);
+        assert_eq!(vllm.endpoints[0].kind, "openai");
+        assert_eq!(vllm.endpoints[0].path, "/v1");
+        assert!(vllm.inputs.iter().any(|i| i.kind == InputKind::Secret));
+        let mut provided = BTreeMap::new();
+        provided.insert(
+            "repo".into(),
+            InputValue::Text("openai/whisper-tiny".into()),
+        );
+        provided.insert(
+            "api_key".into(),
+            InputValue::Text("sk-live-secret-value".into()),
+        );
+        let resolved = resolve_inputs(vllm, &provided).unwrap();
+        let shown = redact("bearer sk-live-secret-value", &resolved.secrets);
+        assert!(!shown.contains("sk-live"));
+        assert!(shown.contains("***"));
+
+        let whisper = &store.get("whisper").unwrap().manifest;
+        assert_eq!(whisper.run.mode, RunMode::Job);
+        assert!(!whisper.run.keep_alive);
+        assert_eq!(whisper.provision.accelerator, Some(Accelerator::T4));
+        assert!(
+            whisper
+                .inputs
+                .iter()
+                .any(|i| i.id == "audio" && i.kind == InputKind::File && i.required)
+        );
+        assert!(!whisper.keep.is_empty());
+
+        let train = &store.get("llm-train").unwrap().manifest;
+        assert_eq!(train.run.mode, RunMode::Job);
+        assert!(train.needs.contains(&Capability::HfToken));
+        assert_eq!(train.provision.accelerator, Some(Accelerator::A100));
+        assert!(train.provision.high_mem);
+        assert!(train.provision.min_vram_mib >= 40_000);
+        assert!(
+            train
+                .inputs
+                .iter()
+                .any(|i| i.kind == InputKind::HfModel && i.required)
+        );
+
+        let civitai = &store.get("civitai").unwrap().manifest;
+        assert_eq!(civitai.run.mode, RunMode::Job);
+        assert_eq!(civitai.provision.accelerator, Some(Accelerator::None));
+        assert_eq!(civitai.provision.min_vram_mib, 0);
+        assert!(
+            civitai
+                .secrets
+                .iter()
+                .any(|slot| slot.id == "civitai_token" && slot.required)
+        );
+        assert_eq!(
+            secret_keyring_name("civitai", "civitai_token"),
+            "p07_civitai_civitai_token"
+        );
     }
 
     #[test]

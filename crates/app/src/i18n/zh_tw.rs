@@ -1343,4 +1343,17 @@ pub(super) const MESSAGES: Messages = &[
         RUN_TEXTAREA_HINT,
         "純文字，可以換行。依原樣傳入，不會當作程式碼執行。",
     ),
+    (PLUGIN_INDEX_TITLE, "工作負載目錄"),
+    (
+        PLUGIN_INDEX_HINT,
+        "應用程式自帶的官方短工作與常駐服務。這份清單不會上網下載。",
+    ),
+    (PLUGIN_INDEX_CPU, "CPU"),
+    (PLUGIN_INDEX_VRAM, "至少 {mib} MiB 顯示記憶體"),
+    (PLUGIN_INDEX_JOB, "跑完一次，然後停止這次新開的執行階段"),
+    (PLUGIN_INDEX_SERVICE, "就緒後保持執行"),
+    (PLUGIN_INDEX_PINNED, "目錄 v{version}"),
+    (PLUGIN_INDEX_INSTALLED, "已安裝 v{version}"),
+    (PLUGIN_INDEX_UPDATE, "目錄中有 v{version}"),
+    (PLUGIN_INDEX_UNREADABLE, "無法讀取工作負載目錄。"),
 ];

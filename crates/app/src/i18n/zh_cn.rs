@@ -1317,4 +1317,17 @@ pub(super) const MESSAGES: Messages = &[
         RUN_TEXTAREA_HINT,
         "纯文本，可以换行。按原样传入，不会当作代码执行。",
     ),
+    (PLUGIN_INDEX_TITLE, "工作负载目录"),
+    (
+        PLUGIN_INDEX_HINT,
+        "应用自带的官方短任务和常驻服务。这份列表不会联网下载。",
+    ),
+    (PLUGIN_INDEX_CPU, "CPU"),
+    (PLUGIN_INDEX_VRAM, "至少 {mib} MiB 显存"),
+    (PLUGIN_INDEX_JOB, "跑完一次，然后停止本次新开的运行时"),
+    (PLUGIN_INDEX_SERVICE, "就绪后保持运行"),
+    (PLUGIN_INDEX_PINNED, "目录 v{version}"),
+    (PLUGIN_INDEX_INSTALLED, "已安装 v{version}"),
+    (PLUGIN_INDEX_UPDATE, "目录中有 v{version}"),
+    (PLUGIN_INDEX_UNREADABLE, "无法读取工作负载目录。"),
 ];

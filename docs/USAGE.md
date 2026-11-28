@@ -138,6 +138,27 @@ cargo run -p colab-playground -- --mock-scenario signed-out --mock-fail cli-miss
 Demo mode still reads and writes the normal settings file; set `COLAB_PLAYGROUND_CONFIG_DIR` to
 another folder to keep experiments apart.
 
+## Workload plugins
+
+The Plugins page shows a workload catalog that ships with the app. The list is
+part of the build. The app does not download it.
+
+- **Serve a model with vLLM.** A GPU server. After it is ready the runtime stays
+  up, and the run view shows an OpenAI-compatible API. The port starts at 8001
+  so it does not take the GGUF server's port.
+- **Transcribe audio.** Pick a file on this computer. The app uploads it. When
+  the transcript is written, the Keep Plan runs and a runtime this job opened
+  stops.
+- **Fine-tune a model.** Unsloth or Axolotl. The step budget starts small so the
+  first run does not train for days. Same stop rule. Checkpoints are what the
+  Keep Plan saves.
+- **Download from Civitai.** A CPU runtime. Save the token on the Plugins page
+  first. The log masks it, and the download address does not contain it. Same
+  stop rule.
+
+These scripts run only on the Colab runtime. Mock mode walks the stages and
+does not contact Hugging Face, Civitai, Google Drive or Colab.
+
 ## Where things are stored
 
 - **Settings:** `settings.json` in `<OS config dir>/colab-playground`: `%APPDATA%\colab-playground`

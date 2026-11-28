@@ -833,6 +833,16 @@ catalog_keys! {
     RUN_PATH_DIR => "app.b2.run_path_dir",
     RUN_PATH_NOTEBOOK => "app.b2.run_path_notebook",
     RUN_TEXTAREA_HINT => "app.b2.run_textarea_hint",
+    PLUGIN_INDEX_TITLE => "app.b23.plugin_index_title",
+    PLUGIN_INDEX_HINT => "app.b23.plugin_index_hint",
+    PLUGIN_INDEX_CPU => "app.b23.plugin_index_cpu",
+    PLUGIN_INDEX_VRAM => "app.b23.plugin_index_vram",
+    PLUGIN_INDEX_JOB => "app.b23.plugin_index_job",
+    PLUGIN_INDEX_SERVICE => "app.b23.plugin_index_service",
+    PLUGIN_INDEX_PINNED => "app.b23.plugin_index_pinned",
+    PLUGIN_INDEX_INSTALLED => "app.b23.plugin_index_installed",
+    PLUGIN_INDEX_UPDATE => "app.b23.plugin_index_update",
+    PLUGIN_INDEX_UNREADABLE => "app.b23.plugin_index_unreadable",
 }
 
 /// A message table: `(key, message)` pairs; `{name}` marks an argument.

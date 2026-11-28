@@ -1,0 +1,172 @@
+api = 2
+id = "llm-train"
+version = "0.1.0"
+needs = ["hf_token"]
+
+[name]
+en = "Fine-tune a model"
+zh-CN = "微调模型"
+zh-TW = "微調模型"
+ja = "モデルを微調整"
+ko = "모델 미세조정"
+
+[description]
+en = "Fine-tune a Hugging Face model with Unsloth or Axolotl on a Colab GPU. Checkpoints are written for the Keep Plan. A runtime this job opened stops when training ends. A saved Hugging Face token reads a gated model and, if you name a repo, uploads the result."
+zh-CN = "在 Colab GPU 上用 Unsloth 或 Axolotl 微调 Hugging Face 模型。检查点会留给保留计划。训练结束后停止本次任务新开的运行时。已保存的 Hugging Face 令牌用于读取受限模型；若填写仓库，也用于上传结果。"
+zh-TW = "在 Colab GPU 上用 Unsloth 或 Axolotl 微調 Hugging Face 模型。檢查點會留給保留計畫。訓練結束後停止這次工作新開的執行階段。已儲存的 Hugging Face 權杖用於讀取受限模型；若填寫儲存庫，也用於上傳結果。"
+ja = "Colab の GPU 上で Unsloth または Axolotl を使い、Hugging Face のモデルを微調整します。チェックポイントは Keep Plan 用に残します。学習が終わると、このジョブが開いたランタイムだけを停止します。保存済みの Hugging Face トークンは制限付きモデルの読み取りに使い、リポジトリを指定した場合は結果のアップロードにも使います。"
+ko = "Colab GPU에서 Unsloth 또는 Axolotl로 Hugging Face 모델을 미세조정합니다. 체크포인트는 Keep Plan을 위해 남깁니다. 학습이 끝나면 이 작업이 연 런타임만 중지합니다. 저장된 Hugging Face 토큰은 제한된 모델을 읽는 데 쓰이고, 저장소를 적으면 결과 업로드에도 쓰입니다."
+
+[provision]
+accelerator = "A100"
+min_vram_mib = 40000
+high_mem = true
+
+[[inputs]]
+id = "base"
+type = "hf-model"
+required = true
+[inputs.label]
+en = "Base model"
+zh-CN = "基座模型"
+zh-TW = "基座模型"
+ja = "ベースモデル"
+ko = "기반 모델"
+[inputs.help]
+en = "A Hugging Face repo id, for example unsloth/Qwen3-0.6B."
+zh-CN = "Hugging Face 仓库 id，例如 unsloth/Qwen3-0.6B。"
+zh-TW = "Hugging Face 儲存庫 id，例如 unsloth/Qwen3-0.6B。"
+ja = "Hugging Face のリポジトリ ID（例：unsloth/Qwen3-0.6B）。"
+ko = "Hugging Face 저장소 ID입니다. 예: unsloth/Qwen3-0.6B."
+
+[[inputs]]
+id = "dataset"
+type = "text"
+[inputs.label]
+en = "Dataset repository"
+zh-CN = "数据集仓库"
+zh-TW = "資料集儲存庫"
+ja = "データセット リポジトリ"
+ko = "데이터셋 저장소"
+[inputs.help]
+en = "A Hugging Face dataset id. Leave it empty if you upload a file instead. Give one of the two."
+zh-CN = "Hugging Face 数据集 id。若改为上传文件，这里留空。两者填一个。"
+zh-TW = "Hugging Face 資料集 id。若改為上傳檔案，這裡留空。兩者填一個。"
+ja = "Hugging Face のデータセット ID。ファイルを渡す場合は空欄にします。どちらか一方です。"
+ko = "Hugging Face 데이터셋 ID입니다. 파일을 올리려면 비우세요. 둘 중 하나만 줍니다."
+
+[[inputs]]
+id = "data_file"
+type = "file"
+[inputs.label]
+en = "Local dataset file"
+zh-CN = "本地数据集文件"
+zh-TW = "本機資料集檔案"
+ja = "ローカルのデータセット ファイル"
+ko = "로컬 데이터셋 파일"
+[inputs.help]
+en = "A JSON or JSONL file on this computer. It is uploaded. The script sees only the path on the runtime."
+zh-CN = "这台电脑上的 JSON 或 JSONL 文件。它会被上传。脚本只看到运行时上的路径。"
+zh-TW = "這台電腦上的 JSON 或 JSONL 檔案。它會被上傳。指令碼只看到執行階段上的路徑。"
+ja = "このコンピューター上の JSON または JSONL です。アップロードされ、スクリプトが見るのはランタイム上のパスだけです。"
+ko = "이 컴퓨터의 JSON 또는 JSONL 파일입니다. 업로드되며 스크립트는 런타임의 경로만 봅니다."
+
+[[inputs]]
+id = "method"
+type = "select"
+options = ["unsloth", "axolotl"]
+default = "unsloth"
+[inputs.label]
+en = "Trainer"
+zh-CN = "训练器"
+zh-TW = "訓練器"
+ja = "トレーナー"
+ko = "트레이너"
+
+[[inputs]]
+id = "epochs"
+type = "number"
+default = 1
+min = 1
+max = 20
+[inputs.label]
+en = "Epochs"
+zh-CN = "轮数"
+zh-TW = "輪數"
+ja = "エポック"
+ko = "에폭"
+
+[[inputs]]
+id = "max_steps"
+type = "number"
+default = 20
+min = 1
+max = 2000
+[inputs.label]
+en = "Step budget"
+zh-CN = "步数上限"
+zh-TW = "步數上限"
+ja = "ステップ数の上限"
+ko = "스텝 상한"
+[inputs.help]
+en = "Stops after this many steps, so the first run does not train for days. Raise it when you want a longer run."
+zh-CN = "到达这个步数就停，以免第一次运行训上几天。需要更长的训练时再调高。"
+zh-TW = "到達這個步數就停，以免第一次執行訓上幾天。需要更長的訓練時再調高。"
+ja = "このステップ数で止まります。最初の実行が何日も続かないようにするためです。長く学習するときは上げてください。"
+ko = "이 스텝 수에서 멈춥니다. 첫 실행이 며칠씩 이어지지 않게 하려는 것입니다. 더 길게 학습하려면 올리세요."
+
+[[inputs]]
+id = "push_repo"
+type = "text"
+[inputs.label]
+en = "Hugging Face repo to upload"
+zh-CN = "要上传到的 Hugging Face 仓库"
+zh-TW = "要上傳到的 Hugging Face 儲存庫"
+ja = "アップロード先の Hugging Face リポジトリ"
+ko = "올릴 Hugging Face 저장소"
+[inputs.help]
+en = "Optional repo id. Uploading uses the saved Hugging Face token and does not print it."
+zh-CN = "可选的仓库 id。上传使用已保存的 Hugging Face 令牌，并且不会把它打印出来。"
+zh-TW = "選填的儲存庫 id。上傳使用已儲存的 Hugging Face 權杖，並且不會把它印出來。"
+ja = "省略できるリポジトリ ID です。アップロードには保存済みの Hugging Face トークンを使い、トークンは表示しません。"
+ko = "선택적 저장소 ID입니다. 업로드는 저장된 Hugging Face 토큰을 쓰며 토큰을 출력하지 않습니다."
+
+[run]
+script = "worker.py"
+mode = "job"
+
+[[stages]]
+id = "install"
+[stages.label]
+en = "Install the trainer"
+zh-CN = "安装训练器"
+zh-TW = "安裝訓練器"
+ja = "トレーナーをインストール"
+ko = "트레이너 설치"
+
+[[stages]]
+id = "train"
+[stages.label]
+en = "Train"
+zh-CN = "训练"
+zh-TW = "訓練"
+ja = "学習"
+ko = "학습"
+
+[[stages]]
+id = "save"
+[stages.label]
+en = "Save checkpoints"
+zh-CN = "保存检查点"
+zh-TW = "儲存檢查點"
+ja = "チェックポイントを保存"
+ko = "체크포인트 저장"
+
+[[keep]]
+path = "/content/train/out"
+[keep.label]
+en = "Checkpoints"
+zh-CN = "检查点"
+zh-TW = "檢查點"
+ja = "チェックポイント"
+ko = "체크포인트"

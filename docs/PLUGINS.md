@@ -4,7 +4,8 @@ A plugin turns a script into a one-click action on a Colab runtime: the app
 shows a form generated from the manifest, provisions (or reuses) a session,
 uploads the script, starts it detached on the VM, renders its progress, and
 forwards the ports it declares. The bundled `plugins/llama-cpp/` and
-`plugins/comfyui/` are complete examples.
+`plugins/comfyui/` are complete examples, and so are the four workload plugins
+below.
 
 **A plugin never runs anything on the user's machine.** The host only reads the
 manifest and uploads the script; the script runs on the user's paid Colab
@@ -289,6 +290,30 @@ then whenever `/slots` reports a request in progress.
 - **No privileges.** A plugin gets no access to the user's accounts, tokens or
   files. It only receives the inputs the user typed and the capabilities it
   declared.
+
+## Bundled workload catalog
+
+`plugins/registry.json` is compiled into the app and shown on the Plugins page.
+It is a static index of the short jobs and servers that ship with this build.
+The app does not download it, and it does not fetch a Git URL to refresh it.
+Each row has the plugin id, the pinned version, `service` or `job`, the default
+accelerator and a minimum GPU memory. An installed copy whose version differs
+from the pin is marked. A plugin that is not installed is not an update.
+
+This file is not a plugin manifest. The manifest parser does not read it.
+Unknown keys in the index are rejected, ids must be unique, and a memory floor
+above zero requires a GPU accelerator.
+
+| id | mode | behavior |
+| --- | --- | --- |
+| `vllm` | service | OpenAI-compatible vLLM server on a GPU. It stays up after it is ready. The port input defaults to 8001. |
+| `whisper` | job | Transcribe one uploaded audio file. Then the Keep Plan runs and a runtime this job opened stops. |
+| `llm-train` | job | Unsloth or Axolotl, with a short step budget. Same stop rule. Checkpoints are the Keep Plan path. |
+| `civitai` | job | Download one model version on a CPU runtime. The token is a named secret slot. It is masked and sent as a header, not in the address. |
+
+A job cannot set `keep_alive`. Secrets stay in memory. Each of these workers
+exits before any install or download when `PLUGIN_RUN_DIR` is unset, so the
+script does not run on the computer where the app is open.
 
 ## Testing a plugin
 

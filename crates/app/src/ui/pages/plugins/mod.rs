@@ -5,7 +5,9 @@
 mod form;
 mod run;
 
-use colab_playground_core::plugins::{PluginInfo, PluginSource};
+use colab_playground_core::plugins::{
+    IndexEntry, PluginInfo, PluginSource, index_has_update, official_index,
+};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant},
     data_display::{Badge, Tone},
@@ -48,6 +50,16 @@ pub fn remove_selector(id: &str) -> String {
 }
 pub fn enable_selector(id: &str) -> String {
     format!("plugin-enabled {id}")
+}
+/// Selector of the static workload catalog.
+pub const PLUGIN_INDEX: &str = "plugin-index";
+/// Selector of one catalog row: `plugin-index <id>`.
+pub fn index_selector(id: &str) -> String {
+    format!("plugin-index {id}")
+}
+/// Selector of a catalog row whose installed copy differs from the pin.
+pub fn index_update_selector(id: &str) -> String {
+    format!("plugin-index-update {id}")
 }
 
 pub fn render(state: &AppState, handle: &Entity<AppState>, inputs: &Inputs, cx: &App) -> Page {
@@ -109,6 +121,7 @@ fn list(state: &AppState, handle: &Entity<AppState>, inputs: &Inputs, cx: &App) 
         Load::Idle | Load::Loading => page.child(Caption::new(tr(cx, keys::PLUGINS_LOADING))),
     };
     let mut page = page
+        .child(index_section(state, cx))
         .child(install_card(state, handle, inputs, cx))
         .child(token_card(state, handle, inputs, cx));
     if let Some(card) = secret_slots(state, handle, inputs, cx) {
@@ -231,6 +244,111 @@ fn plugin_card(
                     )
                     .child(tagged(remove_selector(&id), remove)),
             ),
+    )
+    .w_full()
+    .into_any_element()
+}
+
+fn index_section(state: &AppState, cx: &App) -> AnyElement {
+    let header = CardHeader::new(tr(cx, keys::PLUGIN_INDEX_TITLE))
+        .description(tr(cx, keys::PLUGIN_INDEX_HINT));
+    let entries = match official_index() {
+        Ok(entries) => entries,
+        Err(_) => {
+            return tagged(
+                PLUGIN_INDEX,
+                Card::new()
+                    .header(header)
+                    .child(Caption::new(tr(cx, keys::PLUGIN_INDEX_UNREADABLE))),
+            )
+            .w_full()
+            .into_any_element();
+        }
+    };
+    let tag = state.language().tag();
+    let rows = entries.iter().map(|entry| index_row(entry, state, tag, cx));
+    tagged(
+        PLUGIN_INDEX,
+        Card::new()
+            .header(header)
+            .child(div().flex().flex_col().gap_3().children(rows)),
+    )
+    .w_full()
+    .into_any_element()
+}
+
+fn index_row(entry: &IndexEntry, state: &AppState, tag: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let name = entry.name.get(tag).unwrap_or(&entry.id).to_owned();
+    let installed = state.plugin(&entry.id);
+    let installed_version = installed.map(|info| info.manifest.version.as_str());
+    let update = index_has_update(installed_version, &entry.rev);
+    let hardware: SharedString = if entry.accelerator == "NONE" {
+        tr(cx, keys::PLUGIN_INDEX_CPU)
+    } else if entry.min_vram_mib > 0 {
+        let mib = entry.min_vram_mib.to_string();
+        format!(
+            "{} · {}",
+            entry.accelerator,
+            tr_args(cx, keys::PLUGIN_INDEX_VRAM, &[("mib", mib.as_str())]),
+        )
+        .into()
+    } else {
+        entry.accelerator.clone().into()
+    };
+    let mode = if entry.mode == "job" {
+        tr(cx, keys::PLUGIN_INDEX_JOB)
+    } else {
+        tr(cx, keys::PLUGIN_INDEX_SERVICE)
+    };
+    let mut title = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(div().font_weight(FontWeight::SEMIBOLD).child(name))
+        .child(Caption::new(tr_args(
+            cx,
+            keys::PLUGIN_INDEX_PINNED,
+            &[("version", &entry.rev)],
+        )));
+    if let Some(version) = installed_version {
+        title = title.child(Caption::new(tr_args(
+            cx,
+            keys::PLUGIN_INDEX_INSTALLED,
+            &[("version", &version.to_owned())],
+        )));
+    }
+    if update {
+        title = title.child(tagged(
+            index_update_selector(&entry.id),
+            Badge::new(tr_args(
+                cx,
+                keys::PLUGIN_INDEX_UPDATE,
+                &[("version", &entry.rev)],
+            ))
+            .tone(Tone::Info),
+        ));
+    }
+    tagged(
+        index_selector(&entry.id),
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(title)
+            .children(
+                entry
+                    .summary
+                    .get(tag)
+                    .map(|text| Caption::new(text.to_owned())),
+            )
+            .child(
+                div()
+                    .text_size(theme.text_size(TextSize::Sm))
+                    .child(hardware),
+            )
+            .child(Caption::new(mode)),
     )
     .w_full()
     .into_any_element()
