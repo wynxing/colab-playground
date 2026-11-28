@@ -27,7 +27,8 @@ pub enum ErrorKind {
     /// Colab never answered the request for a runtime: `colab new` gave up
     /// after its own retries (each waits about two minutes for a reply).
     AllocationTimeout,
-    /// A runtime already has its single allowed `colab ssh` connection (HTTP 429).
+    /// The runtime reached its concurrent `colab ssh` session limit (HTTP 429).
+    /// Param: `limit` (when known).
     SshBusy,
     /// The named session no longer exists (locally or on the server).
     SessionGone,

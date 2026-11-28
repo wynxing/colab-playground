@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::accounts::AccountId;
-use crate::cli::{AUTH_PROMPT_MARKER, RESERVED_VM_PORT};
+use crate::cli::{AUTH_PROMPT_MARKER, RESERVED_VM_PORT, parse_ssh_session_limit};
 use crate::clock::{CancelToken, Clock};
 use crate::error::{Error, ErrorKind, Result};
 use crate::host::{Host, ScriptRequest, shell_quote, tail};
@@ -303,7 +303,11 @@ fn decide_after_exit(
         Some(ErrorKind::SshBusy) => {
             counters.busy += 1;
             if counters.busy >= BUSY_LIMIT {
-                return Err(Error::new(ErrorKind::SshBusy).detail(tail(text, 400)));
+                let mut err = Error::new(ErrorKind::SshBusy).detail(tail(text, 400));
+                if let Some(limit) = parse_ssh_session_limit(text) {
+                    err = err.with("limit", limit);
+                }
+                return Err(err);
             }
         }
         Some(ErrorKind::PortInUse) => {
@@ -682,6 +686,12 @@ mod tests {
         );
         assert_eq!(
             c(
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            ),
+            Some(ErrorKind::SshBusy)
+        );
+        assert_eq!(
+            c(
                 "bind [127.0.0.1]:8000: Address already in use\nchannel_setup_fwd_listener_tcpip: cannot listen to port: 8000"
             ),
             Some(ErrorKind::PortInUse)
@@ -700,6 +710,36 @@ mod tests {
         );
         let secs: Vec<u64> = (1..=8).map(|a| backoff(a).as_secs()).collect();
         assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn ssh_busy_carries_session_limit_when_reported() {
+        let s = spec();
+        let mut c = RetryCounters::default();
+        for _ in 0..(BUSY_LIMIT - 1) {
+            assert!(
+                decide_after_exit(
+                    &mut c,
+                    &s,
+                    "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime.",
+                    Some(255),
+                    Duration::from_secs(1),
+                    None,
+                )
+                .is_ok()
+            );
+        }
+        let err = decide_after_exit(
+            &mut c,
+            &s,
+            "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime.",
+            Some(255),
+            Duration::from_secs(1),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.is(ErrorKind::SshBusy));
+        assert_eq!(err.param("limit"), Some("5"));
     }
 
     #[test]

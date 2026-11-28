@@ -1,9 +1,10 @@
 //! Typed wrapper over the `colab` CLI.
 //!
 //! Failures are classified by [`classify_failure`] from the CLI's own messages
-//! (see `google-colab-cli` sources), because exit codes are unreliable:
-//! `colab stop` of a missing session exits 0, and `colab exec` exits 0 even
-//! when the remote code raised.
+//! (see `google-colab-cli` sources), because exit codes vary across versions:
+//! in `0.8.0`, `colab stop` of a missing session and `colab exec` after a
+//! remote Python exception exit `0`, whereas post-`0.8.0` exits `1` (or
+//! propagates `SystemExit` codes).
 
 use std::time::Duration;
 
@@ -263,6 +264,89 @@ pub fn find_result(stdout: &str) -> Option<serde_json::Value> {
         .and_then(|j| serde_json::from_str(j.trim()).ok())
 }
 
+/// Parses `"N of M [SSH] sessions in use"` from a `colab ssh` HTTP 429 message.
+pub(crate) fn parse_ssh_session_limit(text: &str) -> Option<u32> {
+    let (before, _) = text.split_once(" sessions in use")?;
+    let before = before.strip_suffix(" SSH").unwrap_or(before);
+    let mut rev = before.split_whitespace().rev();
+    let limit = rev.next()?.parse::<u32>().ok()?;
+    let of = rev.next()?;
+    let used = rev.next()?.parse::<u32>().ok()?;
+    (of == "of" && used > 0 && limit > 0).then_some(limit)
+}
+
+fn failure_error(kind: ErrorKind, out: &ScriptOutput) -> Error {
+    let detail = if out.stderr.trim().is_empty() {
+        &out.stdout
+    } else {
+        &out.stderr
+    };
+    let mut e = Error::new(kind).detail(tail(detail, 800));
+    if let Some(code) = out.code {
+        e = e.with("exit_code", code);
+    }
+    e
+}
+
+fn is_local_not_installed(colab: &str, out: &ScriptOutput) -> bool {
+    if !matches!(out.code, Some(126 | 127)) {
+        return false;
+    }
+    let stderr = &out.stderr;
+    let mentions_exec =
+        stderr.contains("bash: line 1:") || (!colab.is_empty() && stderr.contains(colab));
+    let missing_or_denied = stderr.contains("No such file")
+        || stderr.contains("not found")
+        || stderr.contains("Permission denied")
+        || stderr.contains("cannot execute");
+    mentions_exec && missing_or_denied
+}
+
+fn is_local_cli_exec_failure(out: &ScriptOutput) -> bool {
+    if out.code.is_none() {
+        return true;
+    }
+    let stderr = &out.stderr;
+    stderr.contains("Usage: colab")
+        || stderr.contains("No such command")
+        || stderr.contains("No such option")
+        || stderr.contains("Invalid value for")
+        || stderr.contains("Missing option")
+        || stderr.contains("[colab] Invalid --env")
+        || stderr.contains("colab_cli/")
+        || stderr.contains(r"colab_cli\")
+        || stderr.contains("No module named 'colab_cli'")
+        || stderr.contains("ColabRequestError")
+        || out.stdout.contains("[colab] Error: No input provided")
+}
+
+fn classify_exec_failure(colab: &str, out: &ScriptOutput) -> Option<Error> {
+    if is_local_not_installed(colab, out) {
+        return Some(failure_error(ErrorKind::NotInstalled, out));
+    }
+    let all = format!("{}\n{}", out.stdout, out.stderr);
+    let has = |s: &str| all.contains(s);
+    let kind = if has("Could not read the OAuth token from the OS keyring") {
+        Some(ErrorKind::KeyringUnavailable)
+    } else if has(AUTH_PROMPT_MARKER) || has("Enter the authorization code") {
+        Some(ErrorKind::AuthRequired)
+    } else if has("appears to be lost") || (has("ession '") && has("' not found")) {
+        Some(ErrorKind::SessionGone)
+    } else if has("Connection was lost")
+        || has("Kernel dead before")
+        || has("Kernel restarting before")
+    {
+        Some(ErrorKind::ConnectionLost)
+    } else if has("Timeout waiting for") {
+        Some(ErrorKind::ExecTimeout)
+    } else if is_local_cli_exec_failure(out) {
+        Some(ErrorKind::Other)
+    } else {
+        None
+    };
+    kind.map(|k| failure_error(k, out))
+}
+
 pub fn classify_failure(out: &ScriptOutput) -> Error {
     let all = format!("{}\n{}", out.stdout, out.stderr);
     let has = |s: &str| all.contains(s);
@@ -285,21 +369,29 @@ pub fn classify_failure(out: &ScriptOutput) -> Error {
         ErrorKind::SshBusy
     } else if has("appears to be lost") || (has("ession '") && has("' not found")) {
         ErrorKind::SessionGone
-    } else if has("Connection was lost") {
+    } else if has("Connection was lost")
+        || has("Kernel dead before")
+        || has("Kernel restarting before")
+    {
         ErrorKind::ConnectionLost
     } else if has("Timeout waiting for") {
         ErrorKind::ExecTimeout
+    } else if (has("Download failed:") || has("Upload failed:"))
+        && (has("ReadTimeout")
+            || has("ConnectTimeout")
+            || has("Read timed out")
+            || has("read timeout=")
+            || has("connect timeout="))
+    {
+        ErrorKind::Timeout
     } else {
         ErrorKind::Other
     };
-    let detail = if out.stderr.trim().is_empty() {
-        &out.stdout
-    } else {
-        &out.stderr
-    };
-    let mut e = Error::new(kind).detail(tail(detail, 800));
-    if let Some(code) = out.code {
-        e = e.with("exit_code", code);
+    let mut e = failure_error(kind, out);
+    if kind == ErrorKind::SshBusy
+        && let Some(limit) = parse_ssh_session_limit(&all)
+    {
+        e = e.with("limit", limit);
     }
     e
 }
@@ -321,7 +413,7 @@ fn allocation_read_timed_out(stderr: &str) -> bool {
 pub enum StopOutcome {
     /// "Session terminated."
     Terminated,
-    /// The CLI had no local record (it prints "not found" and exits 0).
+    /// The CLI had no local record (it prints "not found" and exits 0 in 0.8.0 or 1 in newer versions).
     NotFound,
 }
 
@@ -496,11 +588,19 @@ impl Cli {
         let stdin = StdinMode::Bytes(format!("{EXEC_PREAMBLE}{code}").into_bytes());
         let overall = Duration::from_secs(u64::from(timeout_secs.max(30)) * 4 + 120);
         let out = self.run(Some(state), &cmd, stdin, Some(overall), cancel, &mut |_| {})?;
-        // CLI-level failures (lost session, dropped connection, idle timeout)
-        // exit non-zero; exceptions raised by `code` itself exit 0, so their
-        // tracebacks are never misread as CLI failures.
+        // CLI-level failures (lost session, dropped connection, idle timeout,
+        // local usage/CLI errors) fail here; exceptions or `SystemExit` raised
+        // by remote `code` exit 0 in 0.8.0 and non-zero in newer CLIs, and are
+        // returned as `ExecOutput` without a `result`.
         if !out.success() {
-            return Err(classify_failure(&out));
+            if let Some(err) = classify_exec_failure(&self.colab, &out) {
+                return Err(err);
+            }
+            return Ok(ExecOutput {
+                result: None,
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
         }
         Ok(ExecOutput {
             result: find_result(&out.stdout),
@@ -537,10 +637,13 @@ impl Cli {
         )?;
         if out.success() && out.stdout.contains("Session terminated") {
             Ok(StopOutcome::Terminated)
-        } else if out.success() && out.stdout.contains("not found") {
-            Ok(StopOutcome::NotFound)
         } else {
-            Err(classify_failure(&out))
+            let err = classify_failure(&out);
+            if err.kind == ErrorKind::SessionGone && matches!(out.code, Some(0 | 1)) {
+                Ok(StopOutcome::NotFound)
+            } else {
+                Err(err)
+            }
         }
     }
 
@@ -845,7 +948,41 @@ A new version of colab-cli is available
             ErrorKind::SessionGone
         );
         assert_eq!(
+            k(out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            )),
+            ErrorKind::SshBusy
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            ))
+            .param("limit"),
+            Some("5")
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] Already-active SSH session (HTTP 429): retry 1 of 2"
+            ))
+            .param("limit"),
+            None
+        );
+        assert_eq!(
             k(out(1, "", "RuntimeError: Connection was lost.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel dead before the code finished.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel restarting before the code finished.")),
             ErrorKind::ConnectionLost
         );
         assert_eq!(
@@ -860,6 +997,38 @@ A new version of colab-cli is available
             k(out(
                 1,
                 "",
+                "TimeoutError: Timeout waiting for output: no message from the kernel for 30s. Use --timeout to allow longer silences."
+            )),
+            ErrorKind::ExecTimeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Download failed: HTTPSConnectionPool(host='x', port=443): Read timed out. (read timeout=300)",
+                ""
+            )),
+            ErrorKind::Timeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Upload failed: HTTPSConnectionPool(host='x', port=443): Max retries exceeded (Caused by ConnectTimeoutError('connect timeout=30'))",
+                ""
+            )),
+            ErrorKind::Timeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Download failed: timed out waiting for user",
+                ""
+            )),
+            ErrorKind::Other
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "",
                 "To authorize colab-cli, visit this URL in any browser:"
             )),
             ErrorKind::AuthRequired
@@ -868,6 +1037,91 @@ A new version of colab-cli is available
         assert_eq!(
             classify_failure(&out(3, "", "boom")).param("exit_code"),
             Some("3")
+        );
+    }
+
+    #[test]
+    fn local_cli_exec_failures_are_told_apart_from_remote_errors() {
+        let local = |code, stdout, stderr| is_local_cli_exec_failure(&out(code, stdout, stderr));
+        assert!(is_local_cli_exec_failure(&ScriptOutput {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            killed: false,
+        }));
+        assert!(local(2, "", "Usage: colab exec [OPTIONS]"));
+        assert!(local(2, "", "No such command 'bad'."));
+        assert!(local(2, "", "No such option: --bad"));
+        assert!(local(2, "", "Invalid value for '--timeout': bad"));
+        assert!(local(2, "", "Missing option '-s'."));
+        assert!(local(2, "", "[colab] Invalid --env value 'BAD'"));
+        assert!(local(1, "[colab] Error: No input provided.", ""));
+        assert!(local(1, "", "File \"/venv/colab_cli/runtime.py\", line 1"));
+        assert!(local(1, "", r#"File "C:\venv\colab_cli\runtime.py", line 1"#));
+        assert!(local(1, "", "No module named 'colab_cli'"));
+        assert!(local(1, "", "ColabRequestError: Bad Gateway"));
+        assert!(!local(2, "", "Usage: foo [OPTIONS]"));
+        assert!(!local(1, "Usage: colab exec", ""));
+        assert!(!local(1, "", "remote mentioned colab_cli in output"));
+        assert!(!local(1, "File \"/venv/colab_cli/runtime.py\"", ""));
+        assert!(!local(1, "", "Traceback:\nValueError: bad value"));
+        assert!(!local(2, "", ""));
+    }
+
+    #[test]
+    fn exec_failure_classification_ignores_remote_and_non_exec_errors() {
+        let exec_kind = |code, stdout, stderr| {
+            classify_exec_failure("/x/colab", &out(code, stdout, stderr)).map(|e| e.kind)
+        };
+        assert_eq!(exec_kind(127, "", "not found"), None);
+        assert_eq!(exec_kind(127, "", "No such file or directory"), None);
+        assert_eq!(exec_kind(126, "", "Permission denied"), None);
+        assert_eq!(exec_kind(1, "", "(HTTP 429)"), None);
+        assert_eq!(exec_kind(1, "", "Backend rejected accelerator"), None);
+        assert_eq!(exec_kind(1, "", "Allocation refused"), None);
+        assert_eq!(exec_kind(1, "[colab] Download failed: ReadTimeout", ""), None);
+        assert_eq!(exec_kind(2, "", "Usage: foo"), None);
+        assert_eq!(exec_kind(1, "", "Traceback:\nValueError: bad"), None);
+
+        assert_eq!(
+            exec_kind(127, "", "bash: line 1: /x/colab: No such file or directory"),
+            Some(ErrorKind::NotInstalled)
+        );
+        assert_eq!(
+            exec_kind(126, "", "/x/colab: Permission denied"),
+            Some(ErrorKind::NotInstalled)
+        );
+        assert_eq!(
+            exec_kind(1, "", "Could not read the OAuth token from the OS keyring"),
+            Some(ErrorKind::KeyringUnavailable)
+        );
+        assert_eq!(
+            exec_kind(1, "", "To authorize colab-cli, visit this URL:"),
+            Some(ErrorKind::AuthRequired)
+        );
+        assert_eq!(
+            exec_kind(1, "[colab] Session 'x' not found.", ""),
+            Some(ErrorKind::SessionGone)
+        );
+        assert_eq!(
+            exec_kind(1, "", "RuntimeError: Kernel dead before the code finished."),
+            Some(ErrorKind::ConnectionLost)
+        );
+        assert_eq!(
+            exec_kind(1, "", "TimeoutError: Timeout waiting for output: 30s"),
+            Some(ErrorKind::ExecTimeout)
+        );
+        assert_eq!(
+            exec_kind(2, "", "Usage: colab exec [OPTIONS]"),
+            Some(ErrorKind::Other)
+        );
+        assert_eq!(
+            exec_kind(2, "", "[colab] Invalid --env value 'BAD'"),
+            Some(ErrorKind::Other)
+        );
+        assert_eq!(
+            exec_kind(1, "", "File \"/venv/colab_cli/runtime.py\", line 1"),
+            Some(ErrorKind::Other)
         );
     }
 
