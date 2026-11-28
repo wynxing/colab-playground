@@ -166,7 +166,9 @@ pub(super) fn render(
         .child(stat(tr(cx, keys::RUNTIME_RATE), rate, cx))
         .child(stat(tr(cx, keys::RUNTIME_SPEND), spend, cx))
         .child(stat(tr(cx, keys::RUNTIME_AUTO_STOP), auto_stop, cx));
-    let mut card = Card::new().child(header).child(stats);
+    let mut card = Card::new().child(header).child(stats).child(
+        crate::ui::resources::session_meters(&label, state.resource_view(&runtime.id), cx),
+    );
     if !runtime.managed {
         card = card.child(Caption::new(tr(cx, keys::RUNTIME_UNMANAGED_HINT)));
     }

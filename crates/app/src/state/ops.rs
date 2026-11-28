@@ -98,6 +98,8 @@ pub enum Op {
     VmUpload(u64),
     /// Stopping every runtime before quitting.
     StopAll,
+    /// Reading RAM, GPU memory and disk for the listed runtimes.
+    Resources,
     /// Checking GitHub for a newer release.
     UpdateCheck,
     /// Finding out whether this copy can replace itself.
@@ -150,6 +152,7 @@ impl Op {
                 | Op::OpenBrowser(_)
                 | Op::RemoteSsh(_)
                 | Op::HfFiles(_)
+                | Op::Resources
         )
     }
 }

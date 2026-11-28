@@ -592,6 +592,14 @@ pub(super) const MESSAGES: Messages = &[
     (SESSIONS_STARTING, "Starting {name}"),
     (RUNTIME_HARDWARE, "Hardware"),
     (RUNTIME_UPTIME, "Running for"),
+    (RES_RAM, "RAM"),
+    (RES_VRAM, "VRAM"),
+    (RES_DISK, "Disk"),
+    (RES_PAIR, "{used} / {total}"),
+    (RES_UNKNOWN, "Unknown"),
+    (RES_EXPIRED, "Expired"),
+    (RES_NO_GPU, "No GPU"),
+    (RES_UTIL, "{n}%"),
     (RUNTIME_RATE, "Burn rate"),
     (RUNTIME_SPEND, "Spent so far"),
     (RUNTIME_AUTO_STOP, "Auto-stop"),
@@ -1469,5 +1477,67 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_CONTROL_HINT,
         "Direct talks to Colab without the CLI. The CLI remains available as a fallback.",
+    ),
+    (
+        PLUGIN_NEEDS_GCP_AUTH,
+        "Google Cloud auth on the runtime, only if you allow it",
+    ),
+    (
+        PLUGIN_NEEDS_DRIVE,
+        "Google Drive on the runtime, only if you allow it",
+    ),
+    (PLUGIN_NEEDS_SECRET, "{name} (saved secret)"),
+    (PLUGIN_MODE, "Run"),
+    (
+        PLUGIN_MODE_JOB,
+        "Runs once, saves with the Keep Plan, then stops a runtime it opened",
+    ),
+    (PLUGIN_FILES, "Files"),
+    (PLUGIN_ASSETS, "{count} files shipped with the plugin"),
+    (PLUGIN_SECRETS_TITLE, "Plugin secrets"),
+    (
+        PLUGIN_SECRET_HINT,
+        "Saved in the keyring for this plugin. The value is masked and is not kept in the form.",
+    ),
+    (RUN_KEEP_ON_FAILURE, "Leave the new runtime up if this job fails"),
+    (
+        RUN_KEEP_ON_FAILURE_ON,
+        "The runtime stays so you can look. It keeps using compute units.",
+    ),
+    (
+        RUN_KEEP_ON_FAILURE_OFF,
+        "A runtime this job opened stops when the script fails.",
+    ),
+    (
+        RUN_CONSENT_GCP,
+        "Allow this run to use Google Cloud auth on the runtime",
+    ),
+    (
+        RUN_CONSENT_DRIVE,
+        "Allow this run to use Google Drive on the runtime",
+    ),
+    (
+        RUN_CONSENT_REQUIRED,
+        "Allow the access this plugin asks for before starting.",
+    ),
+    (RUN_METRICS, "Metrics"),
+    (RUN_METRIC_STEP, "Step"),
+    (RUN_METRIC_LOSS, "Loss"),
+    (RUN_METRIC_TOK, "Tokens per second"),
+    (
+        RUN_PATH_FILE,
+        "Path of a file on this computer. It is uploaded; the script sees only the path on the runtime.",
+    ),
+    (
+        RUN_PATH_DIR,
+        "Path of a folder on this computer. Files inside are uploaded; the script sees only the folder on the runtime.",
+    ),
+    (
+        RUN_PATH_NOTEBOOK,
+        "Path of a .ipynb file on this computer. It is uploaded; the script sees only the path on the runtime.",
+    ),
+    (
+        RUN_TEXTAREA_HINT,
+        "Plain text, including line breaks. It is passed as written, not run as code.",
     ),
 ];

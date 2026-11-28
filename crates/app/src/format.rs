@@ -182,6 +182,12 @@ pub fn limit_key(limit: Limit) -> &'static str {
     }
 }
 
+/// A fraction from 0 to 1 as a percent. Values outside that range are clamped for display.
+pub fn percent(cx: &App, fraction: f64) -> SharedString {
+    let shown = (fraction * 100.0).clamp(0.0, 100.0);
+    tr_args(cx, keys::RES_UTIL, &[("n", &number(cx, shown, 0))])
+}
+
 /// Bytes as MB or GB.
 pub fn bytes(cx: &App, bytes: u64) -> SharedString {
     let mib = bytes as f64 / (1024.0 * 1024.0);

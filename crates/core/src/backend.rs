@@ -238,6 +238,15 @@ pub struct PluginRunSpec {
     /// The script is a server: it keeps running after it reports ready, and
     /// the app keeps reading its status.
     pub keep_alive: bool,
+    /// `service` (default) or `job`. A job persists and then stops a runtime it opened.
+    #[serde(default)]
+    pub mode: crate::plugins::RunMode,
+    /// Job mode: leave a runtime this run opened when the script fails.
+    #[serde(default)]
+    pub keep_on_failure: bool,
+    /// Explicit yes for `gcp_auth` and `drive`. Both default to no.
+    #[serde(default)]
+    pub consent: crate::plugins::CapabilityConsent,
     /// Optional Keep Plan to attach to the session for this run.
     #[serde(default)]
     pub keep_plan: Option<KeepPlan>,
@@ -526,6 +535,22 @@ pub trait Backend: Send + Sync {
     /// One app-side guard round: usage, spend, decisions, automatic stops.
     fn guard_poll(&self, cancel: &CancelToken) -> Result<GuardReport>;
 
+    /// Live RAM, GPU memory and disk for one runtime.
+    ///
+    /// The default is unavailable, so a backend with no proxy yet still
+    /// compiles. The CLI backend reads that account's `sessions.json` and
+    /// asks the runtime proxy. A later direct backend can override this with
+    /// the connection it already holds. A missing proxy, an expired token and
+    /// an unreachable proxy are statuses, not errors. `Err` is only
+    /// cancellation.
+    fn runtime_resources(
+        &self,
+        _target: &RuntimeRef,
+        _cancel: &CancelToken,
+    ) -> Result<crate::resources::ResourceStatus> {
+        Ok(crate::resources::ResourceStatus::Unavailable)
+    }
+
     // ---- tunnels
     /// Opens a port forward (the session's account must be active).
     fn open_tunnel(&self, spec: TunnelSpec, events: Events<TunnelEvent>) -> Result<TunnelId>;
@@ -703,6 +728,9 @@ pub fn run_template(info: &PluginInfo, defaults: &Defaults, taken: &[String]) ->
         target: RunTarget::Provision(spec),
         stop_on_failure: true,
         keep_alive: m.run.keep_alive,
+        mode: m.run.mode,
+        keep_on_failure: m.run.keep_on_failure,
+        consent: crate::plugins::CapabilityConsent::default(),
         keep_plan: None,
     }
 }

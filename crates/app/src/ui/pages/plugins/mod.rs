@@ -30,8 +30,8 @@ use crate::{
 
 pub use form::{RUN_KEEP_CONFIGURE, RUN_START, hf_result_selector};
 pub use run::{
-    ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, RUN_CANCEL, RUN_SESSION_UNKNOWN_SELECTOR,
-    RUN_STOP,
+    ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, RUN_CANCEL, RUN_RESOURCES, RUN_RESOURCES_STALE,
+    RUN_SESSION_UNKNOWN_SELECTOR, RUN_STOP,
 };
 
 /// Selector of the install source's Check button.
@@ -108,8 +108,13 @@ fn list(state: &AppState, handle: &Entity<AppState>, inputs: &Inputs, cx: &App) 
         }
         Load::Idle | Load::Loading => page.child(Caption::new(tr(cx, keys::PLUGINS_LOADING))),
     };
-    page.child(install_card(state, handle, inputs, cx))
-        .child(token_card(state, handle, inputs, cx))
+    let mut page = page
+        .child(install_card(state, handle, inputs, cx))
+        .child(token_card(state, handle, inputs, cx));
+    if let Some(card) = secret_slots(state, handle, inputs, cx) {
+        page = page.child(card);
+    }
+    page
 }
 
 fn plugin_card(
@@ -268,6 +273,87 @@ fn install_card(
         )
         .w_full()
         .into_any_element()
+}
+
+fn secret_slots(
+    state: &AppState,
+    handle: &Entity<AppState>,
+    inputs: &Inputs,
+    cx: &App,
+) -> Option<AnyElement> {
+    let list = state.plugins().ready()?;
+    let tag = state.language().tag();
+    let slots: Vec<(String, String, String)> = list
+        .iter()
+        .flat_map(|info| {
+            let plugin = info.manifest.id.clone();
+            let plugin_name = state.plugin_name(info);
+            info.manifest.secrets.iter().filter_map(move |slot| {
+                let key = format!("secret-slot/{plugin}/{}", slot.id);
+                if !inputs.secret_slots.contains_key(&key) {
+                    return None;
+                }
+                let label = slot.label.get(tag).unwrap_or(&slot.id);
+                Some((
+                    key,
+                    format!("{plugin_name} · {label}"),
+                    colab_playground_core::plugins::secret_keyring_name(&plugin, &slot.id),
+                ))
+            })
+        })
+        .collect();
+    if slots.is_empty() {
+        return None;
+    }
+    let busy = state.is_busy(Op::Secret);
+    let rows = slots.into_iter().map(|(key, title, keyring)| {
+        let Some(field) = inputs.secret_slots.get(&key).cloned() else {
+            return div().into_any_element();
+        };
+        let save = handle.clone();
+        let editor = field.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Caption::new(title))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&field)))
+                    .child(tagged(
+                        format!("secret-save {key}"),
+                        Button::new(
+                            SharedString::from(format!("secret-save-{key}")),
+                            tr(cx, keys::ACTION_SAVE),
+                        )
+                        .loading(busy)
+                        .disabled(busy)
+                        .on_click(move |_, _, cx| {
+                            let value = editor.read(cx).text().to_owned();
+                            editor.update(cx, |input, cx| input.set_text(String::new(), cx));
+                            let name = keyring.clone();
+                            save.update(cx, |state, cx| state.save_plugin_secret(name, value, cx))
+                        }),
+                    )),
+            )
+            .into_any_element()
+    });
+    Some(
+        tagged(
+            "plugin-secrets",
+            Card::new()
+                .header(
+                    CardHeader::new(tr(cx, keys::PLUGIN_SECRETS_TITLE))
+                        .description(tr(cx, keys::PLUGIN_SECRET_HINT)),
+                )
+                .child(div().flex().flex_col().gap_3().children(rows)),
+        )
+        .w_full()
+        .into_any_element(),
+    )
 }
 
 fn token_card(

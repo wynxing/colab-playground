@@ -45,6 +45,10 @@ pub const RUN_SESSION_UNKNOWN_SELECTOR: &str = "run-session-unknown";
 pub const ENDPOINT_SELECTOR: &str = "endpoint";
 /// The line that says this app answers an agent too, drawn only while the endpoint is on.
 pub const ENDPOINT_MCP_APP_SELECTOR: &str = "endpoint-mcp-app";
+/// RAM, VRAM and disk on a running or ready run.
+pub const RUN_RESOURCES: &str = "run-resources";
+/// Shown when the latest resource fetch failed and the last numbers, if any, are stale.
+pub const RUN_RESOURCES_STALE: &str = "run-resources-stale";
 
 pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Page {
     let Some(run) = state.plugin_run() else {
@@ -84,8 +88,19 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
                 .w_full(),
         );
     }
+    // A running or ready server has a session to meter. A failed or cancelled run does not.
+    if run.session.is_some() && matches!(run.phase, RunPhase::Running | RunPhase::Ready(_)) {
+        let reading = run
+            .session
+            .as_deref()
+            .and_then(|name| state.resource_for_session(run.account.as_ref(), name));
+        page = page.child(crate::ui::resources::run_meters(reading, cx));
+    }
     if let Some(info) = info {
         page = page.child(stages(run, info, state, cx));
+    }
+    if let Some(card) = live_metrics(run, cx) {
+        page = page.child(card);
     }
     page = page.child(outcome(run, state, handle, cx));
     if let RunPhase::Ready(outcome) = &run.phase
@@ -134,6 +149,56 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
         );
     }
     page.child(log(run, cx))
+}
+
+fn live_metrics(run: &PluginRun, cx: &App) -> Option<AnyElement> {
+    let metrics = &run.status.as_ref()?.metrics;
+    let rows = [
+        (keys::RUN_METRIC_STEP, metrics.step),
+        (keys::RUN_METRIC_LOSS, metrics.loss),
+        (keys::RUN_METRIC_TOK, metrics.tok_per_s),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|number| (tr(cx, key), metric_text(number))));
+    let rows: Vec<_> = rows.collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let theme = cx.theme();
+    Some(
+        Card::new()
+            .header(CardHeader::new(tr(cx, keys::RUN_METRICS)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children(rows.into_iter().map(|(label, value)| {
+                        div()
+                            .flex()
+                            .gap_3()
+                            .text_size(theme.text_size(TextSize::Sm))
+                            .child(
+                                div()
+                                    .w(theme.label_width())
+                                    .text_color(theme.colors.fg_muted)
+                                    .child(label),
+                            )
+                            .child(value)
+                    })),
+            )
+            .w_full()
+            .into_any_element(),
+    )
+}
+
+fn metric_text(number: f64) -> String {
+    if number.is_finite() && number.fract() == 0.0 && number.abs() < 1e15 {
+        format!("{}", number as i64)
+    } else {
+        let text = format!("{number:.4}");
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    }
 }
 
 /// A workflow as the app draws it: the nodes and the lines between them.

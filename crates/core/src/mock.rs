@@ -28,8 +28,9 @@ use crate::guard::{Decision, GuardPolicy, SpendMeter, evaluate};
 use crate::hf::HfModel;
 use crate::host::{Host, Line, ProbeReport, Stream};
 use crate::plugins::{
-    PluginInfo, PluginOrigin, PluginPreview, PluginStore, ResolvedEndpoint, discard_preview,
-    resolve_endpoints, resolve_inputs,
+    AfterRun, InputKind, PluginInfo, PluginOrigin, PluginPreview, PluginStore, ResolvedEndpoint,
+    RunEnd, RunMode, capability_env, discard_preview, expand_uploads, materialize_assets, redact,
+    resolve_endpoints, resolve_inputs, vm_env,
 };
 use crate::provision::{
     self, Hardware, ProvisionEvent, ProvisionOps, ProvisionOutcome, ProvisionSpec,
@@ -356,6 +357,38 @@ fn mock_vram(a: Accelerator) -> Option<u32> {
     }
 }
 
+/// A demo reading with the same byte sizes colab-vscode's resources fixture uses.
+/// A CPU runtime still has RAM and disk; it simply has no GPU.
+fn mock_resources(runtime: &MRuntime) -> crate::resources::RuntimeResources {
+    const RAM_TOTAL: u64 = 13_605_834_752;
+    const RAM_FREE: u64 = 12_475_244_544;
+    const DISK_TOTAL: u64 = 115_658_190_848;
+    const DISK_USED: u64 = 22_869_635_072;
+    let gpus = runtime.vram_mib.map(|mib| {
+        let total = u64::from(mib) * 1024 * 1024;
+        crate::resources::GpuReading {
+            name: mock_gpu(runtime.accelerator, runtime.vram_mib),
+            memory_used_bytes: Some(total / 5),
+            memory_total_bytes: Some(total),
+            utilization: Some(0.15),
+            memory_utilization: Some(0.21),
+            ever_used: Some(true),
+        }
+    });
+    crate::resources::RuntimeResources {
+        memory: crate::resources::MemoryReading {
+            total_bytes: Some(RAM_TOTAL),
+            free_bytes: Some(RAM_FREE),
+        },
+        gpus: gpus.into_iter().collect(),
+        disks: vec![crate::resources::DiskReading {
+            label: Some("kernel".into()),
+            total_bytes: Some(DISK_TOTAL),
+            used_bytes: Some(DISK_USED),
+        }],
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MAccount {
     id: AccountId,
@@ -419,6 +452,8 @@ struct World {
     active_runs: Vec<MActiveRun>,
     run_steps: BTreeMap<String, std::sync::mpsc::Sender<()>>,
     secrets: BTreeMap<String, String>,
+    /// Env pairs of the latest plugin launch (file inputs are VM paths).
+    last_plugin_env: Vec<(String, String)>,
     a100_attempt: usize,
     defaults: Defaults,
     reserved: u32,
@@ -438,6 +473,8 @@ struct World {
     opened_urls: Vec<String>,
     restarted_kernels: Vec<String>,
     ssh_resets: Vec<String>,
+    /// When set, every resource fetch reports this instead of a live reading.
+    resource_fault: Option<crate::resources::ResourceFault>,
 }
 
 /// Email of the credential `MockFailures::unadopted_slot` puts in the slot.
@@ -747,6 +784,7 @@ impl MockBackend {
             active_runs: Vec::new(),
             run_steps: BTreeMap::new(),
             secrets: BTreeMap::new(),
+            last_plugin_env: Vec::new(),
             a100_attempt: 0,
             defaults: cfg.defaults.clone(),
             reserved: 0,
@@ -763,6 +801,7 @@ impl MockBackend {
             opened_urls: Vec::new(),
             restarted_kernels: Vec::new(),
             ssh_resets: Vec::new(),
+            resource_fault: None,
         };
         let off = MockFailures {
             cli_missing: cfg.failures.cli_missing,
@@ -869,6 +908,11 @@ impl MockBackend {
         w.apply_switches(&old);
     }
 
+    /// Makes the next resource reads fail without a zero reading. `None` restores the demo numbers.
+    pub fn set_resource_fault(&self, fault: Option<crate::resources::ResourceFault>) {
+        self.w().resource_fault = fault;
+    }
+
     /// Adds an unmanaged runtime (as if opened in the browser) to `account`.
     pub fn add_unmanaged_runtime(&self, account: &AccountId, accelerator: Accelerator) -> String {
         let now = self.cfg.clock.now();
@@ -899,15 +943,17 @@ impl MockBackend {
         let status = Some(RunStatus {
             state: run.state,
             stage: run.stage.clone(),
-            progress: Some(if run.state == RunState::Ready { 1.0 } else { 0.5 }),
+            progress: Some(if run.state == RunState::Ready {
+                1.0
+            } else {
+                0.5
+            }),
             message: Some(match run.state {
                 RunState::Ready => "ready (simulated)".to_owned(),
-                _ => format!(
-                    "simulated {}",
-                    run.stage.as_deref().unwrap_or("starting")
-                ),
+                _ => format!("simulated {}", run.stage.as_deref().unwrap_or("starting")),
             }),
             outputs: Default::default(),
+            metrics: Default::default(),
         });
         let step_rx = if run.manual_stages {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1045,6 +1091,69 @@ impl MockBackend {
             let _ = w.ledger.mark_stopped(&target.account, &n, now, reason);
         }
         Ok(())
+    }
+
+    /// Keep Plan and teardown after a plugin script stops.
+    /// A stop uses a fresh cancel token: the user's cancel must not skip giving the runtime back.
+    fn apply_after(
+        &self,
+        action: AfterRun,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        match action {
+            AfterRun::Leave => Ok(()),
+            AfterRun::SyncKeep => {
+                let has_plan = target.name.as_ref().is_some_and(|name| {
+                    self.w()
+                        .ledger
+                        .live(&target.account, name)
+                        .and_then(|e| e.keep_plan.as_ref())
+                        .is_some_and(|plan| plan.has_enabled_target())
+                });
+                if !has_plan {
+                    return Ok(());
+                }
+                self.sync_keep(target, None, cancel).map(|_| ())
+            }
+            AfterRun::Stop { save_keep } => {
+                // Save first, then stop with save_keep off so a failed Keep
+                // Plan does not skip the stop and is not saved twice. The
+                // fresh token is the one stop_session already used: a cancelled
+                // run must still give the runtime back.
+                let fresh = CancelToken::new();
+                let keep_error = if save_keep {
+                    let has_plan = target.name.as_ref().is_some_and(|name| {
+                        self.w()
+                            .ledger
+                            .live(&target.account, name)
+                            .and_then(|e| e.keep_plan.as_ref())
+                            .is_some_and(|plan| plan.has_enabled_target())
+                    });
+                    if has_plan {
+                        self.sync_keep(target, None, &fresh).err()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.stop_session(
+                    target,
+                    StopOptions {
+                        reason: StopReason::Provision,
+                        save_keep: false,
+                        force_on_keep_error: true,
+                        keep_timeout: None,
+                    },
+                    &fresh,
+                )?;
+                if let Some(err) = keep_error {
+                    return Err(err);
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1853,8 +1962,9 @@ impl Backend for MockBackend {
             .runtime(&target.account, name)
             .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", name))?;
         if w.failures.vm_listing_empty {
-            return Err(Error::new(ErrorKind::Io)
-                .detail(format!("File or directory not found: {path}")));
+            return Err(
+                Error::new(ErrorKind::Io).detail(format!("File or directory not found: {path}"))
+            );
         }
         let norm = format!("/{}", path.trim_start_matches('/'));
         if rt.vm_files.contains_key(&norm) {
@@ -1967,7 +2077,9 @@ impl Backend for MockBackend {
         targets: Option<Vec<crate::keep::KeepTargetId>>,
         cancel: &CancelToken,
     ) -> Result<crate::keep::KeepSyncReport> {
-        use crate::keep::{KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded};
+        use crate::keep::{
+            KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded,
+        };
 
         self.require_active(&target.account)?;
         let name = target
@@ -2190,10 +2302,9 @@ impl Backend for MockBackend {
             results.push((id, res));
         }
         let report = KeepSyncReport { at: now, results };
-        let _ = self
-            .w()
-            .ledger
-            .update(&target.account, &name, |e| e.last_keep_sync = Some(report.clone()));
+        let _ = self.w().ledger.update(&target.account, &name, |e| {
+            e.last_keep_sync = Some(report.clone())
+        });
         ensure_report_succeeded(&report)?;
         Ok(report)
     }
@@ -2222,13 +2333,15 @@ impl Backend for MockBackend {
             self.finish_drive_mount(target, mount_path)?;
             return Ok(DriveMountStart::Mounted);
         }
-        Ok(DriveMountStart::NeedsConsent(Box::new(MockDriveMountFlow {
-            m: self.clone(),
-            target: target.clone(),
-            mount_path: mount_path.to_owned(),
-            url: "https://accounts.google.com/o/oauth2/auth?client_id=mock-drive&scope=drive"
-                .into(),
-        })))
+        Ok(DriveMountStart::NeedsConsent(Box::new(
+            MockDriveMountFlow {
+                m: self.clone(),
+                target: target.clone(),
+                mount_path: mount_path.to_owned(),
+                url: "https://accounts.google.com/o/oauth2/auth?client_id=mock-drive&scope=drive"
+                    .into(),
+            },
+        )))
     }
 
     fn extend_session(
@@ -2327,10 +2440,7 @@ impl Backend for MockBackend {
             };
             let (mut stopped, mut error) = (false, None);
             if let Decision::Stop(concern) = &decision {
-                let save_keep = e
-                    .keep_plan
-                    .as_ref()
-                    .is_some_and(|p| p.has_enabled_target());
+                let save_keep = e.keep_plan.as_ref().is_some_and(|p| p.has_enabled_target());
                 match self.stop_session(
                     &target,
                     StopOptions {
@@ -2484,12 +2594,7 @@ impl Backend for MockBackend {
             "/home/demo/.local/share/colab-playground/accounts/{}/sessions.json",
             target.account.as_str()
         ));
-        crate::tunnel::remote_ssh_info(
-            &Host::Local,
-            "/home/demo/.local/bin/colab",
-            &state,
-            &name,
-        )
+        crate::tunnel::remote_ssh_info(&Host::Local, "/home/demo/.local/bin/colab", &state, &name)
     }
 
     fn write_temp_ssh_config(
@@ -2581,6 +2686,29 @@ impl Backend for MockBackend {
         }
         let resolved = resolve_inputs(&plugin.manifest, &spec.inputs)?;
         let endpoints = resolve_endpoints(&plugin.manifest, &resolved.values)?;
+        let saved = self.w().secrets.clone();
+        let (cap_env, cap_secrets) = capability_env(&plugin.manifest, &spec.consent, |name| {
+            saved.get(name).cloned()
+        })?;
+        let mut env = resolved.env.clone();
+        env.extend(cap_env);
+        let mut secrets = resolved.secrets.clone();
+        secrets.extend(cap_secrets);
+        let mut secret_keys: Vec<String> = plugin
+            .manifest
+            .inputs
+            .iter()
+            .filter(|input| input.kind == InputKind::Secret)
+            .map(|input| input.env_key())
+            .collect();
+        for (key, _) in &env {
+            if (key == "PLUGIN_HF_TOKEN" || key.starts_with("PLUGIN_SECRET_"))
+                && !secret_keys.iter().any(|existing| existing == key)
+            {
+                secret_keys.push(key.clone());
+            }
+        }
+        env.push((crate::vm::ENV_SECRET_KEYS.to_owned(), secret_keys.join(",")));
         let (session, provisioned) = match &spec.target {
             RunTarget::Existing { name } => {
                 if !self.w().runtime(&account, name).is_some() {
@@ -2608,7 +2736,12 @@ impl Backend for MockBackend {
                 .map(|r| r.endpoint.clone())
         };
         if let Some(mut plan) = spec.keep_plan {
-            let extra: Vec<String> = plugin.manifest.keep.iter().map(|k| k.path.clone()).collect();
+            let extra: Vec<String> = plugin
+                .manifest
+                .keep
+                .iter()
+                .map(|k| k.path.clone())
+                .collect();
             plan.merge_paths(&extra);
             let ep = endpoint_of(self).unwrap_or_default();
             self.set_keep_plan(
@@ -2621,19 +2754,61 @@ impl Backend for MockBackend {
                 cancel,
             )?;
         }
-        let stop_it = |m: &MockBackend| {
-            if let Some(ep) = endpoint_of(m) {
-                let _ = m.stop_inner(
-                    &RuntimeRef {
-                        account: account.clone(),
-                        endpoint: ep,
-                        name: Some(session.clone()),
-                    },
-                    StopReason::Provision,
-                );
-            }
+        let target_of = |m: &MockBackend| RuntimeRef {
+            account: account.clone(),
+            endpoint: endpoint_of(m).unwrap_or_default(),
+            name: Some(session.clone()),
+        };
+        let finish = |m: &MockBackend, end: RunEnd| -> Result<()> {
+            let action = crate::plugins::after_run(
+                spec.mode,
+                provisioned,
+                end,
+                spec.stop_on_failure,
+                spec.keep_on_failure,
+            );
+            m.apply_after(action, &target_of(m), cancel)
         };
         let run_id = format!("{}-{}", plugin.manifest.id, &crate::accounts::nonce()[..8]);
+        let run_dir = crate::vm::run_dir(&run_id);
+        let uploaded = (|| -> Result<()> {
+            let mut staged = resolved.uploads.clone();
+            let scratch = if plugin.assets.is_empty() {
+                None
+            } else {
+                Some(
+                    tempfile::tempdir()
+                        .map_err(|e| Error::new(ErrorKind::Io).detail(e.to_string()))?,
+                )
+            };
+            if let Some(dir) = scratch.as_ref() {
+                staged.extend(materialize_assets(&plugin.assets, dir.path())?);
+            }
+            let files = expand_uploads(&staged)?;
+            for (local, rel) in files {
+                let local_str = local
+                    .to_str()
+                    .ok_or_else(|| Error::invalid("path", "the local path is not usable"))?;
+                self.vm_upload(
+                    &target_of(self),
+                    local_str,
+                    &format!("{run_dir}/{rel}"),
+                    cancel,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = uploaded {
+            let end = if error.kind == ErrorKind::Cancelled {
+                RunEnd::Cancelled
+            } else {
+                RunEnd::Failed
+            };
+            let _ = finish(self, end);
+            return Err(error);
+        }
+        env.extend(vm_env(&run_dir, &resolved.vm_rels));
+        self.w().last_plugin_env = env;
         let _ = events.send(PluginRunEvent::Launched {
             session: session.clone(),
             run_id: run_id.clone(),
@@ -2651,21 +2826,24 @@ impl Backend for MockBackend {
             .collect();
         for (i, stage) in stages.iter().enumerate() {
             if self.step(cancel).is_err() {
-                if provisioned {
-                    stop_it(self);
-                }
+                let _ = finish(self, RunEnd::Cancelled);
                 return Err(Error::cancelled());
             }
             let status = RunStatus {
                 state: RunState::Running,
                 stage: Some(stage.clone()),
-                progress: Some((i as f64 + 0.5) / stages.len() as f64),
+                progress: Some((i as f64 + 0.5) / stages.len().max(1) as f64),
                 message: Some(format!("simulated {stage}")),
                 outputs: Default::default(),
+                metrics: Default::default(),
             };
             let _ = events.send(PluginRunEvent::Status(status));
+            let leaked = secrets.first().cloned().unwrap_or_default();
             let _ = events.send(PluginRunEvent::Log {
-                lines: vec![format!("[mock] {stage}: working")],
+                lines: vec![redact(
+                    &format!("[mock] {stage}: working {leaked}"),
+                    &secrets,
+                )],
             });
             if fail_stage.as_deref() == Some(stage.as_str()) {
                 let failed = RunStatus {
@@ -2674,11 +2852,10 @@ impl Backend for MockBackend {
                     progress: None,
                     message: Some(format!("simulated failure in {stage}")),
                     outputs: Default::default(),
+                    metrics: Default::default(),
                 };
                 let _ = events.send(PluginRunEvent::Status(failed));
-                if provisioned && spec.stop_on_failure {
-                    stop_it(self);
-                }
+                let _ = finish(self, RunEnd::Failed);
                 return Err(Error::new(ErrorKind::PluginRunFailed)
                     .with("stage", stage)
                     .with("message", format!("simulated failure in {stage}")));
@@ -2714,26 +2891,35 @@ impl Backend for MockBackend {
             outputs.insert("vram_total_mib".into(), v.into());
         }
         outputs.insert("tok_per_s".into(), 64.2.into());
+        let metrics = if spec.mode == RunMode::Job {
+            crate::vm::RunMetrics {
+                step: Some(3.0),
+                loss: Some(0.42),
+                tok_per_s: Some(12.5),
+            }
+        } else {
+            crate::vm::RunMetrics::default()
+        };
         let status = RunStatus {
             state: RunState::Ready,
             stage: stages.last().cloned(),
             progress: Some(1.0),
             message: Some("ready (simulated)".into()),
             outputs,
+            metrics,
         };
         let _ = events.send(PluginRunEvent::Status(status.clone()));
         if plugin.manifest.run.keep_alive {
             // A server stays running: the run ends when it is cancelled.
             for _ in 0..LIVE_RUN_STEPS {
-                if cancel.is_cancelled() {
-                    return Err(Error::cancelled());
-                }
-                if self.step(cancel).is_err() {
+                if cancel.is_cancelled() || self.step(cancel).is_err() {
+                    let _ = finish(self, RunEnd::Cancelled);
                     return Err(Error::cancelled());
                 }
                 std::thread::sleep(Duration::from_millis(LIVE_STEP_MILLIS));
             }
         }
+        finish(self, RunEnd::Succeeded)?;
         Ok(PluginRunOutcome {
             session,
             account,
@@ -2756,9 +2942,9 @@ impl Backend for MockBackend {
             .iter()
             .filter(|run| {
                 run.account == active
-                    && targets
-                        .iter()
-                        .any(|t| t.account == run.account && t.name.as_deref() == Some(&run.session))
+                    && targets.iter().any(|t| {
+                        t.account == run.account && t.name.as_deref() == Some(&run.session)
+                    })
             })
             .map(|run| DiscoveredRun {
                 account: run.account.clone(),
@@ -2839,6 +3025,7 @@ impl Backend for MockBackend {
                 progress: Some(1.0),
                 message: Some("ready (simulated)".into()),
                 outputs: Default::default(),
+                metrics: Default::default(),
             })
         } else {
             let start_idx = run
@@ -2858,6 +3045,7 @@ impl Backend for MockBackend {
                     progress: Some((i as f64 + 0.5) / stages.len().max(1) as f64),
                     message: Some(format!("simulated {stage}")),
                     outputs: Default::default(),
+                    metrics: Default::default(),
                 };
                 let _ = events.send(PluginRunEvent::Status(status));
                 let _ = events.send(PluginRunEvent::Log {
@@ -2874,6 +3062,7 @@ impl Backend for MockBackend {
                 progress: Some(1.0),
                 message: Some("ready (simulated)".into()),
                 outputs: Default::default(),
+                metrics: Default::default(),
             };
             let _ = events.send(PluginRunEvent::Status(status.clone()));
             status
@@ -2962,6 +3151,39 @@ impl Backend for MockBackend {
         }
         self.step(cancel)?;
         Ok(mock_listing(repo))
+    }
+
+    fn runtime_resources(
+        &self,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<crate::resources::ResourceStatus> {
+        cancel.check()?;
+        // A local world read. `step` waits `step_delay` (5s in the demo), and a poll of every
+        // runtime would stall the UI for that long each.
+        let world = self.w();
+        if let Some(fault) = world.resource_fault {
+            return Ok(match fault {
+                crate::resources::ResourceFault::Unavailable => {
+                    crate::resources::ResourceStatus::Unavailable
+                }
+                crate::resources::ResourceFault::Expired => {
+                    crate::resources::ResourceStatus::Expired
+                }
+                crate::resources::ResourceFault::Unreachable => {
+                    crate::resources::ResourceStatus::Unreachable
+                }
+            });
+        }
+        let Some(name) = target.name.as_deref().filter(|name| !name.is_empty()) else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        let Some(runtime) = world.runtime(&target.account, name) else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        Ok(crate::resources::ResourceStatus::Fresh(mock_resources(
+            runtime,
+        )))
     }
 
     fn check_for_update(&self, cancel: &CancelToken) -> Result<crate::update::UpdateStatus> {
@@ -3779,6 +4001,245 @@ mod tests {
         assert!(trx.try_iter().any(|e| matches!(e, TunnelEvent::State { state: TunnelState::Failed { ref error }, .. } if error.is(ErrorKind::SshBusy))));
     }
 
+    fn write_fixture(dir: &std::path::Path, toml: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("plugin.toml"), toml).unwrap();
+        std::fs::write(dir.join("main.py"), "print('hi')\n").unwrap();
+        std::fs::write(dir.join("requirements.txt"), "torch\n").unwrap();
+    }
+
+    #[test]
+    fn a_job_stops_the_runtime_it_opened_after_keep_and_a_failure_can_keep_it() {
+        let (m, _) = mock(MockScenario::single());
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(
+            dir.path(),
+            r#"
+api = 2
+id = "trainjob"
+version = "0.1.0"
+needs = ["gcp_auth"]
+[name]
+en = "Train"
+[run]
+script = "main.py"
+mode = "job"
+keep_on_failure = true
+[[inputs]]
+id = "data"
+type = "file"
+required = true
+[[secrets]]
+id = "civitai_token"
+required = true
+[secrets.label]
+en = "Civitai"
+[[assets]]
+path = "requirements.txt"
+[[stages]]
+id = "fit"
+[[keep]]
+path = "/content/out"
+"#,
+        );
+        let preview = m.inspect_plugin_folder(dir.path()).unwrap();
+        m.install_plugin(&preview).unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "rows").unwrap();
+        let mut spec = m.plugin_run_template("trainjob").unwrap();
+        spec.inputs.insert(
+            "data".into(),
+            crate::plugins::InputValue::Text(file.display().to_string()),
+        );
+        let (tx, _rx) = mpsc::channel();
+        assert!(
+            m.run_plugin(spec.clone(), tx, &nc())
+                .unwrap_err()
+                .is(ErrorKind::InvalidInput),
+            "gcp auth needs an explicit yes"
+        );
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+        spec.consent.gcp_auth = true;
+        let (tx, _rx) = mpsc::channel();
+        assert!(
+            m.run_plugin(spec.clone(), tx, &nc())
+                .unwrap_err()
+                .is(ErrorKind::InvalidInput),
+            "a required secret slot must be saved first"
+        );
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+        m.set_secret("p08_trainjob_civitai_token", "sek-civitai-token", &nc())
+            .unwrap();
+        let keep_dir = tempfile::tempdir().unwrap();
+        spec.keep_plan = Some(crate::keep::KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: Some(crate::keep::LocalKeepTarget {
+                folder: keep_dir.path().display().to_string(),
+            }),
+            ..Default::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        let out = m.run_plugin(spec, tx, &nc()).unwrap();
+        assert_eq!(out.status.state, RunState::Ready);
+        assert_eq!(out.status.metrics.step, Some(3.0));
+        assert_eq!(out.status.metrics.loss, Some(0.42));
+        assert_eq!(out.status.metrics.tok_per_s, Some(12.5));
+        assert!(
+            m.runtimes(&nc()).unwrap().runtimes.is_empty(),
+            "a finished job stops the runtime it opened"
+        );
+        assert!(
+            m.w()
+                .ledger
+                .entries()
+                .iter()
+                .any(|entry| entry.name == out.session && entry.last_keep_sync.is_some()),
+            "the Keep Plan runs before that stop"
+        );
+        let logs: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                PluginRunEvent::Log { lines } => Some(lines.join("\n")),
+                _ => None,
+            })
+            .collect();
+        assert!(logs.iter().all(|line| !line.contains("sek-civitai")));
+        assert!(logs.iter().any(|line| line.contains("***")));
+
+        m.set_failures(MockFailures {
+            plugin_fail_stage: Some("fit".into()),
+            ..MockFailures::default()
+        });
+        let mut again = m.plugin_run_template("trainjob").unwrap();
+        again.consent.gcp_auth = true;
+        again.inputs.insert(
+            "data".into(),
+            crate::plugins::InputValue::Text(file.display().to_string()),
+        );
+        let (tx, _rx) = mpsc::channel();
+        assert!(
+            m.run_plugin(again, tx, &nc())
+                .unwrap_err()
+                .is(ErrorKind::PluginRunFailed)
+        );
+        assert_eq!(
+            m.runtimes(&nc()).unwrap().runtimes.len(),
+            1,
+            "keep_on_failure leaves the runtime up"
+        );
+    }
+
+    #[test]
+    fn a_failed_keep_plan_still_stops_the_runtime_the_job_opened() {
+        let (m, _) = mock(MockScenario::single());
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(
+            dir.path(),
+            r#"
+api = 2
+id = "trainjob"
+version = "0.1.0"
+[name]
+en = "Train"
+[run]
+script = "main.py"
+mode = "job"
+[[keep]]
+path = "/content/out"
+"#,
+        );
+        m.install_plugin(&m.inspect_plugin_folder(dir.path()).unwrap())
+            .unwrap();
+        m.set_failures(MockFailures {
+            keep_sync_fails: true,
+            ..MockFailures::default()
+        });
+        let mut spec = m.plugin_run_template("trainjob").unwrap();
+        let keep_dir = tempfile::tempdir().unwrap();
+        spec.keep_plan = Some(crate::keep::KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: Some(crate::keep::LocalKeepTarget {
+                folder: keep_dir.path().display().to_string(),
+            }),
+            ..Default::default()
+        });
+        let (tx, _rx) = mpsc::channel();
+        let err = m.run_plugin(spec, tx, &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Io), "{err}");
+        assert!(
+            err.detail.contains("simulated Keep Plan sync failure"),
+            "{err:?}"
+        );
+        assert!(
+            m.runtimes(&nc()).unwrap().runtimes.is_empty(),
+            "the runtime this job opened stops even when the save fails"
+        );
+    }
+
+    #[test]
+    fn a_service_uploads_files_without_putting_the_local_path_in_the_environment() {
+        let (m, _) = mock(MockScenario::single());
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(
+            dir.path(),
+            r#"
+api = 1
+id = "copyin"
+version = "0.1.0"
+[name]
+en = "Copy"
+[run]
+script = "main.py"
+[[inputs]]
+id = "data"
+type = "file"
+required = true
+[[assets]]
+path = "requirements.txt"
+[[stages]]
+id = "copy"
+"#,
+        );
+        let preview = m.inspect_plugin_folder(dir.path()).unwrap();
+        m.install_plugin(&preview).unwrap();
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "rows").unwrap();
+        let local = file.display().to_string();
+        let mut spec = m.plugin_run_template("copyin").unwrap();
+        spec.inputs.insert(
+            "data".into(),
+            crate::plugins::InputValue::Text(local.clone()),
+        );
+        let (tx, _rx) = mpsc::channel();
+        let out = m.run_plugin(spec, tx, &nc()).unwrap();
+        assert_eq!(out.status.state, RunState::Ready);
+        let uploads = m
+            .w()
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.name.as_deref() == Some(out.session.as_str()))
+            .expect("a service leaves its runtime up")
+            .uploads
+            .clone();
+        assert!(
+            uploads
+                .iter()
+                .any(|line| line.contains("inputs/data/notes.txt"))
+        );
+        assert!(
+            uploads
+                .iter()
+                .any(|line| line.contains("assets/requirements.txt"))
+        );
+        let env = m.w().last_plugin_env.clone();
+        assert!(env.iter().any(|(key, value)| {
+            key == "PLUGIN_INPUT_DATA"
+                && value.ends_with("inputs/data/notes.txt")
+                && !value.contains(&local)
+        }));
+        assert!(env.iter().all(|(_, value)| !value.contains(&local)));
+    }
+
     #[test]
     fn switch_impact_lists_tunnels_and_sessions() {
         let (m, _) = mock(MockScenario::demo());
@@ -4318,9 +4779,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("asset.safetensors");
         std::fs::write(&file, b"weights").unwrap();
-        m.vm_upload(&target, &file.to_string_lossy(), "content/asset.safetensors", &nc())
-            .expect("upload succeeds");
-        let entries = m.vm_list_dir(&target, "content", &nc()).expect("list succeeds");
+        m.vm_upload(
+            &target,
+            &file.to_string_lossy(),
+            "content/asset.safetensors",
+            &nc(),
+        )
+        .expect("upload succeeds");
+        let entries = m
+            .vm_list_dir(&target, "content", &nc())
+            .expect("list succeeds");
         assert!(
             entries
                 .iter()

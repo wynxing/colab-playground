@@ -661,6 +661,14 @@ pub(super) const MESSAGES: Messages = &[
     (SESSIONS_STARTING, "{name} を開始しています"),
     (RUNTIME_HARDWARE, "ハードウェア"),
     (RUNTIME_UPTIME, "実行時間"),
+    (RES_RAM, "メモリ"),
+    (RES_VRAM, "VRAM"),
+    (RES_DISK, "ディスク"),
+    (RES_PAIR, "{used} / {total}"),
+    (RES_UNKNOWN, "不明"),
+    (RES_EXPIRED, "期限切れ"),
+    (RES_NO_GPU, "GPU なし"),
+    (RES_UTIL, "{n}%"),
     (RUNTIME_RATE, "消費ペース"),
     (RUNTIME_SPEND, "これまでの消費量"),
     (RUNTIME_AUTO_STOP, "自動停止"),
@@ -1591,5 +1599,67 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_CONTROL_HINT,
         "直接モードは CLI を使わず Colab に接続します。CLI はフォールバックとして残ります。",
+    ),
+    (
+        PLUGIN_NEEDS_GCP_AUTH,
+        "ランタイム上の Google Cloud 認証（許可したときだけ）",
+    ),
+    (
+        PLUGIN_NEEDS_DRIVE,
+        "ランタイム上の Google ドライブ（許可したときだけ）",
+    ),
+    (PLUGIN_NEEDS_SECRET, "{name}（保存した秘密）"),
+    (PLUGIN_MODE, "実行"),
+    (
+        PLUGIN_MODE_JOB,
+        "一度実行し、Keep Plan のあと、この実行が開いたランタイムを停止します",
+    ),
+    (PLUGIN_FILES, "ファイル"),
+    (PLUGIN_ASSETS, "プラグインに同梱されたファイル {count} 個"),
+    (PLUGIN_SECRETS_TITLE, "プラグインの秘密"),
+    (
+        PLUGIN_SECRET_HINT,
+        "このプラグインのキーリングに保存します。値は伏せられ、フォームには残りません。",
+    ),
+    (RUN_KEEP_ON_FAILURE, "ジョブが失敗しても新しいランタイムを残す"),
+    (
+        RUN_KEEP_ON_FAILURE_ON,
+        "確認できるようランタイムは動き続け、コンピューティング ユニットも消費し続けます。",
+    ),
+    (
+        RUN_KEEP_ON_FAILURE_OFF,
+        "このジョブが開いたランタイムは、スクリプトが失敗すると停止します。",
+    ),
+    (
+        RUN_CONSENT_GCP,
+        "この実行に、ランタイム上の Google Cloud 認証を許可する",
+    ),
+    (
+        RUN_CONSENT_DRIVE,
+        "この実行に、ランタイム上の Google ドライブを許可する",
+    ),
+    (
+        RUN_CONSENT_REQUIRED,
+        "開始する前に、このプラグインが求めるアクセスを許可してください。",
+    ),
+    (RUN_METRICS, "指標"),
+    (RUN_METRIC_STEP, "ステップ"),
+    (RUN_METRIC_LOSS, "損失"),
+    (RUN_METRIC_TOK, "1 秒あたりのトークン"),
+    (
+        RUN_PATH_FILE,
+        "このコンピューター上のファイルのパス。アップロードされ、スクリプトが見るのはランタイム上のパスだけです。",
+    ),
+    (
+        RUN_PATH_DIR,
+        "このコンピューター上のフォルダーのパス。中のファイルがアップロードされ、スクリプトが見るのはランタイム上のフォルダーだけです。",
+    ),
+    (
+        RUN_PATH_NOTEBOOK,
+        "このコンピューター上の .ipynb のパス。アップロードされ、スクリプトが見るのはランタイム上のパスだけです。",
+    ),
+    (
+        RUN_TEXTAREA_HINT,
+        "改行を含むプレーンテキストです。書かれたとおりに渡され、コードとしては実行されません。",
     ),
 ];

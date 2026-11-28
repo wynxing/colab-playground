@@ -9,6 +9,7 @@ pub mod overlays;
 pub mod pages;
 pub mod parts;
 pub mod progress;
+pub mod resources;
 pub mod provision_form;
 pub mod root;
 pub mod runtime_options;
@@ -74,6 +75,8 @@ pub struct Inputs {
     pub upload_remote: Entity<TextInput>,
     /// Run form: text, secret and model fields by input id (made when a form opens).
     pub fields: std::collections::BTreeMap<String, Entity<TextInput>>,
+    /// Named plugin secret slots (`secret-slot/<plugin>/<slot>`), separate from run-form fields.
+    pub secret_slots: std::collections::BTreeMap<String, Entity<TextInput>>,
 }
 
 impl Inputs {

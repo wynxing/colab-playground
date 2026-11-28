@@ -583,6 +583,14 @@ pub(super) const MESSAGES: Messages = &[
     (SESSIONS_STARTING, "{name} 시작 중"),
     (RUNTIME_HARDWARE, "하드웨어"),
     (RUNTIME_UPTIME, "실행 시간"),
+    (RES_RAM, "메모리"),
+    (RES_VRAM, "VRAM"),
+    (RES_DISK, "디스크"),
+    (RES_PAIR, "{used} / {total}"),
+    (RES_UNKNOWN, "알 수 없음"),
+    (RES_EXPIRED, "만료됨"),
+    (RES_NO_GPU, "GPU 없음"),
+    (RES_UTIL, "{n}%"),
     (RUNTIME_RATE, "소비 속도"),
     (RUNTIME_SPEND, "지금까지 소비량"),
     (RUNTIME_AUTO_STOP, "자동 중지"),
@@ -1486,5 +1494,61 @@ pub(super) const MESSAGES: Messages = &[
     (
         SETTINGS_CONTROL_HINT,
         "직접 모드는 CLI 없이 Colab에 연결합니다. CLI는 대체 수단으로 남습니다.",
+    ),
+    (
+        PLUGIN_NEEDS_GCP_AUTH,
+        "런타임의 Google Cloud 인증(허용한 경우에만)",
+    ),
+    (
+        PLUGIN_NEEDS_DRIVE,
+        "런타임의 Google Drive(허용한 경우에만)",
+    ),
+    (PLUGIN_NEEDS_SECRET, "{name}(저장된 비밀)"),
+    (PLUGIN_MODE, "실행"),
+    (
+        PLUGIN_MODE_JOB,
+        "한 번 실행하고 Keep Plan을 적용한 뒤, 이번 실행이 연 런타임을 중지합니다",
+    ),
+    (PLUGIN_FILES, "파일"),
+    (PLUGIN_ASSETS, "플러그인과 함께 제공되는 파일 {count}개"),
+    (PLUGIN_SECRETS_TITLE, "플러그인 비밀"),
+    (
+        PLUGIN_SECRET_HINT,
+        "이 플러그인의 키링에 저장됩니다. 값은 가려지며 양식에 남지 않습니다.",
+    ),
+    (RUN_KEEP_ON_FAILURE, "작업이 실패해도 새 런타임을 유지"),
+    (
+        RUN_KEEP_ON_FAILURE_ON,
+        "확인할 수 있도록 런타임이 계속 동작하며 컴퓨팅 단위도 계속 사용합니다.",
+    ),
+    (
+        RUN_KEEP_ON_FAILURE_OFF,
+        "이 작업이 연 런타임은 스크립트가 실패하면 중지됩니다.",
+    ),
+    (RUN_CONSENT_GCP, "이 실행에서 런타임의 Google Cloud 인증을 허용"),
+    (RUN_CONSENT_DRIVE, "이 실행에서 런타임의 Google Drive를 허용"),
+    (
+        RUN_CONSENT_REQUIRED,
+        "시작하기 전에 이 플러그인이 요청하는 접근을 허용하세요.",
+    ),
+    (RUN_METRICS, "지표"),
+    (RUN_METRIC_STEP, "단계"),
+    (RUN_METRIC_LOSS, "손실"),
+    (RUN_METRIC_TOK, "초당 토큰"),
+    (
+        RUN_PATH_FILE,
+        "이 컴퓨터의 파일 경로입니다. 업로드되며 스크립트는 런타임의 경로만 봅니다.",
+    ),
+    (
+        RUN_PATH_DIR,
+        "이 컴퓨터의 폴더 경로입니다. 안의 파일이 업로드되며 스크립트는 런타임의 폴더만 봅니다.",
+    ),
+    (
+        RUN_PATH_NOTEBOOK,
+        "이 컴퓨터의 .ipynb 경로입니다. 업로드되며 스크립트는 런타임의 경로만 봅니다.",
+    ),
+    (
+        RUN_TEXTAREA_HINT,
+        "줄바꿈을 포함한 일반 텍스트입니다. 적힌 그대로 전달되며 코드로 실행되지 않습니다.",
     ),
 ];
