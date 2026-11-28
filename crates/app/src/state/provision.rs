@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use colab_playground_core::{
     Error, ErrorKind,
-    backend::accelerator_prefix,
+    backend::{HardwareCatalog, accelerator_prefix},
     provision::{ProvisionEvent, ProvisionOutcome, ProvisionSpec},
 };
 use gpui::{Context, ScrollHandle};
@@ -102,6 +102,33 @@ impl AppState {
         self.backend.as_ref().ok().map(|backend| backend.now())
     }
 
+    /// What the signed-in plan can allocate. Unknown until a fetch succeeds.
+    pub fn hardware_catalog(&self) -> &HardwareCatalog {
+        &self.hardware_catalog
+    }
+
+    /// Keeps a known catalog when a later fetch learns nothing.
+    pub fn set_hardware_catalog(&mut self, catalog: HardwareCatalog, cx: &mut Context<Self>) {
+        if catalog.is_known() || !self.hardware_catalog.is_known() {
+            self.hardware_catalog = catalog;
+            cx.notify();
+        }
+    }
+
+    /// Loads `runtimespecs` and the subscription off the UI thread.
+    pub fn refresh_hardware_catalog(&mut self, cx: &mut Context<Self>) {
+        self.run_backend(
+            Op::HardwareCatalog,
+            cx,
+            |backend, cancel| backend.hardware_catalog(cancel),
+            |state, result, cx| {
+                if let Ok(catalog) = result {
+                    state.set_hardware_catalog(catalog, cx);
+                }
+            },
+        );
+    }
+
     pub fn open_new_session(&mut self, cx: &mut Context<Self>) {
         if let Some(session) = &self.new_session
             && session.phase == ProvisionPhase::Running
@@ -123,6 +150,7 @@ impl AppState {
         // Whatever an earlier opening left in the field is not a name typed for this one.
         self.set_input(InputSlot::SessionName, String::new());
         self.suggest_session_name(cx);
+        self.refresh_hardware_catalog(cx);
         cx.notify();
     }
 

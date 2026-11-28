@@ -1,7 +1,8 @@
 //! One runtime: what it is, what it costs, when it stops, its forwards, and the actions it
-//! allows. Stop works for every runtime on every account. Extend, cancelling auto-stop and
-//! forwarding need the owning account to be active (the card offers to switch instead) and a
-//! named runtime (runtimes opened elsewhere show them disabled with the reason).
+//! allows. Stop works for every runtime on every account. On the CLI backend, extend and
+//! forwarding need the owning account to be active (the card offers to switch instead). The
+//! direct backend does those on a named session without switching. A runtime opened elsewhere
+//! shows the named-only actions disabled, with the reason.
 
 use colab_playground_core::{
     ErrorKind,
@@ -279,22 +280,24 @@ pub(super) fn render(
         if ssh_busy {
             let resetting = state.is_resetting_ssh(&runtime.id);
             let (reset_handle, reset_target) = (handle.clone(), runtime.id.clone());
-            forwards = forwards.child(div().child(tagged(
-                reset_ssh_selector(&label),
-                Button::new(
-                    SharedString::from(format!("reset-ssh-{key}")),
-                    tr(cx, keys::RESET_SSH_ACTION),
-                )
-                .variant(ButtonVariant::Ghost)
-                .size(ControlSize::Sm)
-                .loading(resetting)
-                .disabled(resetting)
-                .on_click(move |_, _, cx| {
-                    reset_handle.update(cx, |state, cx| {
-                        state.reset_ssh_sessions(reset_target.clone(), cx)
-                    })
-                }),
-            )));
+            forwards = forwards.child(
+                div().child(tagged(
+                    reset_ssh_selector(&label),
+                    Button::new(
+                        SharedString::from(format!("reset-ssh-{key}")),
+                        tr(cx, keys::RESET_SSH_ACTION),
+                    )
+                    .variant(ButtonVariant::Ghost)
+                    .size(ControlSize::Sm)
+                    .loading(resetting)
+                    .disabled(resetting)
+                    .on_click(move |_, _, cx| {
+                        reset_handle.update(cx, |state, cx| {
+                            state.reset_ssh_sessions(reset_target.clone(), cx)
+                        })
+                    }),
+                )),
+            );
         }
         card = card.child(forwards);
     }
@@ -395,22 +398,28 @@ fn actions(
     };
     let mut row = div().flex().flex_wrap().items_center().gap_2().child(stop);
     if !runtime.on_active_account {
-        let (handle, account) = (handle.clone(), runtime.id.account.clone());
-        return row
-            .child(tagged(
-                switch_selector(label),
-                Button::new(
-                    SharedString::from(format!("switch-{key}")),
-                    tr(cx, keys::RUNTIME_SWITCH),
-                )
-                .size(ControlSize::Sm)
-                .icon(IconName::Link)
-                .on_click(move |_, _, cx| {
-                    handle.update(cx, |state, cx| state.request_switch(account.clone(), cx))
-                }),
-            ))
-            .child(Caption::new(tr(cx, keys::RUNTIME_SWITCH_HINT)))
-            .into_any_element();
+        let (switch_handle, account) = (handle.clone(), runtime.id.account.clone());
+        row = row.child(tagged(
+            switch_selector(label),
+            Button::new(
+                SharedString::from(format!("switch-{key}")),
+                tr(cx, keys::RUNTIME_SWITCH),
+            )
+            .size(ControlSize::Sm)
+            .icon(IconName::Link)
+            .on_click(move |_, _, cx| {
+                switch_handle.update(cx, |state, cx| state.request_switch(account.clone(), cx))
+            }),
+        ));
+        // Direct mode already holds each account's token, so extend and forward do not switch.
+        if state.uses_direct_control() && runtime.id.name.is_some() {
+            row = row
+                .child(lifetime_actions(runtime, label, key, state, handle, cx))
+                .child(forward_button(label, key, handle, &target, cx));
+        } else {
+            row = row.child(Caption::new(tr(cx, keys::RUNTIME_SWITCH_HINT)));
+        }
+        return row.into_any_element();
     }
     let named = runtime.id.name.is_some();
     // Actions that cannot apply are left out; only forwarding stays visible (disabled, with
@@ -532,27 +541,28 @@ fn actions(
             state.open_forward_dialog(forward_target.clone(), cx)
         })
     });
-    let mut row = row.child(tagged(
-        open_browser_selector(label),
-        named_action(named, format!("open-browser-wrap-{key}"), open_browser, cx),
-    ))
-    .child(tagged(
-        restart_kernel_selector(label),
-        named_action(
-            named,
-            format!("restart-kernel-wrap-{key}"),
-            restart_kernel,
-            cx,
-        ),
-    ))
-    .child(tagged(
-        ide_ssh_selector(label),
-        named_action(named, format!("ide-ssh-wrap-{key}"), ide_ssh, cx),
-    ))
-    .child(tagged(
-        forward_selector(label),
-        named_action(named, format!("forward-wrap-{key}"), forward, cx),
-    ));
+    let mut row = row
+        .child(tagged(
+            open_browser_selector(label),
+            named_action(named, format!("open-browser-wrap-{key}"), open_browser, cx),
+        ))
+        .child(tagged(
+            restart_kernel_selector(label),
+            named_action(
+                named,
+                format!("restart-kernel-wrap-{key}"),
+                restart_kernel,
+                cx,
+            ),
+        ))
+        .child(tagged(
+            ide_ssh_selector(label),
+            named_action(named, format!("ide-ssh-wrap-{key}"), ide_ssh, cx),
+        ))
+        .child(tagged(
+            forward_selector(label),
+            named_action(named, format!("forward-wrap-{key}"), forward, cx),
+        ));
     if named {
         let (upload_handle, upload_target) = (handle.clone(), target.clone());
         let uploading = state.is_uploading(&target);
@@ -585,7 +595,9 @@ fn actions(
             .icon(IconName::Settings)
             .size(ControlSize::Sm)
             .on_click(move |_, _, cx| {
-                keep_handle.update(cx, |state, cx| state.open_keep_plan(keep_target.clone(), cx))
+                keep_handle.update(cx, |state, cx| {
+                    state.open_keep_plan(keep_target.clone(), cx)
+                })
             }),
         ));
         let plan = runtime.tracked.as_ref().and_then(|t| t.keep_plan.as_ref());
@@ -631,6 +643,106 @@ fn actions(
         }
     }
     row.into_any_element()
+}
+
+/// Extend, or set an auto-stop, for a named runtime. Does not switch accounts.
+fn lifetime_actions(
+    runtime: &Runtime,
+    label: &str,
+    key: u64,
+    state: &AppState,
+    handle: &Entity<AppState>,
+    cx: &App,
+) -> AnyElement {
+    let target = runtime.id.clone();
+    let named = runtime.id.name.is_some();
+    let mut row = div().flex().flex_wrap().items_center().gap_2();
+    if named && runtime.auto_stop_at.is_some() {
+        if let Some(by) = state.rearm_duration() {
+            let (handle, target) = (handle.clone(), target.clone());
+            let busy = state.is_busy(Op::Extend(key_of(&target)));
+            row = row.child(tagged(
+                extend_selector(label),
+                Button::new(
+                    SharedString::from(format!("extend-{key}")),
+                    tr_args(
+                        cx,
+                        keys::RUNTIME_EXTEND_BY,
+                        &[("time", &format::duration(cx, by))],
+                    ),
+                )
+                .size(ControlSize::Sm)
+                .loading(busy)
+                .on_click(move |_, _, cx| {
+                    handle.update(cx, |state, cx| state.extend_session(target.clone(), cx))
+                }),
+            ));
+        }
+        let (handle, target) = (handle.clone(), target.clone());
+        row = row.child(tagged(
+            cancel_auto_stop_selector(label),
+            Button::new(
+                SharedString::from(format!("cancel-auto-stop-{key}")),
+                tr(cx, keys::RUNTIME_CANCEL_AUTO_STOP),
+            )
+            .variant(ButtonVariant::Ghost)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                handle.update(cx, |state, cx| {
+                    state.request_cancel_auto_stop(target.clone(), cx)
+                })
+            }),
+        ));
+    } else if named
+        && runtime.managed
+        && let Some(by) = state.rearm_duration()
+    {
+        let (handle, target) = (handle.clone(), target);
+        let busy = state.is_busy(Op::Extend(key_of(&target)));
+        row = row.child(tagged(
+            set_auto_stop_selector(label),
+            Button::new(
+                SharedString::from(format!("set-auto-stop-{key}")),
+                tr_args(
+                    cx,
+                    keys::RUNTIME_SET_AUTO_STOP,
+                    &[("time", &format::duration(cx, by))],
+                ),
+            )
+            .size(ControlSize::Sm)
+            .loading(busy)
+            .on_click(move |_, _, cx| {
+                handle.update(cx, |state, cx| state.set_auto_stop(target.clone(), cx))
+            }),
+        ));
+    }
+    row.into_any_element()
+}
+
+fn forward_button(
+    label: &str,
+    key: u64,
+    handle: &Entity<AppState>,
+    target: &colab_playground_core::backend::RuntimeRef,
+    cx: &App,
+) -> AnyElement {
+    let (forward_handle, forward_target) = (handle.clone(), target.clone());
+    tagged(
+        forward_selector(label),
+        Button::new(
+            SharedString::from(format!("forward-{key}")),
+            tr(cx, keys::FORWARD_TITLE),
+        )
+        .variant(ButtonVariant::Ghost)
+        .icon(IconName::Link)
+        .size(ControlSize::Sm)
+        .on_click(move |_, _, cx| {
+            forward_handle.update(cx, |state, cx| {
+                state.open_forward_dialog(forward_target.clone(), cx)
+            })
+        }),
+    )
+    .into_any_element()
 }
 
 fn named_action(named: bool, wrap_id: String, button: Button, cx: &App) -> AnyElement {

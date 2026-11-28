@@ -298,6 +298,8 @@ pub struct HostSetup {
     pub wsl_distro: Option<String>,
     /// `colab` and its Python interpreter; `None` = found automatically.
     pub toolchain: Option<Toolchain>,
+    /// Talk to Colab's public API instead of the CLI. The CLI stays available.
+    pub direct: bool,
 }
 
 /// Builds the backend for `source`. A mock is returned as it is, with `defaults` pushed in.
@@ -311,6 +313,9 @@ pub fn build(
             mock.set_defaults(defaults.clone());
             Ok(mock.clone())
         }
+        BackendSource::Real if host.direct => Ok(Arc::new(
+            colab_playground_core::direct::DirectBackend::production(defaults.clone(), None, None)?,
+        )),
         BackendSource::Real => {
             let mut config = RealConfig::for_app(defaults.clone())?;
             if let Host::Wsl { distro } = &mut config.host {

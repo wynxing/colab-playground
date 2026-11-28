@@ -124,12 +124,16 @@ pub(super) fn render(
         let running = state.is_running_plugin();
         // A new session would only fail at the cap: say so before Deploy, like New session.
         let limited = form.existing.is_none() && state.session_limit_reached().is_some();
+        let ineligible = form.existing.is_none()
+            && state
+                .hardware_catalog()
+                .blocks(form.provision.accelerator, form.provision.high_mem);
         tagged(
             RUN_START,
             Button::new(RUN_START, tr(cx, keys::RUN_START))
                 .primary()
                 .icon(IconName::Rocket)
-                .disabled(running || limited)
+                .disabled(running || limited || ineligible)
                 .on_click(move |_, _, cx| {
                     let mut texts = Vec::new();
                     for (id, _) in &ids {
@@ -633,6 +637,9 @@ fn target_card(
                 state.measured_rate(&form.provision),
                 edit,
                 None,
+                state
+                    .hardware_catalog()
+                    .blocks(form.provision.accelerator, form.provision.high_mem),
                 cx,
             ));
         // A job stops a runtime it opened unless keep-on-failure is on.

@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 use colab_playground::{
     i18n::{self, Language},
     route::Route,
+    settings::ControlPlane,
     state::{DriveMountPhase, EndReason, Load, Overlay, ProvisionPhase, ProvisionProgress},
     ui::{
         overlays::{
@@ -19,10 +20,10 @@ use colab_playground::{
         pages::{
             plugins::RUN_KEEP_CONFIGURE,
             sessions::{
-                NEW_SESSION_SELECTOR, drive_mount_selector, forward_selector, ide_ssh_selector,
-                keep_selector, keep_summary_selector, open_browser_selector, reset_ssh_selector,
-                restart_kernel_selector, stop_selector, switch_selector, sync_keep_selector,
-                upload_selector,
+                NEW_SESSION_SELECTOR, drive_mount_selector, extend_selector, forward_selector,
+                ide_ssh_selector, keep_selector, keep_summary_selector, open_browser_selector,
+                reset_ssh_selector, restart_kernel_selector, set_auto_stop_selector, stop_selector,
+                switch_selector, sync_keep_selector, upload_selector,
             },
         },
         progress, provision_form,
@@ -162,6 +163,51 @@ fn an_accelerator_the_account_cannot_use_says_so(cx: &mut TestAppContext) {
         phase(&mut app),
         Some(ProvisionPhase::Editing),
         "back to the form"
+    );
+}
+
+#[gpui::test]
+fn an_ineligible_accelerator_is_warned_and_cannot_start(cx: &mut TestAppContext) {
+    use colab_playground_core::backend::{HardwareCatalog, RuntimeOffer};
+
+    let mut app = TestApp::with(cx, Options::scenario(MockScenario::single()));
+    open_new_session(&mut app);
+    app.update(|state, cx| {
+        state.set_hardware_catalog(
+            HardwareCatalog {
+                tier: Some("SUBSCRIPTION_TIER_PRO".into()),
+                offers: vec![
+                    RuntimeOffer {
+                        accelerator: Accelerator::H100,
+                        high_mem: false,
+                        eligible: false,
+                    },
+                    RuntimeOffer {
+                        accelerator: Accelerator::A100,
+                        high_mem: false,
+                        eligible: true,
+                    },
+                ],
+            },
+            cx,
+        );
+        state.edit_new_session(
+            |spec| {
+                spec.accelerator = Accelerator::H100;
+                spec.high_mem = false;
+            },
+            cx,
+        );
+    });
+    assert!(
+        app.shown("prov accelerator-ineligible"),
+        "the plan warning is on the form"
+    );
+    app.click(NEW_SESSION_START);
+    assert_eq!(
+        phase(&mut app),
+        Some(ProvisionPhase::Editing),
+        "start stays disabled"
     );
 }
 
@@ -1713,6 +1759,33 @@ fn ssh_busy_offers_reset_ssh_recovery_in_forward_dialog_and_inactive_or_unnamed_
     assert!(
         app.read(|state, _| state.overlay().is_none()),
         "forwarding succeeds right after clearing stale SSH sessions"
+    );
+}
+
+#[gpui::test]
+fn direct_mode_extends_and_forwards_another_accounts_named_runtime(cx: &mut TestAppContext) {
+    let mut app = TestApp::new(cx);
+    app.update(|state, cx| state.set_control_plane(ControlPlane::Direct, cx));
+    on_sessions(&mut app);
+
+    assert!(
+        app.shown(&extend_selector("cpu-0b5e")) || app.shown(&set_auto_stop_selector("cpu-0b5e")),
+        "a named runtime on another account offers extend or set-auto-stop"
+    );
+    assert!(app.shown(&forward_selector("cpu-0b5e")));
+    assert!(app.shown(&switch_selector("cpu-0b5e")));
+    assert!(!app.shown(&open_browser_selector("cpu-0b5e")));
+    assert!(!app.shown(&restart_kernel_selector("cpu-0b5e")));
+    assert!(!app.shown(&ide_ssh_selector("cpu-0b5e")));
+
+    app.click(&forward_selector("cpu-0b5e"));
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::Forward(_))
+    ));
+    assert_eq!(
+        app.read(|state, _| state.active_email()).as_deref(),
+        Some("ada@example.com")
     );
 }
 

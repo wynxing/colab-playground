@@ -118,6 +118,7 @@ pub fn render(
     rate: Option<(RateReading, SystemTime)>,
     edit: SpecEdit,
     scroll: Option<&ScrollHandle>,
+    ineligible: bool,
     cx: &App,
 ) -> AnyElement {
     let controls = Controls {
@@ -194,7 +195,7 @@ pub fn render(
         row(
             "accelerator",
             tr(cx, keys::DEF_ACCELERATOR),
-            None,
+            ineligible.then(|| tr(cx, keys::PROV_INELIGIBLE)),
             accelerator,
             cx,
         ),
@@ -260,10 +261,12 @@ pub fn render(
             idle,
         ),
     ]);
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .children(rows)
-        .into_any_element()
+    let mut form = div().flex().flex_col().gap_1().children(rows);
+    if ineligible {
+        form = form.child(tagged(
+            "prov accelerator-ineligible",
+            Caption::new(tr(cx, keys::PROV_INELIGIBLE)),
+        ));
+    }
+    form.into_any_element()
 }
