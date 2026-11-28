@@ -3320,16 +3320,45 @@ impl RealBackend {
                 }
                 self.sync_keep(target, None, cancel).map(|_| ())
             }
-            AfterRun::Stop { save_keep } => self.stop_session(
-                target,
-                StopOptions {
-                    reason: StopReason::Provision,
-                    save_keep,
-                    force_on_keep_error: false,
-                    keep_timeout: None,
-                },
-                &CancelToken::new(),
-            ),
+            AfterRun::Stop { save_keep } => {
+                // Save first, then stop with save_keep off so a failed Keep
+                // Plan does not skip the stop and is not saved twice. The
+                // fresh token is the one stop_session already used: a cancelled
+                // run must still give the runtime back. A stop error wins,
+                // because that runtime is still billing.
+                let fresh = CancelToken::new();
+                let keep_error = if save_keep {
+                    let has_plan = target.name.as_ref().is_some_and(|name| {
+                        self.inner
+                            .st()
+                            .ledger
+                            .live(&target.account, name)
+                            .and_then(|entry| entry.keep_plan.as_ref())
+                            .is_some_and(|plan| plan.has_enabled_target())
+                    });
+                    if has_plan {
+                        self.sync_keep(target, None, &fresh).err()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.stop_session(
+                    target,
+                    StopOptions {
+                        reason: StopReason::Provision,
+                        save_keep: false,
+                        force_on_keep_error: true,
+                        keep_timeout: None,
+                    },
+                    &fresh,
+                )?;
+                if let Some(err) = keep_error {
+                    return Err(err);
+                }
+                Ok(())
+            }
         }
     }
 

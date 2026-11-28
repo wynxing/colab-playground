@@ -1076,16 +1076,43 @@ impl MockBackend {
                 }
                 self.sync_keep(target, None, cancel).map(|_| ())
             }
-            AfterRun::Stop { save_keep } => self.stop_session(
-                target,
-                StopOptions {
-                    reason: StopReason::Provision,
-                    save_keep,
-                    force_on_keep_error: false,
-                    keep_timeout: None,
-                },
-                &CancelToken::new(),
-            ),
+            AfterRun::Stop { save_keep } => {
+                // Save first, then stop with save_keep off so a failed Keep
+                // Plan does not skip the stop and is not saved twice. The
+                // fresh token is the one stop_session already used: a cancelled
+                // run must still give the runtime back.
+                let fresh = CancelToken::new();
+                let keep_error = if save_keep {
+                    let has_plan = target.name.as_ref().is_some_and(|name| {
+                        self.w()
+                            .ledger
+                            .live(&target.account, name)
+                            .and_then(|e| e.keep_plan.as_ref())
+                            .is_some_and(|plan| plan.has_enabled_target())
+                    });
+                    if has_plan {
+                        self.sync_keep(target, None, &fresh).err()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.stop_session(
+                    target,
+                    StopOptions {
+                        reason: StopReason::Provision,
+                        save_keep: false,
+                        force_on_keep_error: true,
+                        keep_timeout: None,
+                    },
+                    &fresh,
+                )?;
+                if let Some(err) = keep_error {
+                    return Err(err);
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -3968,7 +3995,7 @@ path = "/content/out"
             "a required secret slot must be saved first"
         );
         assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
-        m.set_secret("p_trainjob_civitai_token", "sek-civitai-token", &nc())
+        m.set_secret("p08_trainjob_civitai_token", "sek-civitai-token", &nc())
             .unwrap();
         let keep_dir = tempfile::tempdir().unwrap();
         spec.keep_plan = Some(crate::keep::KeepPlan {
@@ -4026,6 +4053,53 @@ path = "/content/out"
             m.runtimes(&nc()).unwrap().runtimes.len(),
             1,
             "keep_on_failure leaves the runtime up"
+        );
+    }
+
+    #[test]
+    fn a_failed_keep_plan_still_stops_the_runtime_the_job_opened() {
+        let (m, _) = mock(MockScenario::single());
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(
+            dir.path(),
+            r#"
+api = 2
+id = "trainjob"
+version = "0.1.0"
+[name]
+en = "Train"
+[run]
+script = "main.py"
+mode = "job"
+[[keep]]
+path = "/content/out"
+"#,
+        );
+        m.install_plugin(&m.inspect_plugin_folder(dir.path()).unwrap())
+            .unwrap();
+        m.set_failures(MockFailures {
+            keep_sync_fails: true,
+            ..MockFailures::default()
+        });
+        let mut spec = m.plugin_run_template("trainjob").unwrap();
+        let keep_dir = tempfile::tempdir().unwrap();
+        spec.keep_plan = Some(crate::keep::KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: Some(crate::keep::LocalKeepTarget {
+                folder: keep_dir.path().display().to_string(),
+            }),
+            ..Default::default()
+        });
+        let (tx, _rx) = mpsc::channel();
+        let err = m.run_plugin(spec, tx, &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Io), "{err}");
+        assert!(
+            err.detail.contains("simulated Keep Plan sync failure"),
+            "{err:?}"
+        );
+        assert!(
+            m.runtimes(&nc()).unwrap().runtimes.is_empty(),
+            "the runtime this job opened stops even when the save fails"
         );
     }
 

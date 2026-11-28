@@ -1390,10 +1390,21 @@ pub fn secret_env_key(id: &str) -> String {
     format!("PLUGIN_SECRET_{}", id.to_ascii_uppercase())
 }
 
-/// Keyring name for one plugin's slot. Plugin ids cannot contain `_`, so
-/// replacing `-` does not collide. Fits [`crate::accounts::validate_secret_name`].
+/// Keyring name for one plugin's slot.
+///
+/// `p{len:02}_{plugin}_{slot}`, with `-` in the plugin id written as `_`.
+/// `{len}` is the plugin id's length before that rewrite, so `train` +
+/// `civitai_token` and `train-civitai` + `token` do not share a name (the old
+/// `p_<plugin>_<slot>` spelling did). Fits
+/// [`crate::accounts::validate_secret_name`]: plugin ids are at most 48
+/// characters and slots at most 32, so the name stays within 96.
 pub fn secret_keyring_name(plugin_id: &str, slot_id: &str) -> String {
-    format!("p_{}_{}", plugin_id.replace('-', "_"), slot_id)
+    format!(
+        "p{:02}_{}_{}",
+        plugin_id.len(),
+        plugin_id.replace('-', "_"),
+        slot_id
+    )
 }
 
 fn safe_leaf(name: &str) -> Result<String> {
@@ -1652,9 +1663,12 @@ pub enum AfterRun {
     Stop { save_keep: bool },
 }
 
-/// Job mode on a runtime this run opened: persist, then stop.
-/// A failure can leave that runtime up when the user asked.
-/// A runtime that was already running is never stopped here.
+/// What happens to the runtime after the script stops.
+///
+/// Job mode ignores `stop_on_failure`. A runtime this run opened stops on
+/// failure unless `keep_on_failure` is set, and stops after a successful run
+/// once the Keep Plan has been saved. An existing session is never stopped.
+/// A service still uses `stop_on_failure`.
 pub fn after_run(
     mode: RunMode,
     provisioned: bool,
@@ -1671,6 +1685,10 @@ pub fn after_run(
         RunEnd::Succeeded if mode == RunMode::Job => AfterRun::SyncKeep,
         RunEnd::Succeeded => AfterRun::Leave,
         RunEnd::Failed if mode == RunMode::Job && keep_on_failure => AfterRun::Leave,
+        RunEnd::Failed if mode == RunMode::Job && provisioned => {
+            AfterRun::Stop { save_keep: false }
+        }
+        RunEnd::Failed if mode == RunMode::Job => AfterRun::Leave,
         RunEnd::Failed if provisioned && stop_on_failure => AfterRun::Stop { save_keep: false },
         RunEnd::Failed => AfterRun::Leave,
     }
@@ -1956,7 +1974,7 @@ path = "/content/out"
         assert_eq!(m.assets.len(), 2);
         assert_eq!(
             secret_keyring_name(&m.id, "civitai_token"),
-            "p_train_civitai_token"
+            "p05_train_civitai_token"
         );
 
         let both = text.replace("mode = \"job\"", "mode = \"job\"\nkeep_alive = true");
@@ -2023,7 +2041,7 @@ path = "/content/out"
         let err = capability_env(&m, &consent, |_| None).unwrap_err();
         assert!(err.is(ErrorKind::InvalidInput));
         let (env, secrets) = capability_env(&m, &consent, |name| {
-            (name == "p_train_civitai_token" || name == "hf_token").then(|| format!("sek-{name}"))
+            (name == "p05_train_civitai_token" || name == "hf_token").then(|| format!("sek-{name}"))
         })
         .unwrap();
         let joined = env
@@ -2033,10 +2051,32 @@ path = "/content/out"
             .join("\n");
         assert!(joined.contains("PLUGIN_GCP_AUTH=1"));
         assert!(joined.contains("PLUGIN_DRIVE=1"));
-        assert!(joined.contains("PLUGIN_SECRET_CIVITAI_TOKEN=sek-p_train_civitai_token"));
+        assert!(joined.contains("PLUGIN_SECRET_CIVITAI_TOKEN=sek-p05_train_civitai_token"));
         let shown = redact(&joined, &secrets);
         assert!(!shown.contains("sek-"));
         assert!(shown.contains("***"));
+    }
+
+    #[test]
+    fn secret_slot_names_do_not_share_the_old_keyring_slot() {
+        let old = |plugin: &str, slot: &str| format!("p_{}_{}", plugin.replace('-', "_"), slot);
+        assert_eq!(
+            old("train-civitai", "token"),
+            old("train", "civitai_token"),
+            "the old encoding gave both plugins the same keyring slot"
+        );
+        let later = secret_keyring_name("train-civitai", "token");
+        let earlier = secret_keyring_name("train", "civitai_token");
+        assert_ne!(later, earlier);
+        assert_eq!(later, "p13_train_civitai_token");
+        assert_eq!(earlier, "p05_train_civitai_token");
+        for name in [&later, &earlier] {
+            assert!(
+                crate::accounts::validate_secret_name(name).is_ok(),
+                "{name}"
+            );
+            assert!(name.len() <= 96, "{name}");
+        }
     }
 
     #[test]
@@ -2057,6 +2097,25 @@ path = "/content/out"
         assert_eq!(
             after_run(RunMode::Job, true, RunEnd::Failed, true, false),
             AfterRun::Stop { save_keep: false }
+        );
+        assert_eq!(
+            after_run(RunMode::Job, true, RunEnd::Failed, false, false),
+            AfterRun::Stop { save_keep: false },
+            "a job ignores the old stop-on-failure switch"
+        );
+        assert_eq!(
+            after_run(RunMode::Job, false, RunEnd::Failed, true, false),
+            AfterRun::Leave,
+            "an existing session is never stopped when a job fails"
+        );
+        assert_eq!(
+            after_run(RunMode::Service, true, RunEnd::Failed, true, false),
+            AfterRun::Stop { save_keep: false }
+        );
+        assert_eq!(
+            after_run(RunMode::Service, true, RunEnd::Failed, false, false),
+            AfterRun::Leave,
+            "a service still uses stop-on-failure"
         );
         assert_eq!(
             after_run(RunMode::Service, true, RunEnd::Succeeded, true, false),

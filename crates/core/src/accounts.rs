@@ -605,7 +605,7 @@ fn per_account(reply: &serde_json::Value) -> impl Iterator<Item = (&str, &serde_
 }
 
 /// App secret names: `[a-z][a-z0-9_]*`, at most 96 chars (e.g. `hf_token`,
-/// `p_train_civitai_token`).
+/// `p05_train_civitai_token`).
 pub fn validate_secret_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 96

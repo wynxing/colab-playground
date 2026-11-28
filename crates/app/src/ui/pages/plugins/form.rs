@@ -1,7 +1,8 @@
 //! The run form, generated from the manifest: text, number, switch, choice, secret and
 //! Hugging Face model inputs (with search, file listing and a quantisation preview for the
-//! chosen minimum GPU memory), where to run (a new session with the same options as the New
-//! session dialog, or an existing one), and whether to stop on failure.
+//! chosen minimum GPU memory), and where to run (a new session with the same options as the
+//! New session dialog, or an existing one). A service can stop that new session on failure.
+//! A job hides that switch and uses keep-on-failure instead.
 
 use std::rc::Rc;
 
@@ -86,7 +87,14 @@ pub(super) fn render(
         };
         page = page.child(InlineMessage::new(Severity::Info, text));
     }
-    page = page.child(target_card(form, state, handle, inputs, cx));
+    page = page.child(target_card(
+        form,
+        state,
+        handle,
+        inputs,
+        info.manifest.run.mode == RunMode::Job,
+        cx,
+    ));
     page = page.child(run_keep_card(form, info, handle, cx));
     if let Some(error) = &form.error {
         page = page.child(error_view::alert("run-form", None, error, None, handle, cx));
@@ -519,6 +527,7 @@ fn target_card(
     state: &AppState,
     handle: &Entity<AppState>,
     inputs: &Inputs,
+    job: bool,
     cx: &App,
 ) -> AnyElement {
     let theme = cx.theme();
@@ -604,7 +613,6 @@ fn target_card(
                 handle.update(cx, |state, cx| state.edit_run_form(|form| f(&mut form.provision), cx))
             })
         };
-        let stop = handle.clone();
         card = card
             .child(
                 div()
@@ -626,8 +634,12 @@ fn target_card(
                 edit,
                 None,
                 cx,
-            ))
-            .child(
+            ));
+        // A job stops a runtime it opened unless keep-on-failure is on.
+        // The old switch would say otherwise, so the job form does not show it.
+        if !job {
+            let stop = handle.clone();
+            card = card.child(
                 div()
                     .flex()
                     .flex_col()
@@ -651,6 +663,7 @@ fn target_card(
                         },
                     ))),
             );
+        }
     } else {
         card = card.child(Caption::new(tr(cx, keys::RUN_EXISTING_NOTE)));
     }

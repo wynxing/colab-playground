@@ -138,8 +138,11 @@ are rejected, and the upload stops past 256 files, 64 MiB for one file, or
 
 ### Named secrets (`[[secrets]]`)
 
-Each slot is stored in the keyring as `p_<plugin id>_<slot id>`, with `-` in
-the plugin id written as `_`. The script receives it as
+Each slot is stored in the keyring as `p<len>_<plugin id>_<slot id>`. `<len>`
+is the plugin id's length, two digits (`train` is `05`). `-` in the plugin id
+is written as `_`. The length keeps two plugins from sharing one slot:
+`train-civitai` / `token` and `train` / `civitai_token` used to both become
+`p_train_civitai_token`. The script receives it as
 `PLUGIN_SECRET_<SLOT>` (the slot id in upper case) only when a value is saved.
 A required slot with no value refuses the run before a runtime is opened. The
 value stays in memory for that run and is replaced with `***` in the log and
@@ -150,7 +153,8 @@ the UI.
 A job runs the script, then:
 
 - on success, runs the Keep Plan already attached to the session (a no-op when
-  there is none) and **stops a runtime this run opened**;
+  there is none) and **stops a runtime this run opened**. A failed save still
+  stops that runtime, and the save error is reported;
 - on an existing runtime, runs that Keep Plan and leaves the runtime up;
 - on failure, stops a runtime this run opened, unless `keep_on_failure` is
   true, in which case it stays up so it can be inspected;
@@ -250,10 +254,13 @@ then whenever `/slots` reports a request in progress.
   start in their own session (such as a server started with
   `start_new_session=True`) are not in that group: install a `SIGTERM` handler
   that stops them.
-- A run that provisioned its own session stops that session when cancelled, and
-  by default also when it fails. Runs on an existing session leave it running.
-- A job that provisioned its own session also stops it after success, after the
-  Keep Plan. `keep_on_failure` leaves that session up when the script fails.
+- A service that provisioned its own session stops that session when cancelled,
+  and when it fails if stop-on-failure is on (the default). A run on an
+  existing session leaves it running.
+- A job that provisioned its own session stops it after success, after the
+  Keep Plan, and also when the script fails, unless `keep_on_failure` is true.
+  A job on an existing session never stops it. If saving the Keep Plan fails,
+  the runtime this run opened still stops, and the save error is returned.
 - Stopping the session ends everything; there is no separate clean-up hook.
 
 ## Security model
