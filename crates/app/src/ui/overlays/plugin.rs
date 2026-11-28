@@ -1,7 +1,7 @@
 //! Installing a plugin (check first, then confirm with the manifest summary, what it
 //! receives, and that its script runs on the user's paid runtime) and removing one.
 
-use colab_playground_core::plugins::{Capability, InputKind, PluginOrigin};
+use colab_playground_core::plugins::{Capability, InputKind, PluginOrigin, RunMode};
 use ely_gpui_component::{
     buttons::{Button, ButtonVariant},
     feedback::InlineMessage,
@@ -101,6 +101,8 @@ pub(super) fn install(
                 .iter()
                 .map(|need| match need {
                     Capability::HfToken => tr(cx, keys::PLUGIN_NEEDS_HF_TOKEN).to_string(),
+                    Capability::GcpAuth => tr(cx, keys::PLUGIN_NEEDS_GCP_AUTH).to_string(),
+                    Capability::Drive => tr(cx, keys::PLUGIN_NEEDS_DRIVE).to_string(),
                 })
                 .collect();
             let ports: Vec<String> = manifest
@@ -143,6 +145,36 @@ pub(super) fn install(
                     ),
                     cx,
                 ));
+            if manifest.run.mode == RunMode::Job {
+                facts = facts.child(fact(
+                    tr(cx, keys::PLUGIN_MODE),
+                    tr(cx, keys::PLUGIN_MODE_JOB),
+                    cx,
+                ));
+            }
+            let slots: Vec<String> = manifest
+                .secrets
+                .iter()
+                .map(|slot| {
+                    let label = slot.label.get(tag).unwrap_or(&slot.id).to_owned();
+                    tr_args(cx, keys::PLUGIN_NEEDS_SECRET, &[("name", &label)]).to_string()
+                })
+                .collect();
+            if !slots.is_empty() {
+                facts = facts.child(fact(
+                    tr(cx, keys::PLUGIN_SECRETS_TITLE),
+                    format::list(cx, &slots).into(),
+                    cx,
+                ));
+            }
+            if !manifest.assets.is_empty() {
+                let count = manifest.assets.len().to_string();
+                facts = facts.child(fact(
+                    tr(cx, keys::PLUGIN_FILES),
+                    tr_args(cx, keys::PLUGIN_ASSETS, &[("count", &count)]),
+                    cx,
+                ));
+            }
             if !inputs.is_empty() {
                 facts = facts.child(fact(
                     tr(cx, keys::PLUGIN_ASKS),

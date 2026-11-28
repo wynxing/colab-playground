@@ -604,10 +604,11 @@ fn per_account(reply: &serde_json::Value) -> impl Iterator<Item = (&str, &serde_
         .filter_map(|item| Some((item.get("id")?.as_str()?, item)))
 }
 
-/// App secret names: `[a-z][a-z0-9_]*`, at most 32 chars (e.g. `hf_token`).
+/// App secret names: `[a-z][a-z0-9_]*`, at most 96 chars (e.g. `hf_token`,
+/// `p05_train_civitai_token`).
 pub fn validate_secret_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
-        && name.len() <= 32
+        && name.len() <= 96
         && name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
         && name
             .chars()

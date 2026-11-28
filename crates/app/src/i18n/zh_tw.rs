@@ -1273,4 +1273,54 @@ pub(super) const MESSAGES: Messages = &[
         REMOTE_SSH_RESET_HINT,
         "如果 IDE 或先前的 SSH 用戶端留下殘留連線並導致 HTTP 429 拒絕：",
     ),
+    (
+        PLUGIN_NEEDS_GCP_AUTH,
+        "執行階段上的 Google Cloud 授權，僅在你允許時",
+    ),
+    (PLUGIN_NEEDS_DRIVE, "執行階段上的 Google Drive，僅在你允許時"),
+    (PLUGIN_NEEDS_SECRET, "{name}（已儲存的機密）"),
+    (PLUGIN_MODE, "執行方式"),
+    (
+        PLUGIN_MODE_JOB,
+        "跑完一次，執行 Keep Plan，然後停止這次新開的執行階段",
+    ),
+    (PLUGIN_FILES, "檔案"),
+    (PLUGIN_ASSETS, "隨外掛程式附帶 {count} 個檔案"),
+    (PLUGIN_SECRETS_TITLE, "外掛程式機密"),
+    (
+        PLUGIN_SECRET_HINT,
+        "儲存在此外掛程式的鑰匙圈中。數值會遮罩，表單不留存。",
+    ),
+    (RUN_KEEP_ON_FAILURE, "工作失敗時保留新執行階段"),
+    (
+        RUN_KEEP_ON_FAILURE_ON,
+        "執行階段保持開啟以便查看，並繼續消耗運算單元。",
+    ),
+    (
+        RUN_KEEP_ON_FAILURE_OFF,
+        "這次工作新開的執行階段在指令碼失敗時會停止。",
+    ),
+    (RUN_CONSENT_GCP, "允許這次執行在執行階段上使用 Google Cloud 授權"),
+    (RUN_CONSENT_DRIVE, "允許這次執行在執行階段上使用 Google Drive"),
+    (RUN_CONSENT_REQUIRED, "開始前請允許此外掛程式所要求的存取。"),
+    (RUN_METRICS, "指標"),
+    (RUN_METRIC_STEP, "步數"),
+    (RUN_METRIC_LOSS, "損失"),
+    (RUN_METRIC_TOK, "每秒詞元"),
+    (
+        RUN_PATH_FILE,
+        "這台電腦上的檔案路徑。檔案會上傳，指令碼只看到執行階段上的路徑。",
+    ),
+    (
+        RUN_PATH_DIR,
+        "這台電腦上的資料夾路徑。其中的檔案會上傳，指令碼只看到執行階段上的資料夾。",
+    ),
+    (
+        RUN_PATH_NOTEBOOK,
+        "這台電腦上的 .ipynb 路徑。筆記本會上傳，指令碼只看到執行階段上的路徑。",
+    ),
+    (
+        RUN_TEXTAREA_HINT,
+        "純文字，可以換行。依原樣傳入，不會當作程式碼執行。",
+    ),
 ];

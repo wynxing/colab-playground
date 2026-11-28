@@ -923,6 +923,9 @@ impl AppState {
             existing_account: None,
             target_lost: None,
             stop_on_failure: template.stop_on_failure,
+            keep_on_failure: template.keep_on_failure,
+            consent_gcp: template.consent.gcp_auth,
+            consent_drive: template.consent.drive,
             keep_plan: template.keep_plan,
             hf: super::HfLookup::default(),
             error: None,
@@ -1291,7 +1294,14 @@ fn inputs_for_agent(
                 .as_f64()
                 .map(InputValue::Number)
                 .ok_or_else(|| Error::invalid(id, "must be a number"))?,
-            InputKind::Text | InputKind::Select | InputKind::Secret | InputKind::HfModel => value
+            InputKind::Text
+            | InputKind::Select
+            | InputKind::Secret
+            | InputKind::HfModel
+            | InputKind::File
+            | InputKind::Dir
+            | InputKind::Notebook
+            | InputKind::Textarea => value
                 .as_str()
                 .map(|text| InputValue::Text(text.to_owned()))
                 .ok_or_else(|| Error::invalid(id, "must be a string"))?,

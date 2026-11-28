@@ -1250,4 +1250,54 @@ pub(super) const MESSAGES: Messages = &[
         REMOTE_SSH_RESET_HINT,
         "如果 IDE 或先前的 SSH 客户端留下残留连接并导致 HTTP 429 拒绝：",
     ),
+    (
+        PLUGIN_NEEDS_GCP_AUTH,
+        "运行时上的 Google Cloud 授权，仅在你允许时",
+    ),
+    (PLUGIN_NEEDS_DRIVE, "运行时上的 Google Drive，仅在你允许时"),
+    (PLUGIN_NEEDS_SECRET, "{name}（已保存的秘密）"),
+    (PLUGIN_MODE, "运行方式"),
+    (
+        PLUGIN_MODE_JOB,
+        "跑完一次，执行 Keep Plan，然后停止本次新开的运行时",
+    ),
+    (PLUGIN_FILES, "文件"),
+    (PLUGIN_ASSETS, "随插件附带 {count} 个文件"),
+    (PLUGIN_SECRETS_TITLE, "插件秘密"),
+    (
+        PLUGIN_SECRET_HINT,
+        "保存在此插件的钥匙串中。数值会打码，表单不留存。",
+    ),
+    (RUN_KEEP_ON_FAILURE, "任务失败时保留新运行时"),
+    (
+        RUN_KEEP_ON_FAILURE_ON,
+        "运行时保持开启以便查看，并继续消耗计算单元。",
+    ),
+    (
+        RUN_KEEP_ON_FAILURE_OFF,
+        "本次任务新开的运行时在脚本失败时会停止。",
+    ),
+    (RUN_CONSENT_GCP, "允许本次运行在运行时上使用 Google Cloud 授权"),
+    (RUN_CONSENT_DRIVE, "允许本次运行在运行时上使用 Google Drive"),
+    (RUN_CONSENT_REQUIRED, "开始前请允许此插件所要求的访问。"),
+    (RUN_METRICS, "指标"),
+    (RUN_METRIC_STEP, "步数"),
+    (RUN_METRIC_LOSS, "损失"),
+    (RUN_METRIC_TOK, "每秒词元"),
+    (
+        RUN_PATH_FILE,
+        "这台电脑上的文件路径。文件会上传，脚本只看到运行时上的路径。",
+    ),
+    (
+        RUN_PATH_DIR,
+        "这台电脑上的文件夹路径。其中的文件会上传，脚本只看到运行时上的文件夹。",
+    ),
+    (
+        RUN_PATH_NOTEBOOK,
+        "这台电脑上的 .ipynb 路径。笔记本会上传，脚本只看到运行时上的路径。",
+    ),
+    (
+        RUN_TEXTAREA_HINT,
+        "纯文本，可以换行。按原样传入，不会当作代码执行。",
+    ),
 ];

@@ -609,6 +609,43 @@ pub struct RunStatus {
     /// Arbitrary outputs (e.g. `model_id`).
     #[serde(default)]
     pub outputs: serde_json::Map<String, serde_json::Value>,
+    /// Optional live counters. Missing or non-numeric fields are ignored.
+    #[serde(default, deserialize_with = "de_metrics")]
+    pub metrics: RunMetrics,
+}
+
+/// Numbers a script may report in `status.json` for the run page.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunMetrics {
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub loss: Option<f64>,
+    #[serde(default)]
+    pub tok_per_s: Option<f64>,
+}
+
+fn de_metrics<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<RunMetrics, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(metrics_from_value(&value))
+}
+
+fn metrics_from_value(value: &serde_json::Value) -> RunMetrics {
+    let Some(obj) = value.as_object() else {
+        return RunMetrics::default();
+    };
+    let number = |key: &str| {
+        obj.get(key)
+            .and_then(|v| v.as_f64())
+            .filter(|n| n.is_finite())
+    };
+    RunMetrics {
+        step: number("step"),
+        loss: number("loss"),
+        tok_per_s: number("tok_per_s"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -672,9 +709,8 @@ pub fn parse_discovered(v: &serde_json::Value) -> Vec<DiscoveredVmRun> {
     let Some(runs) = v.get("runs").and_then(|r| r.as_array()) else {
         return Vec::new();
     };
-    let number = |obj: &serde_json::Value, key: &str| {
-        obj.get(key).and_then(|n| n.as_u64()).unwrap_or(0)
-    };
+    let number =
+        |obj: &serde_json::Value, key: &str| obj.get(key).and_then(|n| n.as_u64()).unwrap_or(0);
     runs.iter()
         .filter_map(|item| {
             let alive = item.get("alive").and_then(|a| a.as_bool()).unwrap_or(false);
@@ -804,6 +840,22 @@ mod tests {
         assert_eq!(s.state, RunState::Running);
         assert_eq!(s.progress, Some(1.0));
         assert_eq!(s.outputs["model_id"], "m");
+        assert_eq!(s.metrics, RunMetrics::default());
+        let with = parse_poll(&serde_json::json!({
+            "status": {"state": "running", "metrics": {"step": 12, "loss": 0.5, "tok_per_s": 18.2, "note": "ignored"}},
+            "alive": true
+        }))
+        .unwrap();
+        let metrics = with.status.unwrap().metrics;
+        assert_eq!(metrics.step, Some(12.0));
+        assert_eq!(metrics.loss, Some(0.5));
+        assert_eq!(metrics.tok_per_s, Some(18.2));
+        let junk = parse_poll(&serde_json::json!({
+            "status": {"state": "running", "metrics": "nope"},
+            "alive": true
+        }))
+        .unwrap();
+        assert_eq!(junk.status.unwrap().metrics, RunMetrics::default());
         assert_eq!((p.offset, p.size, p.skipped), (5, 0, 0));
         let p =
             parse_poll(&serde_json::json!({"alive": true, "offset": 5, "size": 9, "skipped": 2}))
@@ -885,7 +937,10 @@ mod tests {
         let hooks = watchdog_hooks_for_keep_plan(&plan, "sess-1", Some("hf_secret"));
         assert_eq!(hooks.len(), 1, "unconsented Drive must never become a hook");
         assert_eq!(hooks[0].interval_s, Some(900));
-        assert_eq!(hooks[0].env.get("HF_TOKEN").map(String::as_str), Some("hf_secret"));
+        assert_eq!(
+            hooks[0].env.get("HF_TOKEN").map(String::as_str),
+            Some("hf_secret")
+        );
 
         plan.drive.as_mut().unwrap().consented = true;
         let hooks = watchdog_hooks_for_keep_plan(&plan, "sess-1", Some("hf_secret"));
