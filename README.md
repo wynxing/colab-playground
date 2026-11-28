@@ -29,7 +29,10 @@ runtime to your computer and runs plugins on the runtime. Written in Rust with G
 [Ely GPUI Components](https://github.com/ELY-Open-Source/Ely-GPUI-Components).
 
 **What it is not:** a notebook editor or a replacement for the CLI; everything goes through
-`colab`. Model deployment is not part of the core: it is a plugin (the bundled llama.cpp and ComfyUI ones).
+`colab`. Model deployment is not part of the core: it is a plugin. The app ships
+llama.cpp, ComfyUI, a vLLM server, Whisper transcription, Unsloth/Axolotl
+training and a Civitai download. The last four are listed on the Plugins page
+from a catalog compiled into the app.
 
 ## Features
 

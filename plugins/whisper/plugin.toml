@@ -1,0 +1,132 @@
+api = 2
+id = "whisper"
+version = "0.1.0"
+needs = ["hf_token"]
+
+[name]
+en = "Transcribe audio"
+zh-CN = "转写音频"
+zh-TW = "轉寫音訊"
+ja = "音声を文字にする"
+ko = "오디오 받아쓰기"
+
+[description]
+en = "Transcribe an audio file with Whisper on a Colab GPU. The file is uploaded to the runtime. When the transcript is written, the Keep Plan runs and a runtime this job opened stops."
+zh-CN = "在 Colab GPU 上用 Whisper 转写音频文件。文件会上传到运行时。写出文稿后会执行保留计划，并停止本次任务新开的运行时。"
+zh-TW = "在 Colab GPU 上用 Whisper 轉寫音訊檔。檔案會上傳到執行階段。寫出文稿後會執行保留計畫，並停止這次工作新開的執行階段。"
+ja = "Colab の GPU 上で Whisper を使い、音声ファイルを文字にします。ファイルはランタイムへアップロードされます。書き出しのあと Keep Plan を実行し、このジョブが開いたランタイムだけを停止します。"
+ko = "Colab GPU에서 Whisper로 오디오 파일을 받아씁니다. 파일은 런타임에 업로드됩니다. 원고를 쓴 뒤 Keep Plan을 실행하고, 이 작업이 연 런타임만 중지합니다."
+
+[provision]
+accelerator = "T4"
+min_vram_mib = 0
+high_mem = false
+
+[[inputs]]
+id = "audio"
+type = "file"
+required = true
+[inputs.label]
+en = "Audio file"
+zh-CN = "音频文件"
+zh-TW = "音訊檔"
+ja = "音声ファイル"
+ko = "오디오 파일"
+[inputs.help]
+en = "A file on this computer. It is uploaded. The script sees only the path on the runtime."
+zh-CN = "这台电脑上的文件。它会被上传。脚本只看到运行时上的路径。"
+zh-TW = "這台電腦上的檔案。它會被上傳。指令碼只看到執行階段上的路徑。"
+ja = "このコンピューター上のファイルです。アップロードされ、スクリプトが見るのはランタイム上のパスだけです。"
+ko = "이 컴퓨터의 파일입니다. 업로드되며 스크립트는 런타임의 경로만 봅니다."
+
+[[inputs]]
+id = "model"
+type = "select"
+options = ["tiny", "base", "small", "medium", "large-v3"]
+default = "small"
+[inputs.label]
+en = "Whisper model"
+zh-CN = "Whisper 模型"
+zh-TW = "Whisper 模型"
+ja = "Whisper モデル"
+ko = "Whisper 모델"
+[inputs.help]
+en = "small fits a T4. large-v3 needs a larger GPU; change the hardware in the form if you pick it."
+zh-CN = "small 适合 T4。large-v3 需要更大的 GPU；若选择它，请在表单里改硬件。"
+zh-TW = "small 適合 T4。large-v3 需要更大的 GPU；若選擇它，請在表單裡改硬體。"
+ja = "small は T4 に収まります。large-v3 はより大きい GPU が必要です。選ぶ場合はフォームでハードウェアを変えてください。"
+ko = "small은 T4에 맞습니다. large-v3는 더 큰 GPU가 필요합니다. 고르면 양식에서 하드웨어를 바꾸세요."
+
+[[inputs]]
+id = "language"
+type = "text"
+[inputs.label]
+en = "Language"
+zh-CN = "语言"
+zh-TW = "語言"
+ja = "言語"
+ko = "언어"
+[inputs.help]
+en = "Optional, for example en or zh. Empty lets Whisper decide."
+zh-CN = "可选，例如 en 或 zh。留空则由 Whisper 判断。"
+zh-TW = "選填，例如 en 或 zh。留空則由 Whisper 判斷。"
+ja = "省略できます（例：en、zh）。空欄なら Whisper が判断します。"
+ko = "선택 사항입니다. 예: en, zh. 비우면 Whisper가 정합니다."
+
+[[inputs]]
+id = "task"
+type = "select"
+options = ["transcribe", "translate"]
+default = "transcribe"
+[inputs.label]
+en = "Task"
+zh-CN = "任务"
+zh-TW = "工作"
+ja = "タスク"
+ko = "작업"
+[inputs.help]
+en = "translate writes English. transcribe keeps the spoken language."
+zh-CN = "translate 写成英文。transcribe 保留原来说的语言。"
+zh-TW = "translate 寫成英文。transcribe 保留原本說的語言。"
+ja = "translate は英語で書き出します。transcribe は話された言語のままです。"
+ko = "translate는 영어로 적습니다. transcribe는 말한 언어를 유지합니다."
+
+[run]
+script = "worker.py"
+mode = "job"
+
+[[stages]]
+id = "install"
+[stages.label]
+en = "Install Whisper"
+zh-CN = "安装 Whisper"
+zh-TW = "安裝 Whisper"
+ja = "Whisper をインストール"
+ko = "Whisper 설치"
+
+[[stages]]
+id = "transcribe"
+[stages.label]
+en = "Transcribe"
+zh-CN = "转写"
+zh-TW = "轉寫"
+ja = "文字にする"
+ko = "받아쓰기"
+
+[[stages]]
+id = "export"
+[stages.label]
+en = "Save the transcript"
+zh-CN = "保存文稿"
+zh-TW = "儲存文稿"
+ja = "書き出しを保存"
+ko = "원고 저장"
+
+[[keep]]
+path = "/content/whisper/out"
+[keep.label]
+en = "Transcript"
+zh-CN = "文稿"
+zh-TW = "文稿"
+ja = "書き出し"
+ko = "원고"

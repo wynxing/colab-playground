@@ -1499,10 +1499,7 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_NEEDS_GCP_AUTH,
         "런타임의 Google Cloud 인증(허용한 경우에만)",
     ),
-    (
-        PLUGIN_NEEDS_DRIVE,
-        "런타임의 Google Drive(허용한 경우에만)",
-    ),
+    (PLUGIN_NEEDS_DRIVE, "런타임의 Google Drive(허용한 경우에만)"),
     (PLUGIN_NEEDS_SECRET, "{name}(저장된 비밀)"),
     (PLUGIN_MODE, "실행"),
     (
@@ -1525,8 +1522,14 @@ pub(super) const MESSAGES: Messages = &[
         RUN_KEEP_ON_FAILURE_OFF,
         "이 작업이 연 런타임은 스크립트가 실패하면 중지됩니다.",
     ),
-    (RUN_CONSENT_GCP, "이 실행에서 런타임의 Google Cloud 인증을 허용"),
-    (RUN_CONSENT_DRIVE, "이 실행에서 런타임의 Google Drive를 허용"),
+    (
+        RUN_CONSENT_GCP,
+        "이 실행에서 런타임의 Google Cloud 인증을 허용",
+    ),
+    (
+        RUN_CONSENT_DRIVE,
+        "이 실행에서 런타임의 Google Drive를 허용",
+    ),
     (
         RUN_CONSENT_REQUIRED,
         "시작하기 전에 이 플러그인이 요청하는 접근을 허용하세요.",
@@ -1551,4 +1554,20 @@ pub(super) const MESSAGES: Messages = &[
         RUN_TEXTAREA_HINT,
         "줄바꿈을 포함한 일반 텍스트입니다. 적힌 그대로 전달되며 코드로 실행되지 않습니다.",
     ),
+    (PLUGIN_INDEX_TITLE, "워크로드 목록"),
+    (
+        PLUGIN_INDEX_HINT,
+        "앱에 포함된 공식 짧은 작업과 상주 서버입니다. 이 목록을 만들려고 다운로드하지 않습니다.",
+    ),
+    (PLUGIN_INDEX_CPU, "CPU"),
+    (PLUGIN_INDEX_VRAM, "GPU 메모리 {mib} MiB 이상"),
+    (
+        PLUGIN_INDEX_JOB,
+        "한 번 실행한 뒤, 이번에 연 런타임을 중지합니다",
+    ),
+    (PLUGIN_INDEX_SERVICE, "준비된 뒤에도 계속 실행"),
+    (PLUGIN_INDEX_PINNED, "카탈로그 v{version}"),
+    (PLUGIN_INDEX_INSTALLED, "설치됨 v{version}"),
+    (PLUGIN_INDEX_UPDATE, "카탈로그는 v{version}"),
+    (PLUGIN_INDEX_UNREADABLE, "워크로드 목록을 읽지 못했습니다."),
 ];

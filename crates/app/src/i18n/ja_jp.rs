@@ -1621,7 +1621,10 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_SECRET_HINT,
         "このプラグインのキーリングに保存します。値は伏せられ、フォームには残りません。",
     ),
-    (RUN_KEEP_ON_FAILURE, "ジョブが失敗しても新しいランタイムを残す"),
+    (
+        RUN_KEEP_ON_FAILURE,
+        "ジョブが失敗しても新しいランタイムを残す",
+    ),
     (
         RUN_KEEP_ON_FAILURE_ON,
         "確認できるようランタイムは動き続け、コンピューティング ユニットも消費し続けます。",
@@ -1661,5 +1664,24 @@ pub(super) const MESSAGES: Messages = &[
     (
         RUN_TEXTAREA_HINT,
         "改行を含むプレーンテキストです。書かれたとおりに渡され、コードとしては実行されません。",
+    ),
+    (PLUGIN_INDEX_TITLE, "ワークロード一覧"),
+    (
+        PLUGIN_INDEX_HINT,
+        "アプリに同梱された公式の短いジョブと常駐サーバーです。この一覧のためにダウンロードはしません。",
+    ),
+    (PLUGIN_INDEX_CPU, "CPU"),
+    (PLUGIN_INDEX_VRAM, "GPU メモリが {mib} MiB 以上"),
+    (
+        PLUGIN_INDEX_JOB,
+        "一度実行し、今回開いたランタイムを停止します",
+    ),
+    (PLUGIN_INDEX_SERVICE, "準備完了後も起動したまま"),
+    (PLUGIN_INDEX_PINNED, "カタログ v{version}"),
+    (PLUGIN_INDEX_INSTALLED, "インストール済み v{version}"),
+    (PLUGIN_INDEX_UPDATE, "カタログは v{version}"),
+    (
+        PLUGIN_INDEX_UNREADABLE,
+        "ワークロード一覧を読めませんでした。",
     ),
 ];

@@ -1,0 +1,107 @@
+api = 2
+id = "civitai"
+version = "0.1.0"
+
+[name]
+en = "Download from Civitai"
+zh-CN = "从 Civitai 下载"
+zh-TW = "從 Civitai 下載"
+ja = "Civitai からダウンロード"
+ko = "Civitai에서 다운로드"
+
+[description]
+en = "Download one Civitai model version onto a CPU runtime. The token is a saved secret: it stays in memory, is masked in the log, and is not written into the download address. When the file is saved, the Keep Plan runs and a runtime this job opened stops."
+zh-CN = "在 CPU 运行时下载一个 Civitai 模型版本。令牌是已保存的秘密：只留在内存中，日志里会打码，也不会写进下载地址。文件保存后会执行保留计划，并停止本次任务新开的运行时。"
+zh-TW = "在 CPU 執行階段下載一個 Civitai 模型版本。權杖是已儲存的機密：只留在記憶體中，日誌裡會遮罩，也不會寫進下載網址。檔案儲存後會執行保留計畫，並停止這次工作新開的執行階段。"
+ja = "CPU ランタイムに Civitai のモデル版を 1 つダウンロードします。トークンは保存済みの秘密です。メモリ上だけにあり、ログでは伏せ字になり、ダウンロード先のアドレスには入りません。保存のあと Keep Plan を実行し、このジョブが開いたランタイムだけを停止します。"
+ko = "CPU 런타임에 Civitai 모델 버전 하나를 받습니다. 토큰은 저장된 비밀입니다. 메모리에만 있고, 로그에서는 가려지며, 다운로드 주소에는 들어가지 않습니다. 파일을 저장한 뒤 Keep Plan을 실행하고, 이 작업이 연 런타임만 중지합니다."
+
+[provision]
+accelerator = "NONE"
+min_vram_mib = 0
+high_mem = false
+
+[[inputs]]
+id = "model_version"
+type = "text"
+required = true
+[inputs.label]
+en = "Model version id"
+zh-CN = "模型版本 id"
+zh-TW = "模型版本 id"
+ja = "モデル版の ID"
+ko = "모델 버전 ID"
+[inputs.help]
+en = "The number in a Civitai model-version page. Not a web address."
+zh-CN = "Civitai 模型版本页面上的数字，不是网址。"
+zh-TW = "Civitai 模型版本頁面上的數字，不是網址。"
+ja = "Civitai のモデル版ページにある数字です。ウェブアドレスではありません。"
+ko = "Civitai 모델 버전 페이지의 숫자입니다. 웹 주소가 아닙니다."
+
+[[inputs]]
+id = "kind"
+type = "select"
+options = ["checkpoint", "lora", "vae", "other"]
+default = "checkpoint"
+[inputs.label]
+en = "File kind"
+zh-CN = "文件种类"
+zh-TW = "檔案種類"
+ja = "ファイルの種類"
+ko = "파일 종류"
+[inputs.help]
+en = "Used only to name the file when the download does not say what it is called."
+zh-CN = "仅在下载没有给出文件名时，用来给文件起名。"
+zh-TW = "僅在下載沒有給出檔名時，用來為檔案命名。"
+ja = "ダウンロードがファイル名を示さないとき、名前を付けるためだけに使います。"
+ko = "다운로드가 파일 이름을 알려주지 않을 때만 이름을 붙이는 데 씁니다."
+
+[[secrets]]
+id = "civitai_token"
+required = true
+[secrets.label]
+en = "Civitai token"
+zh-CN = "Civitai 令牌"
+zh-TW = "Civitai 權杖"
+ja = "Civitai トークン"
+ko = "Civitai 토큰"
+
+[run]
+script = "worker.py"
+mode = "job"
+
+[[stages]]
+id = "resolve"
+[stages.label]
+en = "Check the version id"
+zh-CN = "检查版本 id"
+zh-TW = "檢查版本 id"
+ja = "版の ID を確認"
+ko = "버전 ID 확인"
+
+[[stages]]
+id = "download"
+[stages.label]
+en = "Download"
+zh-CN = "下载"
+zh-TW = "下載"
+ja = "ダウンロード"
+ko = "다운로드"
+
+[[stages]]
+id = "check"
+[stages.label]
+en = "Check the file"
+zh-CN = "检查文件"
+zh-TW = "檢查檔案"
+ja = "ファイルを確認"
+ko = "파일 확인"
+
+[[keep]]
+path = "/content/civitai"
+[keep.label]
+en = "Downloaded files"
+zh-CN = "下载的文件"
+zh-TW = "下載的檔案"
+ja = "ダウンロードしたファイル"
+ko = "받은 파일"
