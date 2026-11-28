@@ -45,6 +45,10 @@ pub const RUN_SESSION_UNKNOWN_SELECTOR: &str = "run-session-unknown";
 pub const ENDPOINT_SELECTOR: &str = "endpoint";
 /// The line that says this app answers an agent too, drawn only while the endpoint is on.
 pub const ENDPOINT_MCP_APP_SELECTOR: &str = "endpoint-mcp-app";
+/// RAM, VRAM and disk on a running or ready run.
+pub const RUN_RESOURCES: &str = "run-resources";
+/// Shown when the latest resource fetch failed and the last numbers, if any, are stale.
+pub const RUN_RESOURCES_STALE: &str = "run-resources-stale";
 
 pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> Page {
     let Some(run) = state.plugin_run() else {
@@ -83,6 +87,14 @@ pub(super) fn render(state: &AppState, handle: &Entity<AppState>, cx: &App) -> P
                 )
                 .w_full(),
         );
+    }
+    // A running or ready server has a session to meter. A failed or cancelled run does not.
+    if run.session.is_some() && matches!(run.phase, RunPhase::Running | RunPhase::Ready(_)) {
+        let reading = run
+            .session
+            .as_deref()
+            .and_then(|name| state.resource_for_session(run.account.as_ref(), name));
+        page = page.child(crate::ui::resources::run_meters(reading, cx));
     }
     if let Some(info) = info {
         page = page.child(stages(run, info, state, cx));

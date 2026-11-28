@@ -477,6 +477,22 @@ pub trait Backend: Send + Sync {
     /// One app-side guard round: usage, spend, decisions, automatic stops.
     fn guard_poll(&self, cancel: &CancelToken) -> Result<GuardReport>;
 
+    /// Live RAM, GPU memory and disk for one runtime.
+    ///
+    /// The default is unavailable, so a backend with no proxy yet still
+    /// compiles. The CLI backend reads that account's `sessions.json` and
+    /// asks the runtime proxy. A later direct backend can override this with
+    /// the connection it already holds. A missing proxy, an expired token and
+    /// an unreachable proxy are statuses, not errors. `Err` is only
+    /// cancellation.
+    fn runtime_resources(
+        &self,
+        _target: &RuntimeRef,
+        _cancel: &CancelToken,
+    ) -> Result<crate::resources::ResourceStatus> {
+        Ok(crate::resources::ResourceStatus::Unavailable)
+    }
+
     // ---- tunnels
     /// Opens a port forward (the session's account must be active).
     fn open_tunnel(&self, spec: TunnelSpec, events: Events<TunnelEvent>) -> Result<TunnelId>;

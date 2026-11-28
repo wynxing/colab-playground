@@ -9,6 +9,7 @@ pub mod overlays;
 pub mod pages;
 pub mod parts;
 pub mod progress;
+pub mod resources;
 pub mod provision_form;
 pub mod root;
 pub mod runtime_options;

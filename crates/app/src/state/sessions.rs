@@ -14,6 +14,7 @@ use colab_playground_core::{
     accounts::AccountId,
     backend::{GuardReport, RemoteSsh, Runtime, RuntimeRef, RuntimesView, StopOptions},
     guard::{Concern, Decision},
+    resources::{self, ResourceFault, ResourceStatus, RuntimeResources},
     tunnel::{TunnelId, TunnelInfo},
 };
 use ely_gpui_component::{feedback::Toast, primitives::Severity};
@@ -43,6 +44,33 @@ pub struct SessionsState {
     pub(crate) stop_failures: HashMap<RuntimeRef, Error>,
     pub(crate) tunnels: BTreeMap<TunnelId, TunnelInfo>,
     pub(crate) guard_error: Option<Error>,
+    /// Last resource reading per runtime. A later fault keeps the reading.
+    pub(crate) resources: HashMap<RuntimeRef, ResourceView>,
+    /// Backend clock when [`AppState::refresh_resources`] last finished.
+    pub(crate) resources_at: Option<SystemTime>,
+}
+
+/// RAM, GPU memory and disk for one runtime, plus why a newer fetch did not replace it.
+/// A fault never clears a reading into zeros.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceView {
+    pub reading: Option<RuntimeResources>,
+    pub fault: Option<ResourceFault>,
+}
+
+impl ResourceView {
+    fn from_status(status: ResourceStatus, previous: Option<&Self>) -> Self {
+        match status {
+            ResourceStatus::Fresh(reading) => Self {
+                reading: Some(reading),
+                fault: None,
+            },
+            other => Self {
+                reading: previous.and_then(|view| view.reading.clone()),
+                fault: other.fault(),
+            },
+        }
+    }
 }
 
 /// A runtime that ended while the app watched, and why.
@@ -221,7 +249,12 @@ impl AppState {
                             .into_iter()
                             .map(|tunnel| (tunnel.id, tunnel))
                             .collect();
+                        state
+                            .sessions
+                            .resources
+                            .retain(|key, _| live.contains(&key));
                         state.sessions.runtimes = Load::Ready(view);
+                        state.refresh_resources(cx);
                         state.drop_gone_run_target();
                         state.check_auto_stop_soon(cx);
                         state.discover_active_runs(cx);
@@ -238,6 +271,96 @@ impl AppState {
                 state.publish_snapshot();
                 state.listed_for_feedback(cx);
                 cx.notify();
+            },
+        );
+    }
+
+    /// The last resource reading for `target`, if a fetch has returned.
+    pub fn resource_view(&self, target: &RuntimeRef) -> Option<&ResourceView> {
+        self.sessions.resources.get(target)
+    }
+
+    /// The reading for a plugin run's session. `account` narrows it when the run knows one.
+    pub fn resource_for_session(
+        &self,
+        account: Option<&AccountId>,
+        session: &str,
+    ) -> Option<&ResourceView> {
+        self.sessions
+            .resources
+            .iter()
+            .find(|(id, _)| {
+                id.name.as_deref() == Some(session)
+                    && account.is_none_or(|account| &id.account == account)
+            })
+            .map(|(_, view)| view)
+    }
+
+    /// Whether a resource poll is due: never fetched, or the last one is older than the
+    /// interval. An empty or unknown runtime list is not due.
+    pub(crate) fn resources_due(&self) -> bool {
+        let Some(view) = self.sessions.runtimes.ready() else {
+            return false;
+        };
+        if view.runtimes.is_empty() {
+            return false;
+        }
+        let Some(at) = self.sessions.resources_at else {
+            return true;
+        };
+        self.backend_now()
+            .and_then(|now| now.duration_since(at).ok())
+            .is_some_and(|elapsed| elapsed >= resources::POLL_INTERVAL)
+    }
+
+    /// Fetches RAM, GPU memory and disk for every listed runtime. A failure keeps the previous
+    /// reading and records the fault. Skipped while one fetch is already running or none is due.
+    pub(crate) fn refresh_resources(&mut self, cx: &mut Context<Self>) {
+        if !self.resources_due() || self.ops.is_running(Op::Resources) {
+            return;
+        }
+        let Some(view) = self.sessions.runtimes.ready() else {
+            return;
+        };
+        let targets: Vec<RuntimeRef> = view
+            .runtimes
+            .iter()
+            .map(|runtime| runtime.id.clone())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.run_backend(
+            Op::Resources,
+            cx,
+            move |backend, cancel| {
+                let mut rows = Vec::with_capacity(targets.len());
+                for target in targets {
+                    let status = match backend.runtime_resources(&target, cancel) {
+                        Ok(status) => status,
+                        Err(error) if error.is(ErrorKind::Cancelled) => return Err(error),
+                        // The error may name a proxy URL. Drop it; the card shows unknown.
+                        Err(_) => ResourceStatus::Unreachable,
+                    };
+                    rows.push((target, status));
+                }
+                Ok((rows, backend.now()))
+            },
+            |state, result, _cx| match result {
+                Ok((rows, now)) => {
+                    let count = rows.len();
+                    for (target, status) in rows {
+                        let previous = state.sessions.resources.get(&target).cloned();
+                        let view = ResourceView::from_status(status, previous.as_ref());
+                        state.sessions.resources.insert(target, view);
+                    }
+                    state.sessions.resources_at = Some(now);
+                    log::info!("resources: refreshed {count} runtimes");
+                }
+                Err(error) if error.is(ErrorKind::Cancelled) => {
+                    let _ = error;
+                }
+                Err(_) => log::warn!("resources: refresh failed"),
             },
         );
     }
