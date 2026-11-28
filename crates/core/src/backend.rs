@@ -5,7 +5,7 @@
 //! through an [`Events`] sender and accept a [`CancelToken`].
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, SystemTime};
 
@@ -294,6 +294,16 @@ pub struct VmEntry {
     pub is_dir: bool,
 }
 
+/// Copyable Remote-SSH details for connecting VS Code, Cursor, or Zed without
+/// touching `~/.ssh/config`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSsh {
+    pub host_alias: String,
+    pub state_file: String,
+    pub command: String,
+    pub config_snippet: String,
+}
+
 pub trait Backend: Send + Sync {
     fn kind(&self) -> BackendKind;
     fn defaults(&self) -> Defaults;
@@ -461,6 +471,18 @@ pub trait Backend: Send + Sync {
     /// Closes a tunnel (billing continues).
     fn close_tunnel(&self, id: TunnelId) -> Result<()>;
     fn tunnels(&self) -> Vec<TunnelInfo>;
+
+    // ---- session controls
+    /// Returns the Colab browser URL attached to an existing session (`colab url`).
+    fn open_in_browser(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<String>;
+    /// Restarts the session's Jupyter kernel while keeping VM files (`colab restart-kernel`).
+    fn restart_kernel(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()>;
+    /// Clears stale SSH daemon sessions on the runtime (`colab ssh --force`).
+    fn reset_ssh_sessions(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()>;
+    /// Builds copyable Remote-SSH commands/config pointing at the account's `--config` file.
+    fn remote_ssh(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<RemoteSsh>;
+    /// Writes an isolated temporary SSH config file (never `~/.ssh/config`) for `-F`.
+    fn write_temp_ssh_config(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<PathBuf>;
 
     // ---- plugins
     fn plugins(&self) -> Vec<PluginInfo>;

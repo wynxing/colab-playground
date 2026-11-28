@@ -514,7 +514,7 @@ pub(super) const MESSAGES: Messages = &[
     (RUNTIME_SWITCH, "切換到這個帳號"),
     (
         RUNTIME_SWITCH_HINT,
-        "延長、取消自動停止和連接埠轉送需要先切換到這個帳號。",
+        "在 Colab 中開啟、重新啟動核心、SSH、連接埠轉送和變更自動停止需要先切換到這個帳號。",
     ),
     (
         RUNTIME_UNNAMED_REASON,
@@ -1221,4 +1221,48 @@ pub(super) const MESSAGES: Messages = &[
     (VM_UPLOAD_REMOTE_PLACEHOLDER, "/content/file.safetensors"),
     (VM_UPLOAD_SUBMIT, "上傳"),
     (VM_UPLOAD_DONE, "已上傳至 {name} 的 {path}。"),
+    (OPEN_BROWSER_ACTION, "在 Colab 中開啟"),
+    (OPEN_BROWSER_DONE, "已在瀏覽器中開啟 {name}。"),
+    (RESTART_KERNEL_ACTION, "重新啟動核心"),
+    (RESTART_KERNEL_TITLE, "重新啟動核心？"),
+    (
+        RESTART_KERNEL_BODY,
+        "將重新啟動 {name} 上的 Jupyter 核心。Python 變數與記憶體中的狀態會被清除。",
+    ),
+    (
+        RESTART_KERNEL_FILES_NOTE,
+        "虛擬機器、已下載的模型以及磁碟上的檔案都會保留。",
+    ),
+    (RESTART_KERNEL_DONE, "已重新啟動 {name} 的核心。"),
+    (RESET_SSH_ACTION, "重設 SSH 工作階段"),
+    (RESET_SSH_DONE, "已清除 {name} 上的 SSH 工作階段。"),
+    (REMOTE_SSH_ACTION, "透過 IDE 連線"),
+    (REMOTE_SSH_TITLE, "透過 IDE 連線（Remote-SSH）"),
+    (
+        REMOTE_SSH_INTRO,
+        "使用下列指令或隔離的 SSH 設定，將 VS Code、Cursor 或 Zed 連線到 {name}。",
+    ),
+    (
+        REMOTE_SSH_NO_CONFIG_EDIT,
+        "絕不會修改你的 ~/.ssh/config。設定片段已綁定至此帳號專屬的 CLI 狀態檔。",
+    ),
+    (
+        REMOTE_SSH_STOPPED_NOTE,
+        "僅在這個執行階段仍在執行時使用這些設定：在執行階段停止後執行 colab ssh --proxy-mode 會重新啟動一台計費虛擬機器。",
+    ),
+    (REMOTE_SSH_COMMAND_LABEL, "單次 SSH 指令"),
+    (
+        REMOTE_SSH_CONFIG_LABEL,
+        "隔離的 SSH 設定片段（搭配 ssh -F 使用）",
+    ),
+    (REMOTE_SSH_WRITE_TEMP, "寫入暫時 SSH 設定"),
+    (
+        REMOTE_SSH_TEMP_SAVED,
+        "已將暫時 SSH 設定儲存至 {path}。",
+    ),
+    (REMOTE_SSH_TEMP_COMMAND, "使用 {path} 連線"),
+    (
+        REMOTE_SSH_RESET_HINT,
+        "如果 IDE 或先前的 SSH 用戶端留下殘留連線並導致 HTTP 429 拒絕：",
+    ),
 ];

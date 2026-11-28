@@ -503,7 +503,7 @@ pub(super) const MESSAGES: Messages = &[
     (RUNTIME_SWITCH, "切换到此账号"),
     (
         RUNTIME_SWITCH_HINT,
-        "延长、取消自动停止和端口转发需要先切换到此账号。",
+        "在 Colab 中打开、重启内核、SSH、端口转发和修改自动停止需要先切换到此账号。",
     ),
     (
         RUNTIME_UNNAMED_REASON,
@@ -1201,4 +1201,45 @@ pub(super) const MESSAGES: Messages = &[
     (VM_UPLOAD_REMOTE_PLACEHOLDER, "/content/file.safetensors"),
     (VM_UPLOAD_SUBMIT, "上传"),
     (VM_UPLOAD_DONE, "已上传至 {name} 的 {path}。"),
+    (OPEN_BROWSER_ACTION, "在 Colab 中打开"),
+    (OPEN_BROWSER_DONE, "已在浏览器中打开 {name}。"),
+    (RESTART_KERNEL_ACTION, "重启内核"),
+    (RESTART_KERNEL_TITLE, "重启内核？"),
+    (
+        RESTART_KERNEL_BODY,
+        "将重启 {name} 上的 Jupyter 内核。Python 变量和内存中的状态会被清除。",
+    ),
+    (
+        RESTART_KERNEL_FILES_NOTE,
+        "虚拟机、已下载的模型以及磁盘上的文件都会保留。",
+    ),
+    (RESTART_KERNEL_DONE, "已重启 {name} 的内核。"),
+    (RESET_SSH_ACTION, "重置 SSH 会话"),
+    (RESET_SSH_DONE, "已清理 {name} 上的 SSH 会话。"),
+    (REMOTE_SSH_ACTION, "通过 IDE 连接"),
+    (REMOTE_SSH_TITLE, "通过 IDE 连接（Remote-SSH）"),
+    (
+        REMOTE_SSH_INTRO,
+        "使用下面命令或隔离的 SSH 配置，将 VS Code、Cursor 或 Zed 连接到 {name}。",
+    ),
+    (
+        REMOTE_SSH_NO_CONFIG_EDIT,
+        "绝不会修改你的 ~/.ssh/config。配置片段已绑定到此账号独立的 CLI 状态文件。",
+    ),
+    (
+        REMOTE_SSH_STOPPED_NOTE,
+        "仅在该运行时仍在运行时使用这些配置：在运行时停止后运行 colab ssh --proxy-mode 会重新启动一台计费虚拟机。",
+    ),
+    (REMOTE_SSH_COMMAND_LABEL, "单次 SSH 命令"),
+    (
+        REMOTE_SSH_CONFIG_LABEL,
+        "隔离的 SSH 配置片段（配合 ssh -F 使用）",
+    ),
+    (REMOTE_SSH_WRITE_TEMP, "写入临时 SSH 配置"),
+    (REMOTE_SSH_TEMP_SAVED, "已将临时 SSH 配置保存到 {path}。"),
+    (REMOTE_SSH_TEMP_COMMAND, "使用 {path} 连接"),
+    (
+        REMOTE_SSH_RESET_HINT,
+        "如果 IDE 或先前的 SSH 客户端留下残留连接并导致 HTTP 429 拒绝：",
+    ),
 ];

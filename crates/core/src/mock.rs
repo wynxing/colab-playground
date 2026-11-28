@@ -118,6 +118,8 @@ pub struct MockFailures {
     pub keep_sync_fails: bool,
     /// `begin_drive_mount` / `confirm` fails without mounting Drive.
     pub drive_mount_fails: bool,
+    /// `restart_kernel` fails with `ConnectionLost`.
+    pub restart_kernel_fails: bool,
 }
 
 impl Default for MockFailures {
@@ -149,6 +151,7 @@ impl Default for MockFailures {
             unlisted_accounts: vec![],
             keep_sync_fails: false,
             drive_mount_fails: false,
+            restart_kernel_fails: false,
         }
     }
 }
@@ -393,6 +396,9 @@ struct World {
     downloads: Vec<String>,
     update_installs: u32,
     update_relaunches: u32,
+    opened_urls: Vec<String>,
+    restarted_kernels: Vec<String>,
+    ssh_resets: Vec<String>,
 }
 
 /// Email of the credential `MockFailures::unadopted_slot` puts in the slot.
@@ -711,6 +717,9 @@ impl MockBackend {
             downloads: Vec::new(),
             update_installs: 0,
             update_relaunches: 0,
+            opened_urls: Vec::new(),
+            restarted_kernels: Vec::new(),
+            ssh_resets: Vec::new(),
         };
         let off = MockFailures {
             cli_missing: cfg.failures.cli_missing,
@@ -788,6 +797,18 @@ impl MockBackend {
     /// How many times the app asked to start an updated version (nothing is started).
     pub fn update_relaunches(&self) -> u32 {
         self.w().update_relaunches
+    }
+
+    pub fn opened_urls(&self) -> Vec<String> {
+        self.w().opened_urls.clone()
+    }
+
+    pub fn restarted_kernels(&self) -> Vec<String> {
+        self.w().restarted_kernels.clone()
+    }
+
+    pub fn ssh_resets(&self) -> Vec<String> {
+        self.w().ssh_resets.clone()
     }
 
     /// Replaces the failure switches at runtime (UI tests flip them mid-test).
@@ -2272,6 +2293,97 @@ impl Backend for MockBackend {
 
     fn tunnels(&self) -> Vec<TunnelInfo> {
         self.w().tunnels.values().cloned().collect()
+    }
+
+    fn open_in_browser(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<String> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        let rt = w
+            .runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        let url = format!(
+            "https://colab.research.google.com/notebooks/empty.ipynb?dbu=%2Ftun%2Fm%2F{}#datalabBackendUrl=https://colab.research.google.com/tun/m/{}",
+            rt.endpoint, rt.endpoint
+        );
+        w.opened_urls.push(url.clone());
+        Ok(url)
+    }
+
+    fn restart_kernel(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        if w.failures.restart_kernel_fails {
+            return Err(Error::new(ErrorKind::ConnectionLost));
+        }
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        w.restarted_kernels.push(name);
+        Ok(())
+    }
+
+    fn reset_ssh_sessions(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        w.close_session_tunnels(&target.account, &name);
+        w.ssh_busy_left = 0;
+        w.ssh_resets.push(name);
+        Ok(())
+    }
+
+    fn remote_ssh(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<RemoteSsh> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let w = self.w();
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        let state = crate::paths::HostPath::new(format!(
+            "/home/demo/.local/share/colab-playground/accounts/{}/sessions.json",
+            target.account.as_str()
+        ));
+        crate::tunnel::remote_ssh_info(
+            &Host::Local,
+            "/home/demo/.local/bin/colab",
+            &state,
+            &name,
+        )
+    }
+
+    fn write_temp_ssh_config(
+        &self,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<std::path::PathBuf> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let info = self.remote_ssh(target, cancel)?;
+        let path = std::env::temp_dir()
+            .join("colab-playground-mock-ssh")
+            .join(format!("{}-{name}.conf", target.account.as_str()));
+        crate::paths::write_atomic(&path, format!("{}\n", info.config_snippet).as_bytes())?;
+        Ok(path)
     }
 
     fn plugins(&self) -> Vec<PluginInfo> {
@@ -4009,5 +4121,87 @@ mod tests {
         )
         .unwrap();
         assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+    }
+
+    #[test]
+    fn session_controls_open_url_restart_kernel_reset_ssh_and_remote_ssh() {
+        let (m, _) = mock(MockScenario::demo());
+        let runtimes = m.runtimes(&nc()).unwrap().runtimes;
+        let a100 = runtimes
+            .iter()
+            .find(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+            .unwrap()
+            .id
+            .clone();
+        let other = runtimes
+            .iter()
+            .find(|r| r.id.name.as_deref() == Some("cpu-0b5e"))
+            .unwrap()
+            .id
+            .clone();
+
+        let url = m.open_in_browser(&a100, &nc()).unwrap();
+        assert!(url.contains(&a100.endpoint), "{url}");
+        assert_eq!(m.opened_urls(), vec![url]);
+        assert!(
+            m.open_in_browser(&other, &nc())
+                .unwrap_err()
+                .is(ErrorKind::AccountNotActive)
+        );
+
+        m.restart_kernel(&a100, &nc()).unwrap();
+        assert_eq!(m.restarted_kernels(), vec!["a100-7f3a".to_owned()]);
+        m.set_failures(MockFailures {
+            restart_kernel_fails: true,
+            ..MockFailures::default()
+        });
+        assert!(
+            m.restart_kernel(&a100, &nc())
+                .unwrap_err()
+                .is(ErrorKind::ConnectionLost)
+        );
+
+        m.set_failures(MockFailures {
+            ssh_busy_attempts: u32::MAX,
+            ..MockFailures::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        let spec = TunnelSpec {
+            account: a100.account.clone(),
+            session: "a100-7f3a".into(),
+            local_port: 18000,
+            remote_port: 8000,
+            health_path: None,
+        };
+        let _ = m.open_tunnel(spec.clone(), tx).unwrap();
+        assert!(rx.try_iter().any(|e| matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { ref error },
+                ..
+            } if error.is(ErrorKind::SshBusy)
+        )));
+
+        m.reset_ssh_sessions(&a100, &nc()).unwrap();
+        assert_eq!(m.ssh_resets(), vec!["a100-7f3a".to_owned()]);
+        let (tx2, rx2) = mpsc::channel();
+        let id = m.open_tunnel(spec, tx2).unwrap();
+        assert!(rx2.try_iter().any(|e| matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Up,
+                ..
+            }
+        )));
+        m.close_tunnel(id).unwrap();
+
+        let info = m.remote_ssh(&a100, &nc()).unwrap();
+        assert_eq!(info.host_alias, "colab-a100-7f3a");
+        assert!(info.command.contains("ProxyCommand="));
+        assert!(info.config_snippet.contains("--config"));
+        let temp = m.write_temp_ssh_config(&a100, &nc()).unwrap();
+        let written = std::fs::read_to_string(&temp).unwrap();
+        assert!(written.contains("Host colab-a100-7f3a"));
+        let _ = std::fs::remove_file(&temp);
     }
 }

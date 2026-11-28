@@ -611,7 +611,7 @@ pub(super) const MESSAGES: Messages = &[
     (RUNTIME_SWITCH, "Switch to this account"),
     (
         RUNTIME_SWITCH_HINT,
-        "Extending, cancelling auto-stop and forwarding need this account to be active.",
+        "Opening in Colab, restarting the kernel, SSH, port forwarding and changing auto-stop need this account to be active.",
     ),
     (
         RUNTIME_UNNAMED_REASON,
@@ -1406,4 +1406,48 @@ pub(super) const MESSAGES: Messages = &[
     (VM_UPLOAD_REMOTE_PLACEHOLDER, "/content/file.safetensors"),
     (VM_UPLOAD_SUBMIT, "Upload"),
     (VM_UPLOAD_DONE, "Uploaded to {path} on {name}."),
+    (OPEN_BROWSER_ACTION, "Open in Colab"),
+    (OPEN_BROWSER_DONE, "Opened {name} in your browser."),
+    (RESTART_KERNEL_ACTION, "Restart kernel"),
+    (RESTART_KERNEL_TITLE, "Restart kernel?"),
+    (
+        RESTART_KERNEL_BODY,
+        "Restarts the Jupyter kernel on {name}. Python variables and in-memory state are cleared.",
+    ),
+    (
+        RESTART_KERNEL_FILES_NOTE,
+        "The VM, downloaded models, and files on disk stay intact.",
+    ),
+    (RESTART_KERNEL_DONE, "Restarted kernel on {name}."),
+    (RESET_SSH_ACTION, "Reset SSH sessions"),
+    (RESET_SSH_DONE, "Cleared SSH sessions on {name}."),
+    (REMOTE_SSH_ACTION, "Connect with IDE"),
+    (REMOTE_SSH_TITLE, "Connect with IDE (Remote-SSH)"),
+    (
+        REMOTE_SSH_INTRO,
+        "Use this command or isolated SSH config to attach VS Code, Cursor, or Zed to {name}.",
+    ),
+    (
+        REMOTE_SSH_NO_CONFIG_EDIT,
+        "Your ~/.ssh/config is never edited. Snippets bind to this account's own CLI state file.",
+    ),
+    (
+        REMOTE_SSH_STOPPED_NOTE,
+        "Only use these snippets while this runtime is running: running colab ssh --proxy-mode after stopping it starts a new billed VM.",
+    ),
+    (REMOTE_SSH_COMMAND_LABEL, "One-off SSH command"),
+    (
+        REMOTE_SSH_CONFIG_LABEL,
+        "Isolated SSH config snippet (use with ssh -F)",
+    ),
+    (REMOTE_SSH_WRITE_TEMP, "Write temporary SSH config"),
+    (
+        REMOTE_SSH_TEMP_SAVED,
+        "Saved temporary SSH config to {path}.",
+    ),
+    (REMOTE_SSH_TEMP_COMMAND, "Run with {path}"),
+    (
+        REMOTE_SSH_RESET_HINT,
+        "If an IDE or earlier SSH client left a stale connection and refuses with HTTP 429:",
+    ),
 ];

@@ -254,6 +254,163 @@ fn wait_for<T>(rx: &Receiver<T>, secs: u64, mut pred: impl FnMut(&T) -> bool) ->
 }
 
 #[test]
+fn fake_cli_url_returns_existing_session_url() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("url-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "url".into(), "-s".into(), "url-test".into(),
+    ]);
+    req.env = f.cfg.base_env.clone();
+    req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+    let out = Host::Local.run_quiet(req, &nc()).unwrap();
+    assert!(out.success(), "fake CLI failed: {}", out.stderr);
+    assert!(out.stdout.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="));
+    assert_eq!(f.assignments("alice").len(), 1);
+}
+
+#[test]
+fn fake_cli_restart_kernel_and_ssh_force_work_for_existing_session() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("ops-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let run_cli = |args: Vec<String>| {
+        let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(args);
+        req.env = f.cfg.base_env.clone();
+        req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+        Host::Local.run_quiet(req, &nc()).unwrap()
+    };
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "restart-kernel".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "restart-kernel failed: {}", out.stderr);
+
+    f.knob("ssh_busy", json!(true));
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "ssh".into(), "--force".into(), "--proxy-mode".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "ssh --force failed: {}", out.stderr);
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+}
+
+#[test]
+fn stop_not_found_across_cli_versions() {
+    use colab_playground_core::cli::StopOutcome;
+    let f = fixture();
+    f.adopt_alice();
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.root.join("sessions.json").to_string_lossy().into_owned());
+    let scratch = HostPath::new(f.root.join("scratch").to_string_lossy().into_owned());
+    std::fs::create_dir_all(f.root.join("scratch")).unwrap();
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        let missing = cli.stop(&state, "missing", &nc()).unwrap();
+        assert_eq!(missing, StopOutcome::NotFound);
+        // A stale local record whose endpoint is no longer assigned to the active account
+        // is pruned and also reports NotFound across 0.8.0 (exit 0) and post-0.8.0 (exit 1).
+        let stale = json!({
+            "stale": {
+                "name": "stale",
+                "token": "t",
+                "url": "http://127.0.0.1:9/",
+                "endpoint": "gone-ep",
+            }
+        });
+        std::fs::write(f.root.join("sessions.json"), stale.to_string()).unwrap();
+        let stale_out = cli.stop(&state, "stale", &nc()).unwrap();
+        assert_eq!(stale_out, StopOutcome::NotFound);
+        assert!(!cli.reap_endpoint(&scratch, "unowned-ep", &nc()).unwrap());
+        f.knob("stop_failure", json!("api_error"));
+        let err = cli.stop(&state, "missing", &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Other), "newer={newer}: {err}");
+        f.knob("stop_failure", Value::Null);
+    }
+}
+
+#[test]
+fn exec_distinguishes_remote_failures_from_cli_failures_across_cli_versions() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    f.provision("ex", Accelerator::T4);
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.state_file(&alice.id).to_string_lossy().into_owned());
+    let exec = |session, code| cli.exec(&state, session, &[], code, 30, &nc());
+    let exec_json = |session, code| cli.exec_json(&state, session, &[], code, 30, &nc());
+
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        f.knob("exec_failure", Value::Null);
+
+        let syntax = exec("ex", "def broken(:").unwrap();
+        assert!(syntax.result.is_none());
+        assert!(syntax.stderr.contains("SyntaxError"), "{}", syntax.stderr);
+        let syntax_json = exec_json("ex", "def broken(:").unwrap_err();
+        assert!(syntax_json.is(ErrorKind::Parse), "{syntax_json}");
+
+        let raised = exec("ex", "raise ValueError('bad value')").unwrap();
+        assert!(raised.result.is_none());
+        assert!(raised.stderr.contains("ValueError"), "{}", raised.stderr);
+        let raised_json = exec_json("ex", "raise ValueError('bad value')").unwrap_err();
+        assert!(raised_json.is(ErrorKind::Parse), "{raised_json}");
+
+        let exit0 = exec("ex", "sys.exit(0)").unwrap();
+        assert!(exit0.result.is_none());
+        let exit2 = exec("ex", "sys.exit(2)").unwrap();
+        assert!(exit2.result.is_none());
+        let exit_msg = exec("ex", "sys.exit('boom')").unwrap();
+        assert!(exit_msg.stderr.contains("boom"), "{}", exit_msg.stderr);
+        assert!(exit_msg.result.is_none());
+
+        let code_127 = "print('not found', file=sys.stderr)\nsys.exit(127)";
+        let remote_127 = exec("ex", code_127).unwrap();
+        assert!(remote_127.result.is_none());
+        assert!(remote_127.stderr.contains("not found"));
+
+        let code_429 = "print('(HTTP 429)', file=sys.stderr)\nsys.exit(1)";
+        let remote_429 = exec("ex", code_429).unwrap();
+        assert!(remote_429.result.is_none());
+        assert!(remote_429.stderr.contains("(HTTP 429)"));
+
+        let code_usage = "print('Usage: foo', file=sys.stderr)\nsys.exit(2)";
+        let remote_usage = exec("ex", code_usage).unwrap();
+        assert!(remote_usage.result.is_none());
+        assert!(remote_usage.stderr.contains("Usage: foo"));
+
+        if newer {
+            let marker_code = "print('__CPG_RESULT__ {\"ok\": 1}')\nsys.exit(1)";
+            let crashed = exec("ex", marker_code).unwrap();
+            assert!(crashed.result.is_none());
+            let crashed_json = exec_json("ex", marker_code).unwrap_err();
+            assert!(crashed_json.is(ErrorKind::Parse), "{crashed_json}");
+        }
+
+        let missing = exec("missing", "print(1)").unwrap_err();
+        assert!(missing.is(ErrorKind::SessionGone), "{missing}");
+        for (knob, expected) in [
+            ("session_lost", ErrorKind::SessionGone),
+            ("connection_lost", ErrorKind::ConnectionLost),
+            ("kernel_dead", ErrorKind::ConnectionLost),
+            ("timeout", ErrorKind::ExecTimeout),
+            ("invalid_env", ErrorKind::Other),
+            ("local_error", ErrorKind::Other),
+        ] {
+            f.knob("exec_failure", json!(knob));
+            let err = exec("ex", "print(1)").unwrap_err();
+            assert!(err.is(expected), "newer={newer} knob={knob}: {err}");
+        }
+    }
+}
+
+#[test]
 fn cli_version_and_missing_toolchain() {
     let f = fixture();
     let tc = f.cfg.toolchain.clone().unwrap();
@@ -1061,10 +1218,61 @@ fn tunnel_reports_429_and_port_in_use() {
         Some(TunnelEvent::State {
             state: TunnelState::Failed { error },
             ..
-        }) => assert!(error.is(ErrorKind::SshBusy), "{error}"),
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("new_cli", json!(true));
+    f.knob("ssh_busy_limit", json!(5));
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), Some("5"));
+            let detail = &error.detail;
+            assert!(detail.contains("5 of 5 SSH sessions in use"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("ssh_busy_limit", Value::Null);
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+            let detail = &error.detail;
+            assert!(detail.contains("--force"), "{detail}");
+        }
         other => panic!("{other:?}"),
     }
     f.knob("ssh_busy", json!(false));
+    f.knob("ssh_busy_limit", Value::Null);
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let (tx, rx) = channel();
     let spec = TunnelSpec {
@@ -2561,4 +2769,93 @@ fn unconsented_drive_target_is_skipped_by_default_sync_and_stop_session() {
     )
     .unwrap();
     assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn real_backend_session_controls_work_and_leave_user_ssh_config_untouched() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    let outcome = f.provision("ctrl-test", Accelerator::None);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("ctrl-test"))
+        .unwrap();
+    assert_eq!(rt.id.name.as_deref(), Some(outcome.name.as_str()));
+
+    let url = f.b.open_in_browser(&rt.id, &nc()).unwrap();
+    assert!(
+        url.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="),
+        "{url}"
+    );
+    assert!(url.contains(&rt.id.endpoint), "{url}");
+
+    f.b.restart_kernel(&rt.id, &nc()).unwrap();
+    assert_eq!(
+        f.assignments("alice")[&rt.id.endpoint]["restarted_kernels"],
+        json!(1)
+    );
+    f.knob("restart_kernel_fails", json!(true));
+    assert!(
+        f.b.restart_kernel(&rt.id, &nc())
+            .unwrap_err()
+            .is(ErrorKind::ConnectionLost)
+    );
+    f.knob("restart_kernel_fails", json!(false));
+
+    // Reset SSH via `colab ssh --force --proxy-mode`, then also verify 0.8.0 fallback.
+    f.knob("ssh_busy", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_force", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_force", json!(false));
+
+    // Post-0.8.0 `--force` kills stale sshd children even if no ~/.ssh/*.pub key exists yet.
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_pubkey", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_pubkey", json!(false));
+
+    // Cost trap guard: resetting a missing session must never auto-create a VM.
+    let missing = RuntimeRef {
+        account: alice.id.clone(),
+        endpoint: String::new(),
+        name: Some("missing-session".into()),
+    };
+    assert!(
+        f.b.reset_ssh_sessions(&missing, &nc())
+            .unwrap_err()
+            .is(ErrorKind::SessionGone)
+    );
+    assert_eq!(f.assignments("alice").len(), 1);
+
+    // Remote-SSH snippet and explicit temp config must never create or edit ~/.ssh/config.
+    let user_ssh_config = f.root.join("home/.ssh/config");
+    assert!(!user_ssh_config.exists());
+    let ssh = f.b.remote_ssh(&rt.id, &nc()).unwrap();
+    assert_eq!(ssh.host_alias, "colab-ctrl-test");
+    assert!(ssh.state_file.contains(alice.id.as_str()));
+    assert!(ssh.command.contains("ProxyCommand="));
+    assert!(ssh.config_snippet.contains("--config"));
+    assert!(!user_ssh_config.exists());
+
+    let temp_conf = f.b.write_temp_ssh_config(&rt.id, &nc()).unwrap();
+    assert!(temp_conf.starts_with(&f.cfg.local_dir));
+    assert!(
+        temp_conf
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-", alice.id.as_str()))
+    );
+    assert!(std::fs::read_to_string(&temp_conf).unwrap().contains("Host colab-ctrl-test"));
+    assert!(!user_ssh_config.exists());
 }

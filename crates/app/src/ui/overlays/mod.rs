@@ -10,6 +10,7 @@ mod keep;
 mod new_session;
 mod plugin;
 mod quit;
+mod session_controls;
 mod stop;
 mod update;
 
@@ -26,7 +27,7 @@ use crate::{
 
 pub use approval::{APPROVAL_ALLOW, APPROVAL_REFUSE};
 pub use feedback::{FEEDBACK_GIVE, FEEDBACK_PROMPT, FEEDBACK_STAR};
-pub use forward::{FORWARD_BODY, FORWARD_SUBMIT, RESERVED_NOTE};
+pub use forward::{FORWARD_BODY, FORWARD_RESET_SSH, FORWARD_SUBMIT, RESERVED_NOTE};
 pub use keep::{
     DRIVE_MOUNT_CONFIRM, DRIVE_MOUNT_OPEN_AGAIN, KEEP_BODY, KEEP_DRIVE_TOGGLE, KEEP_DRIVE_WARNING,
     KEEP_HF_TOGGLE, KEEP_LOCAL_TOGGLE, KEEP_SUBMIT, VM_UPLOAD_SUBMIT,
@@ -36,6 +37,10 @@ pub use new_session::{
 };
 pub use plugin::{INSTALL_CONFIRM, REMOVE_CONFIRM};
 pub use quit::{QUIT_CHECKING, QUIT_LEAVE, QUIT_STOP_ALL, QUIT_UNCHECKED};
+pub use session_controls::{
+    REMOTE_SSH_BODY, REMOTE_SSH_RESET_SSH, REMOTE_SSH_TEMP_COMMAND, REMOTE_SSH_WRITE_TEMP,
+    RESTART_KERNEL_CONFIRM,
+};
 pub use stop::{CANCEL_AUTO_STOP_CONFIRM, STOP_CONFIRM, STOP_FORCE_CONFIRM, STOP_KEEP_TOGGLE};
 pub use update::{
     ProgressLine, UPDATE_CANCEL, UPDATE_CONFIRM, UPDATE_OPEN_PAGE, UPDATE_QUIT, UPDATE_RETRY,
@@ -55,6 +60,10 @@ pub fn render(
     Some(match state.overlay()? {
         Overlay::Stop(prompt) => stop::render(prompt, state, handle, cx),
         Overlay::CancelAutoStop(prompt) => stop::cancel_auto_stop(prompt, state, handle, cx),
+        Overlay::RestartKernel(prompt) => {
+            session_controls::restart_kernel(prompt, state, handle, cx)
+        }
+        Overlay::RemoteSsh(prompt) => session_controls::remote_ssh(prompt, state, handle, cx),
         Overlay::NewSession => new_session::render(state, handle, inputs, cx)?,
         Overlay::Forward(form) => forward::render(form, state, handle, inputs, cx),
         Overlay::KeepPlan(dialog) => keep::keep_plan(dialog, state, handle, inputs, cx),

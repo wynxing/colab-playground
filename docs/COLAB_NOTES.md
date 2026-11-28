@@ -49,29 +49,44 @@ when changing either.
   bills. `colab stop` cannot address it by name; it can be released through
   the CLI's API client (`Client.unassign(endpoint)`), or with a throw-away state
   file holding a placeholder record for that endpoint.
-- `colab stop` of an unknown name prints "not found" on **stdout** and exits
-  **0**. Confirm a stop by listing again.
+- `colab stop -s NAME` of an unknown name prints "not found" on **stdout** and
+  exits **0** in `0.8.0` or **1** in post-`0.8.0`. Post-`0.8.0` also adds
+  `colab stop --all` (which exits `0` even when no sessions are active).
+  Confirm a stop by listing again.
 - The CLI keeps exactly **one** OAuth token, in the OS keyring
-  (`google-colab-cli` / `oauth_token`; SecretService over D-Bus in WSL) and has
-  no logout. A missing token makes *any* command start the copy-paste OAuth
-  flow: URL on stderr, then `input()` on stdin. For `colab exec` that stdin is
-  the code being executed. Watch stderr for "To authorize colab-cli" and kill
-  the process. A locked keyring prints "Could not read the OAuth token from the
-  OS keyring".
+  (`google-colab-cli` / `oauth_token`; SecretService over D-Bus in WSL). `0.8.0`
+  had no logout; post-`0.8.0` adds `colab logout`, which clears that keyring
+  slot, any legacy `token.json`, cached proxy tokens in `sessions.json`, and
+  cached API capability flags in `settings.json` without stopping running VMs.
+  Colab Playground's `account_helper.py` still swaps the keyring slot directly
+  instead of calling `colab logout` so removing or adding an account never
+  disturbs another active account or global CLI settings. A missing token makes
+  *any* command start the copy-paste OAuth flow: URL on stderr, then `input()` on
+  stdin. For `colab exec` that stdin is the code being executed. Watch stderr for
+  "To authorize colab-cli" and kill the process. A locked keyring prints "Could
+  not read the OAuth token from the OS keyring".
 - A legacy `~/.config/colab-cli/token.json` is migrated into the keyring when
   the keyring slot is empty, which matters while adding an account.
-- Most subcommands run a daily update check; `version`, `help`, `whoami`,
-  `url`, `log` and piped `ssh` do not.
+- Most subcommands run a daily update check; `update`, `version`, `help`,
+  `whoami`, `url`, `log`, `logout`, `pay`, `test-public-api`, `readme`,
+  `skill`, and piped `ssh` do not.
 
 ## `colab exec`
 
 - It runs **Python** in the runtime's Jupyter kernel (use `subprocess` for shell
   commands). `--timeout` is an *idle* limit (seconds without output; default
-  30, 0 = none).
-- It exits **0 even when the code raises**; the traceback goes to stderr.
-  Snippets therefore print one marker line (`__CPG_RESULT__ {json}`) on success.
-  CLI-level failures exit 1: "appears to be lost (404/401)", "Session '…' not
-  found.", "Connection was lost.", "Timeout waiting for …".
+  30, 0 = none), enforced in `0.8.0` and newer via streaming polls that also
+  raise `"Kernel dead/restarting before the code finished."` if the kernel dies
+  mid-execution.
+- In `0.8.0`, `colab exec` exited **0 even when the code raised** (traceback on
+  stderr). In post-`0.8.0`, uncaught exceptions and `SyntaxError` exit **1**, and
+  `SystemExit` follows CPython exit-code semantics (`sys.exit(0)` / `None` → `0`,
+  `sys.exit(N)` → `N`, `sys.exit("msg")` → `1` with `msg` on stderr). Snippets
+  therefore print one marker line (`__CPG_RESULT__ {json}`) on success, and
+  `Cli::exec` treats non-CLI-level non-zero exits as remote code outcomes
+  (`Ok` with `stderr` and `result: None`). CLI-level failures exit 1: `"appears
+  to be lost (404/401)"`, `"Session '…' not found."`, `"Connection was lost."`,
+  `"Kernel dead/restarting before the code finished."`, `"Timeout waiting for …"`.
 - `--env K=V` is implemented by prepending `os.environ[K] = V` to the code, so:
   - values **persist in the kernel process** afterwards;
   - the CLI records every executed cell locally, prelude included, in
@@ -89,10 +104,16 @@ when changing either.
 
 ## `colab ssh`
 
-- A runtime allows **one** concurrent `colab ssh` connection; a second gets
-  **HTTP 429** ("Already-active SSH session"). Background status polling over
-  ssh once blocked the tunnel (and vice versa). The tunnel owns the ssh slot;
-  everything else uses `colab exec`.
+- In `0.8.0` and newer, a runtime enforces a plan-based concurrent `colab ssh`
+  limit (up to 5 sessions). Exceeding it returns **HTTP 429**, reporting either
+  `"SSH session limit reached (HTTP 429): N of N SSH sessions in use..."` (when
+  the server includes the limit) or `"Already-active SSH session (HTTP 429)"`
+  (fallback when no limit is reported). `0.8.0` also supports `colab ssh -- CMD`
+  one-shot execution (replacing the removed `colab console` command).
+  Post-`0.8.0` adds `--force` (kills existing `sshd` sessions via the kernel
+  before connecting) and appends a `--force` hint to both HTTP 429 messages.
+  Background status polling over ssh once blocked the tunnel (and vice versa).
+  The tunnel owns the ssh slot; everything else uses `colab exec`.
 - **Cost trap:** `colab ssh --proxy-mode -s NAME` *creates* a runtime when
   `NAME` is not in its state file. A tunnel reconnecting after its session was
   stopped would silently start a new billed VM. Check that the session is still
@@ -101,6 +122,12 @@ when changing either.
   the first of `~/.ssh/id_ed25519.pub`, `id_ecdsa.pub`.
 - The tunnel lives with the process that started it; the VM keeps running when
   it ends.
+
+## `colab upload` / `colab download`
+
+- Post-`0.8.0` sets a `(30, 300)` second `(connect, read)` timeout on Contents
+  API requests (`upload`, `download`, `ls`, `rm`, `edit`), so a dropped
+  connection fails with a `requests` timeout instead of hanging indefinitely.
 
 ## llama.cpp on the VM
 

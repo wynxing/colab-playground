@@ -680,7 +680,7 @@ pub(super) const MESSAGES: Messages = &[
     (RUNTIME_SWITCH, "このアカウントに切り替え"),
     (
         RUNTIME_SWITCH_HINT,
-        "延長、自動停止のキャンセル、ポート転送を行うには、このアカウントを使用中にする必要があります。",
+        "Colab で開く、カーネルの再起動、SSH、ポート転送、自動停止の変更を行うには、このアカウントを使用中にする必要があります。",
     ),
     (
         RUNTIME_UNNAMED_REASON,
@@ -1522,4 +1522,48 @@ pub(super) const MESSAGES: Messages = &[
     (VM_UPLOAD_REMOTE_PLACEHOLDER, "/content/file.safetensors"),
     (VM_UPLOAD_SUBMIT, "アップロード"),
     (VM_UPLOAD_DONE, "{name} の {path} にアップロードしました。"),
+    (OPEN_BROWSER_ACTION, "Colab で開く"),
+    (OPEN_BROWSER_DONE, "ブラウザーで {name} を開きました。"),
+    (RESTART_KERNEL_ACTION, "カーネルを再起動"),
+    (RESTART_KERNEL_TITLE, "カーネルを再起動しますか？"),
+    (
+        RESTART_KERNEL_BODY,
+        "{name} の Jupyter カーネルを再起動します。Python の変数やメモリ上の状態は消去されます。",
+    ),
+    (
+        RESTART_KERNEL_FILES_NOTE,
+        "VM、ダウンロードしたモデル、ディスク上のファイルはそのまま残ります。",
+    ),
+    (RESTART_KERNEL_DONE, "{name} のカーネルを再起動しました。"),
+    (RESET_SSH_ACTION, "SSH セッションをリセット"),
+    (RESET_SSH_DONE, "{name} の SSH セッションを消去しました。"),
+    (REMOTE_SSH_ACTION, "IDE で接続"),
+    (REMOTE_SSH_TITLE, "IDE で接続（Remote-SSH）"),
+    (
+        REMOTE_SSH_INTRO,
+        "次のコマンドまたは分離された SSH 設定を使って、VS Code、Cursor、Zed を {name} に接続します。",
+    ),
+    (
+        REMOTE_SSH_NO_CONFIG_EDIT,
+        "~/.ssh/config は一切変更されません。スニペットはこのアカウント専用の CLI 状態ファイルに紐づいています。",
+    ),
+    (
+        REMOTE_SSH_STOPPED_NOTE,
+        "このランタイムの実行中のみ使用してください。停止後に colab ssh --proxy-mode を実行すると、新しい課金対象 VM が起動します。",
+    ),
+    (REMOTE_SSH_COMMAND_LABEL, "ワンオフ SSH コマンド"),
+    (
+        REMOTE_SSH_CONFIG_LABEL,
+        "分離された SSH 設定スニペット（ssh -F 用）",
+    ),
+    (REMOTE_SSH_WRITE_TEMP, "一時 SSH 設定を書き出す"),
+    (
+        REMOTE_SSH_TEMP_SAVED,
+        "一時 SSH 設定を {path} に保存しました。",
+    ),
+    (REMOTE_SSH_TEMP_COMMAND, "{path} で接続"),
+    (
+        REMOTE_SSH_RESET_HINT,
+        "IDE や以前の SSH クライアントの接続が残り HTTP 429 で拒否される場合:",
+    ),
 ];

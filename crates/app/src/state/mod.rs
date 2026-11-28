@@ -63,7 +63,9 @@ pub use runs::{
     HF_RESULTS, HfLookup, PluginRun, PluginView, RUN_LOG_LINES_KEPT, RunForm, RunLog, RunPhase,
     TargetLost,
 };
-pub use sessions::{EndReason, Ended, StopPrompt, runtime_label};
+pub use sessions::{
+    EndReason, Ended, RemoteSshPrompt, RestartKernelPrompt, StopPrompt, runtime_label,
+};
 pub use tunnels::{FORWARD_START_PORT, ForwardForm, local_url};
 pub use updates::{UPDATE_INTERVAL, UpdateCheck, UpdatePhase, UpdatePrompt, is_newer};
 pub use usage::{
@@ -210,6 +212,10 @@ pub enum Overlay {
     Stop(StopPrompt),
     /// Cancel a runtime's auto-stop, confirmed once.
     CancelAutoStop(StopPrompt),
+    /// Restart a runtime's Jupyter kernel, confirmed once.
+    RestartKernel(RestartKernelPrompt),
+    /// Copyable IDE Remote-SSH command and isolated config snippet.
+    RemoteSsh(RemoteSshPrompt),
     NewSession,
     /// Forward a port on the runtime.
     Forward(ForwardForm),

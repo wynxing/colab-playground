@@ -59,6 +59,16 @@ pub enum Op {
     Forward(u64),
     /// Closing a forward (keyed by tunnel id).
     CloseForward(u64),
+    /// Fetching the Colab web URL for a runtime (`colab url`, keyed by runtime).
+    OpenBrowser(u64),
+    /// Restarting a runtime's Jupyter kernel (keyed by runtime).
+    RestartKernel(u64),
+    /// Clearing stale SSH daemon sessions on a runtime (keyed by runtime).
+    ResetSsh(u64),
+    /// Building copyable Remote-SSH snippets (keyed by runtime).
+    RemoteSsh(u64),
+    /// Writing an isolated temporary SSH config file (keyed by runtime).
+    WriteTempSshConfig(u64),
     Plugins,
     /// Checking a plugin folder or Git URL before installing.
     InspectPlugin,
@@ -131,6 +141,8 @@ impl Op {
                 | Op::SessionName
                 | Op::RunTemplate
                 | Op::Plugins
+                | Op::OpenBrowser(_)
+                | Op::RemoteSsh(_)
                 | Op::HfFiles(_)
         )
     }
