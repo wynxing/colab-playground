@@ -3029,6 +3029,38 @@ impl Backend for RealBackend {
         HfClient::new(self.inner.cfg.http.clone(), self.hf_token(cancel)).gguf_files(repo)
     }
 
+    fn runtime_resources(
+        &self,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<crate::resources::ResourceStatus> {
+        cancel.check()?;
+        let Some(name) = target.name.as_deref().filter(|name| !name.is_empty()) else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        // The proxy URL and token live in the account's sessions file. A failure here is a
+        // status: the error text from reaching the host can name a path, and it is not logged.
+        let path = match self.inner.layout(cancel) {
+            Ok(layout) => layout.account_state(&target.account),
+            Err(error) if error.is(ErrorKind::Cancelled) => return Err(error),
+            Err(_) => return Ok(crate::resources::ResourceStatus::Unreachable),
+        };
+        let text = match self.inner.fs().read(&path, cancel) {
+            Ok(text) => text,
+            Err(error) if error.is(ErrorKind::Cancelled) => return Err(error),
+            Err(_) => return Ok(crate::resources::ResourceStatus::Unreachable),
+        };
+        let Some(text) = text else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        Ok(crate::resources::from_sessions_json(
+            &text,
+            name,
+            self.inner.now(),
+            self.inner.cfg.http.as_ref(),
+        ))
+    }
+
     fn check_for_update(&self, cancel: &CancelToken) -> Result<crate::update::UpdateStatus> {
         crate::update::check_this_app(&*self.inner.cfg.http, cancel)
     }

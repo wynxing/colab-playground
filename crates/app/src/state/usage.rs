@@ -341,6 +341,9 @@ impl AppState {
             return;
         }
         self.refresh_usage(false, cx);
+        if self.resources_due() {
+            self.refresh_resources(cx);
+        }
     }
 }
 

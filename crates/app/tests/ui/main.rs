@@ -20,6 +20,7 @@ mod navigation;
 mod overview;
 mod plugins;
 mod quit;
+mod resources;
 mod sessions;
 mod settings_page;
 mod titlebar;
