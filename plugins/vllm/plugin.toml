@@ -1,0 +1,180 @@
+api = 2
+id = "vllm"
+version = "0.1.0"
+needs = ["hf_token"]
+
+[name]
+en = "Serve a model with vLLM"
+zh-CN = "用 vLLM 提供模型"
+zh-TW = "用 vLLM 提供模型"
+ja = "vLLM でモデルを提供"
+ko = "vLLM으로 모델 제공"
+
+[description]
+en = "Serve a Hugging Face model with vLLM on a Colab GPU and open an OpenAI-compatible API. The runtime stays up after it is ready. A saved Hugging Face token is used for a private or gated repo. An API key, if you set one, stays in memory and is masked."
+zh-CN = "在 Colab GPU 上用 vLLM 提供 Hugging Face 模型，并打开 OpenAI 兼容 API。就绪后运行时保持开启。已保存的 Hugging Face 令牌用于私有或受限仓库。若填写 API 密钥，它只留在内存中并会被打码。"
+zh-TW = "在 Colab GPU 上用 vLLM 提供 Hugging Face 模型，並打開 OpenAI 相容 API。就緒後執行階段保持開啟。已儲存的 Hugging Face 權杖用於私人或受限儲存庫。若填寫 API 金鑰，它只留在記憶體中並會被遮罩。"
+ja = "Colab の GPU 上で vLLM により Hugging Face のモデルを提供し、OpenAI 互換 API を開きます。準備完了後もランタイムは起動したままです。保存済みの Hugging Face トークンは非公開または制限付きリポジトリに使います。API キーを入れる場合、値はメモリ上だけで伏せ字になります。"
+ko = "Colab GPU에서 vLLM으로 Hugging Face 모델을 제공하고 OpenAI 호환 API를 엽니다. 준비된 뒤에도 런타임은 계속 켜져 있습니다. 저장된 Hugging Face 토큰은 비공개 또는 제한된 저장소에 쓰입니다. API 키를 넣으면 값은 메모리에만 있고 가려집니다."
+
+[provision]
+accelerator = "A100"
+min_vram_mib = 16000
+high_mem = false
+
+[[inputs]]
+id = "repo"
+type = "hf-model"
+required = true
+[inputs.label]
+en = "Model repository"
+zh-CN = "模型仓库"
+zh-TW = "模型儲存庫"
+ja = "モデル リポジトリ"
+ko = "모델 저장소"
+[inputs.help]
+en = "A Hugging Face repo id, for example meta-llama/Llama-3.2-1B-Instruct."
+zh-CN = "Hugging Face 仓库 id，例如 meta-llama/Llama-3.2-1B-Instruct。"
+zh-TW = "Hugging Face 儲存庫 id，例如 meta-llama/Llama-3.2-1B-Instruct。"
+ja = "Hugging Face のリポジトリ ID（例：meta-llama/Llama-3.2-1B-Instruct）。"
+ko = "Hugging Face 저장소 ID입니다. 예: meta-llama/Llama-3.2-1B-Instruct."
+
+[[inputs]]
+id = "dtype"
+type = "select"
+options = ["auto", "float16", "bfloat16"]
+default = "auto"
+[inputs.label]
+en = "Compute type"
+zh-CN = "计算类型"
+zh-TW = "計算類型"
+ja = "計算の型"
+ko = "계산 형식"
+
+[[inputs]]
+id = "max_len"
+type = "number"
+default = 4096
+min = 128
+max = 131072
+[inputs.label]
+en = "Max sequence length"
+zh-CN = "最大序列长度"
+zh-TW = "最大序列長度"
+ja = "最大シーケンス長"
+ko = "최대 시퀀스 길이"
+
+[[inputs]]
+id = "gpu_util"
+type = "number"
+default = 0.9
+min = 0.5
+max = 0.95
+[inputs.label]
+en = "GPU memory fraction"
+zh-CN = "占用的显存比例"
+zh-TW = "占用的顯示記憶體比例"
+ja = "使う GPU メモリの割合"
+ko = "사용할 GPU 메모리 비율"
+
+[[inputs]]
+id = "port"
+type = "number"
+default = 8001
+min = 1024
+max = 65535
+[inputs.label]
+en = "Server port on the VM"
+zh-CN = "VM 上的服务端口"
+zh-TW = "VM 上的服務連接埠"
+ja = "VM 上のサーバー ポート"
+ko = "VM의 서버 포트"
+[inputs.help]
+en = "8001, so it does not take the port the GGUF server uses."
+zh-CN = "使用 8001，以免占用 GGUF 服务的端口。"
+zh-TW = "使用 8001，以免占用 GGUF 服務的連接埠。"
+ja = "8001 です。GGUF サーバーのポートと重ならないようにしています。"
+ko = "8001입니다. GGUF 서버 포트와 겹치지 않습니다."
+
+[[inputs]]
+id = "api_key"
+type = "secret"
+[inputs.label]
+en = "API key (optional)"
+zh-CN = "API 密钥（可选）"
+zh-TW = "API 金鑰（選填）"
+ja = "API キー（省略可）"
+ko = "API 키(선택 사항)"
+
+[[inputs]]
+id = "extra_args"
+type = "text"
+[inputs.label]
+en = "Extra vLLM arguments"
+zh-CN = "额外的 vLLM 参数"
+zh-TW = "額外的 vLLM 參數"
+ja = "vLLM の追加引数"
+ko = "vLLM 추가 인수"
+
+[run]
+script = "worker.py"
+keep_alive = true
+mode = "service"
+
+[[stages]]
+id = "detect"
+[stages.label]
+en = "Check the GPU"
+zh-CN = "检查 GPU"
+zh-TW = "檢查 GPU"
+ja = "GPU を確認"
+ko = "GPU 확인"
+
+[[stages]]
+id = "install"
+[stages.label]
+en = "Install vLLM"
+zh-CN = "安装 vLLM"
+zh-TW = "安裝 vLLM"
+ja = "vLLM をインストール"
+ko = "vLLM 설치"
+
+[[stages]]
+id = "download"
+[stages.label]
+en = "Load the model"
+zh-CN = "加载模型"
+zh-TW = "載入模型"
+ja = "モデルを読み込む"
+ko = "모델 불러오기"
+
+[[stages]]
+id = "server"
+[stages.label]
+en = "Start the server"
+zh-CN = "启动服务"
+zh-TW = "啟動服務"
+ja = "サーバーを起動"
+ko = "서버 시작"
+
+[[stages]]
+id = "warmup"
+[stages.label]
+en = "Warm up"
+zh-CN = "预热"
+zh-TW = "預熱"
+ja = "ウォームアップ"
+ko = "워밍업"
+
+[[endpoints]]
+id = "api"
+port_input = "port"
+path = "/v1"
+health = "/health"
+kind = "openai"
+[endpoints.label]
+en = "OpenAI-compatible API"
+zh-CN = "OpenAI 兼容 API"
+zh-TW = "OpenAI 相容 API"
+ja = "OpenAI 互換 API"
+ko = "OpenAI 호환 API"

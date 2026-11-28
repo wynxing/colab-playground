@@ -15,7 +15,8 @@ use colab_playground::{
         pages::{
             overview::{INSTALL_SELECTOR, deploy_selector},
             plugins::{
-                ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, INSTALL_CHECK, RUN_START, RUN_STOP, hf_result_selector, plugin_selector,
+                ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, INSTALL_CHECK, PLUGIN_INDEX,
+                RUN_START, RUN_STOP, hf_result_selector, index_selector, plugin_selector,
             },
         },
     },
@@ -682,6 +683,19 @@ fn plugins_are_listed_before_the_cli_is_installed(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn the_plugins_page_shows_the_workload_catalog(cx: &mut TestAppContext) {
+    let mut app = TestApp::with(cx, Options::scenario(MockScenario::signed_out()));
+    app.click(Route::Plugins.nav_selector());
+    assert!(
+        app.shown(PLUGIN_INDEX),
+        "the catalog is on the plugins page"
+    );
+    for id in ["vllm", "whisper", "llm-train", "civitai"] {
+        assert!(app.shown(&index_selector(id)), "{id} is in the catalog");
+    }
+}
+
+#[gpui::test]
 fn accounts_cannot_change_while_a_deployment_runs(cx: &mut TestAppContext) {
     let mut app = TestApp::new(cx);
     let lin = app.read(|state, _| {
@@ -1026,10 +1040,11 @@ fn cancelling_a_reattached_run_keeps_the_runtime_up(cx: &mut TestAppContext) {
     assert!(!app.read(|state, _| state.plugin_run().is_some_and(|r| r.live)));
     assert!(
         app.read(|state, _| {
-            state
-                .runtimes()
-                .ready()
-                .is_some_and(|v| v.runtimes.iter().any(|r| r.id.name.as_deref() == Some("a100-7f3a")))
+            state.runtimes().ready().is_some_and(|v| {
+                v.runtimes
+                    .iter()
+                    .any(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+            })
         }),
         "cancelling a reattached run keeps the existing runtime up"
     );

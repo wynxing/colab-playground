@@ -1,0 +1,96 @@
+{
+  "entries": [
+    {
+      "id": "vllm",
+      "version": "0.1.0",
+      "mode": "service",
+      "accelerator": "A100",
+      "min_vram_mib": 16000,
+      "source": "bundled",
+      "rev": "0.1.0",
+      "name": {
+        "en": "Serve a model with vLLM",
+        "zh-CN": "用 vLLM 提供模型",
+        "zh-TW": "用 vLLM 提供模型",
+        "ja": "vLLM でモデルを提供",
+        "ko": "vLLM으로 모델 제공"
+      },
+      "summary": {
+        "en": "OpenAI-compatible server on a GPU. It stays up after it is ready.",
+        "zh-CN": "在 GPU 上提供 OpenAI 兼容服务，就绪后保持开启。",
+        "zh-TW": "在 GPU 上提供 OpenAI 相容服務，就緒後保持開啟。",
+        "ja": "GPU 上の OpenAI 互換サーバーです。準備完了後も起動したままです。",
+        "ko": "GPU에서 OpenAI 호환 서버를 엽니다. 준비된 뒤에도 켜져 있습니다."
+      }
+    },
+    {
+      "id": "whisper",
+      "version": "0.1.0",
+      "mode": "job",
+      "accelerator": "T4",
+      "min_vram_mib": 0,
+      "source": "bundled",
+      "rev": "0.1.0",
+      "name": {
+        "en": "Transcribe audio",
+        "zh-CN": "转写音频",
+        "zh-TW": "轉寫音訊",
+        "ja": "音声を文字にする",
+        "ko": "오디오 받아쓰기"
+      },
+      "summary": {
+        "en": "Whisper transcription. A short job: Keep Plan, then stop the runtime it opened.",
+        "zh-CN": "用 Whisper 转写。短任务：执行保留计划，然后停止本次新开的运行时。",
+        "zh-TW": "用 Whisper 轉寫。短工作：執行保留計畫，然後停止這次新開的執行階段。",
+        "ja": "Whisper で文字にします。短いジョブです。Keep Plan のあと、今回開いたランタイムだけを停止します。",
+        "ko": "Whisper로 받아씁니다. 짧은 작업입니다. Keep Plan 다음, 이번에 연 런타임만 중지합니다."
+      }
+    },
+    {
+      "id": "llm-train",
+      "version": "0.1.0",
+      "mode": "job",
+      "accelerator": "A100",
+      "min_vram_mib": 40000,
+      "source": "bundled",
+      "rev": "0.1.0",
+      "name": {
+        "en": "Fine-tune a model",
+        "zh-CN": "微调模型",
+        "zh-TW": "微調模型",
+        "ja": "モデルを微調整",
+        "ko": "모델 미세조정"
+      },
+      "summary": {
+        "en": "Unsloth or Axolotl on a GPU. A short job: Keep Plan, then stop the runtime it opened.",
+        "zh-CN": "在 GPU 上用 Unsloth 或 Axolotl。短任务：执行保留计划，然后停止本次新开的运行时。",
+        "zh-TW": "在 GPU 上用 Unsloth 或 Axolotl。短工作：執行保留計畫，然後停止這次新開的執行階段。",
+        "ja": "GPU 上で Unsloth または Axolotl。短いジョブです。Keep Plan のあと、今回開いたランタイムだけを停止します。",
+        "ko": "GPU에서 Unsloth 또는 Axolotl. 짧은 작업입니다. Keep Plan 다음, 이번에 연 런타임만 중지합니다."
+      }
+    },
+    {
+      "id": "civitai",
+      "version": "0.1.0",
+      "mode": "job",
+      "accelerator": "NONE",
+      "min_vram_mib": 0,
+      "source": "bundled",
+      "rev": "0.1.0",
+      "name": {
+        "en": "Download from Civitai",
+        "zh-CN": "从 Civitai 下载",
+        "zh-TW": "從 Civitai 下載",
+        "ja": "Civitai からダウンロード",
+        "ko": "Civitai에서 다운로드"
+      },
+      "summary": {
+        "en": "Download one model version on a CPU runtime. The token stays in memory and is masked.",
+        "zh-CN": "在 CPU 运行时下载一个模型版本。令牌只留在内存中并会打码。",
+        "zh-TW": "在 CPU 執行階段下載一個模型版本。權杖只留在記憶體中並會遮罩。",
+        "ja": "CPU ランタイムでモデル版を 1 つ取得します。トークンはメモリ上だけで伏せ字になります。",
+        "ko": "CPU 런타임에서 모델 버전 하나를 받습니다. 토큰은 메모리에만 있고 가려집니다."
+      }
+    }
+  ]
+}

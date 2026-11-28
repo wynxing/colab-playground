@@ -1499,7 +1499,10 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_SECRET_HINT,
         "Saved in the keyring for this plugin. The value is masked and is not kept in the form.",
     ),
-    (RUN_KEEP_ON_FAILURE, "Leave the new runtime up if this job fails"),
+    (
+        RUN_KEEP_ON_FAILURE,
+        "Leave the new runtime up if this job fails",
+    ),
     (
         RUN_KEEP_ON_FAILURE_ON,
         "The runtime stays so you can look. It keeps using compute units.",
@@ -1539,5 +1542,24 @@ pub(super) const MESSAGES: Messages = &[
     (
         RUN_TEXTAREA_HINT,
         "Plain text, including line breaks. It is passed as written, not run as code.",
+    ),
+    (PLUGIN_INDEX_TITLE, "Workload catalog"),
+    (
+        PLUGIN_INDEX_HINT,
+        "The official short jobs and servers shipped with the app. This list is not downloaded.",
+    ),
+    (PLUGIN_INDEX_CPU, "CPU"),
+    (PLUGIN_INDEX_VRAM, "At least {mib} MiB of GPU memory"),
+    (
+        PLUGIN_INDEX_JOB,
+        "Runs once, then stops a runtime it opened",
+    ),
+    (PLUGIN_INDEX_SERVICE, "Stays running after it is ready"),
+    (PLUGIN_INDEX_PINNED, "Catalog v{version}"),
+    (PLUGIN_INDEX_INSTALLED, "Installed v{version}"),
+    (PLUGIN_INDEX_UPDATE, "Catalog has v{version}"),
+    (
+        PLUGIN_INDEX_UNREADABLE,
+        "The workload catalog could not be read.",
     ),
 ];

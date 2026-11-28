@@ -4177,6 +4177,107 @@ path = "/content/out"
     }
 
     #[test]
+    fn workload_jobs_mask_secrets_and_stop_only_the_runtime_they_opened() {
+        let (m, _) = mock(MockScenario::single());
+        let audio = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(audio.path(), b"not-audio").unwrap();
+        let audio_path = audio.path().display().to_string();
+
+        let mut blocked = m.plugin_run_template("civitai").unwrap();
+        blocked.inputs.insert(
+            "model_version".into(),
+            crate::plugins::InputValue::Text("123456".into()),
+        );
+        let (tx, _rx) = mpsc::channel();
+        assert!(
+            m.run_plugin(blocked, tx, &nc())
+                .unwrap_err()
+                .is(ErrorKind::InvalidInput),
+            "a required Civitai token refuses the run before a runtime opens"
+        );
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+
+        let token = "sek-civitai-token-value";
+        m.set_secret("p07_civitai_civitai_token", token, &nc())
+            .unwrap();
+        let mut civitai = m.plugin_run_template("civitai").unwrap();
+        civitai.inputs.insert(
+            "model_version".into(),
+            crate::plugins::InputValue::Text("123456".into()),
+        );
+        let keep_dir = tempfile::tempdir().unwrap();
+        civitai.keep_plan = Some(crate::keep::KeepPlan {
+            paths: vec!["/content/civitai".into()],
+            local: Some(crate::keep::LocalKeepTarget {
+                folder: keep_dir.path().display().to_string(),
+            }),
+            ..Default::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        let out = m.run_plugin(civitai, tx, &nc()).unwrap();
+        assert_eq!(out.status.state, RunState::Ready);
+        assert!(
+            m.runtimes(&nc()).unwrap().runtimes.is_empty(),
+            "the finished download stops the runtime it opened"
+        );
+        let logs: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                PluginRunEvent::Log { lines } => Some(lines.join("\n")),
+                _ => None,
+            })
+            .collect();
+        assert!(logs.iter().all(|line| !line.contains(token)));
+        assert!(logs.iter().any(|line| line.contains("***")));
+
+        let mut whisper = m.plugin_run_template("whisper").unwrap();
+        whisper.inputs.insert(
+            "audio".into(),
+            crate::plugins::InputValue::Text(audio_path.clone()),
+        );
+        let (tx, rx) = mpsc::channel();
+        let out = m.run_plugin(whisper, tx, &nc()).unwrap();
+        assert_eq!(out.status.state, RunState::Ready);
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+        let env = m.w().last_plugin_env.clone();
+        let audio_env = env
+            .iter()
+            .find(|(key, _)| key == "PLUGIN_INPUT_AUDIO")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        assert!(
+            !audio_env.contains(&audio_path),
+            "the local path stays off the runtime environment"
+        );
+        assert!(rx.try_iter().all(|event| match event {
+            PluginRunEvent::Log { lines } => !lines.iter().any(|line| line.contains(&audio_path)),
+            _ => true,
+        }));
+
+        let hf = "hf-live-token-value";
+        m.set_secret("hf_token", hf, &nc()).unwrap();
+        let mut train = m.plugin_run_template("llm-train").unwrap();
+        train.inputs.insert(
+            "base".into(),
+            crate::plugins::InputValue::Text("org/model".into()),
+        );
+        let (tx, rx) = mpsc::channel();
+        let out = m.run_plugin(train, tx, &nc()).unwrap();
+        assert_eq!(out.status.state, RunState::Ready);
+        assert_eq!(out.status.metrics.step, Some(3.0));
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+        let logs: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                PluginRunEvent::Log { lines } => Some(lines.join("\n")),
+                _ => None,
+            })
+            .collect();
+        assert!(logs.iter().all(|line| !line.contains(hf)));
+        assert!(logs.iter().any(|line| line.contains("***")));
+    }
+
+    #[test]
     fn a_service_uploads_files_without_putting_the_local_path_in_the_environment() {
         let (m, _) = mock(MockScenario::single());
         let dir = tempfile::tempdir().unwrap();
