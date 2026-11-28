@@ -47,6 +47,8 @@ pub enum Op {
     Rebuild,
     /// Listing runtimes on every account.
     Runtimes,
+    /// Subscription tier and which accelerators the plan can allocate.
+    HardwareCatalog,
     SessionName,
     Provision,
     /// Stopping one runtime (keyed by runtime).
@@ -141,6 +143,7 @@ impl Op {
                 | Op::UpdateInstall
                 | Op::UpdateRestart
                 | Op::SessionName
+                | Op::HardwareCatalog
                 | Op::RunTemplate
                 | Op::DiscoverRuns
                 | Op::Plugins

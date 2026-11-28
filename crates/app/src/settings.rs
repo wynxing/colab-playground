@@ -67,6 +67,15 @@ impl LanguagePref {
     }
 }
 
+/// Which client talks to Colab. `Cli` is the default; `Direct` is opt-in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ControlPlane {
+    #[default]
+    Cli,
+    Direct,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppearancePref {
@@ -84,6 +93,9 @@ pub struct Settings {
     pub language: LanguagePref,
     #[serde(default, deserialize_with = "lenient")]
     pub appearance: AppearancePref,
+    /// CLI (default) or the native direct API. Old settings files stay on the CLI.
+    #[serde(default, deserialize_with = "lenient")]
+    pub control_plane: ControlPlane,
     /// Policy defaults for new runtimes (core's `Defaults`; pushed to the backend). Read field by
     /// field: a bad value resets only that field, and the reset is reported.
     #[serde(default, skip_deserializing)]
@@ -274,6 +286,7 @@ impl Settings {
         crate::backend::HostSetup {
             wsl_distro: self.wsl_distro.clone(),
             toolchain,
+            direct: self.control_plane == ControlPlane::Direct,
         }
     }
 

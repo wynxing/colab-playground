@@ -1195,10 +1195,16 @@ pub(super) const MESSAGES: Messages = &[
         KEEP_DRIVE_MODAL_BODY,
         "請為 {name} 完成 Google Drive 授權，然後確認以掛載到 {path}。",
     ),
-    (KEEP_DRIVE_MODAL_CONFIRMING, "正在驗證 {name} 的 Drive 掛載…"),
+    (
+        KEEP_DRIVE_MODAL_CONFIRMING,
+        "正在驗證 {name} 的 Drive 掛載…",
+    ),
     (KEEP_DRIVE_MODAL_CONFIRM, "完成 Drive 掛載"),
     (KEEP_DRIVE_MODAL_OPEN_AGAIN, "重新開啟連結"),
-    (KEEP_DRIVE_MOUNTED_TOAST, "已在 {name} 上掛載 Google Drive。"),
+    (
+        KEEP_DRIVE_MOUNTED_TOAST,
+        "已在 {name} 上掛載 Google Drive。",
+    ),
     (KEEP_TARGET_LOCAL, "本機"),
     (KEEP_TARGET_HF, "Hugging Face"),
     (KEEP_TARGET_DRIVE, "Google Drive"),
@@ -1256,13 +1262,18 @@ pub(super) const MESSAGES: Messages = &[
         "隔離的 SSH 設定片段（搭配 ssh -F 使用）",
     ),
     (REMOTE_SSH_WRITE_TEMP, "寫入暫時 SSH 設定"),
-    (
-        REMOTE_SSH_TEMP_SAVED,
-        "已將暫時 SSH 設定儲存至 {path}。",
-    ),
+    (REMOTE_SSH_TEMP_SAVED, "已將暫時 SSH 設定儲存至 {path}。"),
     (REMOTE_SSH_TEMP_COMMAND, "使用 {path} 連線"),
     (
         REMOTE_SSH_RESET_HINT,
         "如果 IDE 或先前的 SSH 用戶端留下殘留連線並導致 HTTP 429 拒絕：",
+    ),
+    (PROV_INELIGIBLE, "目前方案無法使用此加速器。"),
+    (SETTINGS_CONTROL_PLANE, "執行階段控制"),
+    (SETTINGS_CONTROL_CLI, "Colab CLI"),
+    (SETTINGS_CONTROL_DIRECT, "直接 API"),
+    (
+        SETTINGS_CONTROL_HINT,
+        "直接模式不經過 CLI 連接 Colab。CLI 仍可作為回退。",
     ),
 ];

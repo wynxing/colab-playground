@@ -68,6 +68,20 @@ impl AppState {
         }));
     }
 
+    /// Switches between the CLI and the direct API, then rebuilds a real backend.
+    pub fn set_control_plane(
+        &mut self,
+        plane: crate::settings::ControlPlane,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.control_plane == plane {
+            return;
+        }
+        self.settings.control_plane = plane;
+        self.persist_settings(cx);
+        self.rebuild_backend(cx);
+    }
+
     /// Changes the WSL distribution; the backend is rebuilt when idle.
     pub fn set_wsl_distro(&mut self, distro: Option<String>, cx: &mut Context<Self>) {
         if self.settings.wsl_distro == distro {

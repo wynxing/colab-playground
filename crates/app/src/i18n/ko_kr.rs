@@ -1351,7 +1351,10 @@ pub(super) const MESSAGES: Messages = &[
     (KEEP_SYNC_NOW, "지금 저장"),
     (KEEP_SAVE, "보관 계획 저장"),
     (KEEP_SAVED, "{name}의 보관 계획을 저장했습니다."),
-    (KEEP_RUN_FORM_SAVED, "이 실행의 보관 계획을 업데이트했습니다."),
+    (
+        KEEP_RUN_FORM_SAVED,
+        "이 실행의 보관 계획을 업데이트했습니다.",
+    ),
     (KEEP_SYNC_DONE, "{name}에서 {files}개 파일을 저장했습니다."),
     (KEEP_PATHS, "보관할 VM 경로"),
     (KEEP_PATHS_PLACEHOLDER, "/content/ComfyUI/output"),
@@ -1386,15 +1389,24 @@ pub(super) const MESSAGES: Messages = &[
     (KEEP_DRIVE_MOUNTED_BADGE, "Drive 마운트됨"),
     (KEEP_DRIVE_UNMOUNTED_BADGE, "Drive 마운트 안 됨"),
     (KEEP_DRIVE_MODAL_TITLE, "Google Drive 마운트 승인"),
-    (KEEP_DRIVE_MODAL_STARTING, "Google Drive 인증을 시작하는 중…"),
+    (
+        KEEP_DRIVE_MODAL_STARTING,
+        "Google Drive 인증을 시작하는 중…",
+    ),
     (
         KEEP_DRIVE_MODAL_BODY,
         "{name}에 대해 Google Drive 액세스를 승인한 뒤 {path} 마운트를 완료하세요.",
     ),
-    (KEEP_DRIVE_MODAL_CONFIRMING, "{name}에서 Drive 마운트를 확인하는 중…"),
+    (
+        KEEP_DRIVE_MODAL_CONFIRMING,
+        "{name}에서 Drive 마운트를 확인하는 중…",
+    ),
     (KEEP_DRIVE_MODAL_CONFIRM, "Drive 마운트 완료"),
     (KEEP_DRIVE_MODAL_OPEN_AGAIN, "링크 다시 열기"),
-    (KEEP_DRIVE_MOUNTED_TOAST, "{name}에 Google Drive를 마운트했습니다."),
+    (
+        KEEP_DRIVE_MOUNTED_TOAST,
+        "{name}에 Google Drive를 마운트했습니다.",
+    ),
     (KEEP_TARGET_LOCAL, "로컬"),
     (KEEP_TARGET_HF, "Hugging Face"),
     (KEEP_TARGET_DRIVE, "Google Drive"),
@@ -1410,7 +1422,10 @@ pub(super) const MESSAGES: Messages = &[
     (STOP_FORCE_ACTION, "저장하지 않고 중지"),
     (VM_UPLOAD_ACTION, "파일 업로드"),
     (VM_UPLOAD_TITLE, "{name}(으)로 파일 업로드"),
-    (VM_UPLOAD_INTRO, "이 컴퓨터의 파일을 실행 중인 VM으로 복사합니다."),
+    (
+        VM_UPLOAD_INTRO,
+        "이 컴퓨터의 파일을 실행 중인 VM으로 복사합니다.",
+    ),
     (VM_UPLOAD_LOCAL, "로컬 파일 경로"),
     (VM_UPLOAD_LOCAL_PLACEHOLDER, "/path/to/file.safetensors"),
     (VM_UPLOAD_REMOTE, "VM 대상 경로"),
@@ -1460,5 +1475,16 @@ pub(super) const MESSAGES: Messages = &[
     (
         REMOTE_SSH_RESET_HINT,
         "IDE나 이전 SSH 클라이언트의 잔여 연결 때문에 HTTP 429 오류가 발생하는 경우:",
+    ),
+    (
+        PROV_INELIGIBLE,
+        "로그인한 요금제에서는 이 가속기를 사용할 수 없습니다.",
+    ),
+    (SETTINGS_CONTROL_PLANE, "런타임 제어"),
+    (SETTINGS_CONTROL_CLI, "Colab CLI"),
+    (SETTINGS_CONTROL_DIRECT, "직접 API"),
+    (
+        SETTINGS_CONTROL_HINT,
+        "직접 모드는 CLI 없이 Colab에 연결합니다. CLI는 대체 수단으로 남습니다.",
     ),
 ];

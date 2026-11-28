@@ -290,6 +290,49 @@ pub struct DiscoveredRun {
     pub log_offset: u64,
 }
 
+/// One machine shape from `runtimespecs`, joined with the subscription tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOffer {
+    pub accelerator: Accelerator,
+    pub high_mem: bool,
+    pub eligible: bool,
+}
+
+/// What the signed-in plan can allocate. Empty means the catalog was not loaded:
+/// the form then does not warn, and provisioning still asks Colab.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct HardwareCatalog {
+    pub tier: Option<String>,
+    pub offers: Vec<RuntimeOffer>,
+}
+
+impl HardwareCatalog {
+    pub fn unknown() -> Self {
+        HardwareCatalog::default()
+    }
+
+    /// A fetch that learned the tier or at least one shape.
+    pub fn is_known(&self) -> bool {
+        self.tier.is_some() || !self.offers.is_empty()
+    }
+
+    /// True when a known catalog marks this shape ineligible. Unknown catalogs never block.
+    pub fn blocks(&self, accelerator: Accelerator, high_mem: bool) -> bool {
+        if !self.is_known() {
+            return false;
+        }
+        let high_mem = high_mem && accelerator.supports_high_mem();
+        match self
+            .offers
+            .iter()
+            .find(|offer| offer.accelerator == accelerator && offer.high_mem == high_mem)
+        {
+            Some(offer) => !offer.eligible,
+            None => !self.offers.is_empty(),
+        }
+    }
+}
+
 /// A file on the VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmFile {
@@ -365,6 +408,12 @@ pub trait Backend: Send + Sync {
     // ---- runtimes and sessions
     /// Runtimes on every saved account, managed or not.
     fn runtimes(&self, cancel: &CancelToken) -> Result<RuntimesView>;
+    /// Subscription tier and eligible shapes. The default is an unknown catalog,
+    /// so a backend that has not loaded `runtimespecs` does not block the form.
+    fn hardware_catalog(&self, cancel: &CancelToken) -> Result<HardwareCatalog> {
+        let _ = cancel;
+        Ok(HardwareCatalog::unknown())
+    }
     /// A fresh readable name such as `a100-3f9c` (`prefix` defaults to the
     /// default accelerator).
     fn new_session_name(&self, prefix: Option<&str>) -> String;
@@ -537,8 +586,7 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<PluginRunOutcome> {
         let _ = (run, events, cancel);
-        Err(Error::new(ErrorKind::Unsupported)
-            .detail("this backend cannot reattach plugin runs"))
+        Err(Error::new(ErrorKind::Unsupported).detail("this backend cannot reattach plugin runs"))
     }
 
     // ---- app secrets (stored in the keyring vault; never returned to the UI)

@@ -797,6 +797,11 @@ catalog_keys! {
     REMOTE_SSH_TEMP_SAVED => "app.b16.remote_ssh_temp_saved",
     REMOTE_SSH_TEMP_COMMAND => "app.b16.remote_ssh_temp_command",
     REMOTE_SSH_RESET_HINT => "app.b16.remote_ssh_reset_hint",
+    PROV_INELIGIBLE => "app.b17.prov_ineligible",
+    SETTINGS_CONTROL_PLANE => "app.b17.settings_control_plane",
+    SETTINGS_CONTROL_CLI => "app.b17.settings_control_cli",
+    SETTINGS_CONTROL_DIRECT => "app.b17.settings_control_direct",
+    SETTINGS_CONTROL_HINT => "app.b17.settings_control_hint",
 }
 
 /// A message table: `(key, message)` pairs; `{name}` marks an argument.

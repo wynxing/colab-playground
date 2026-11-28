@@ -166,6 +166,51 @@ fn an_accelerator_the_account_cannot_use_says_so(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_ineligible_accelerator_is_warned_and_cannot_start(cx: &mut TestAppContext) {
+    use colab_playground_core::backend::{HardwareCatalog, RuntimeOffer};
+
+    let mut app = TestApp::with(cx, Options::scenario(MockScenario::single()));
+    open_new_session(&mut app);
+    app.update(|state, cx| {
+        state.set_hardware_catalog(
+            HardwareCatalog {
+                tier: Some("SUBSCRIPTION_TIER_PRO".into()),
+                offers: vec![
+                    RuntimeOffer {
+                        accelerator: Accelerator::H100,
+                        high_mem: false,
+                        eligible: false,
+                    },
+                    RuntimeOffer {
+                        accelerator: Accelerator::A100,
+                        high_mem: false,
+                        eligible: true,
+                    },
+                ],
+            },
+            cx,
+        );
+        state.edit_new_session(
+            |spec| {
+                spec.accelerator = Accelerator::H100;
+                spec.high_mem = false;
+            },
+            cx,
+        );
+    });
+    assert!(
+        app.shown("prov accelerator-ineligible"),
+        "the plan warning is on the form"
+    );
+    app.click(NEW_SESSION_START);
+    assert_eq!(
+        phase(&mut app),
+        Some(ProvisionPhase::Editing),
+        "start stays disabled"
+    );
+}
+
+#[gpui::test]
 fn changing_options_after_a_failure_shows_the_form_from_its_top(cx: &mut TestAppContext) {
     use gpui::point;
     let options = Options {

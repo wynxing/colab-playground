@@ -1175,10 +1175,16 @@ pub(super) const MESSAGES: Messages = &[
         KEEP_DRIVE_MODAL_BODY,
         "请为 {name} 完成 Google Drive 授权，然后确认以挂载到 {path}。",
     ),
-    (KEEP_DRIVE_MODAL_CONFIRMING, "正在验证 {name} 的 Drive 挂载…"),
+    (
+        KEEP_DRIVE_MODAL_CONFIRMING,
+        "正在验证 {name} 的 Drive 挂载…",
+    ),
     (KEEP_DRIVE_MODAL_CONFIRM, "完成 Drive 挂载"),
     (KEEP_DRIVE_MODAL_OPEN_AGAIN, "重新打开链接"),
-    (KEEP_DRIVE_MOUNTED_TOAST, "已在 {name} 上挂载 Google Drive。"),
+    (
+        KEEP_DRIVE_MOUNTED_TOAST,
+        "已在 {name} 上挂载 Google Drive。",
+    ),
     (KEEP_TARGET_LOCAL, "本机"),
     (KEEP_TARGET_HF, "Hugging Face"),
     (KEEP_TARGET_DRIVE, "Google Drive"),
@@ -1241,5 +1247,13 @@ pub(super) const MESSAGES: Messages = &[
     (
         REMOTE_SSH_RESET_HINT,
         "如果 IDE 或先前的 SSH 客户端留下残留连接并导致 HTTP 429 拒绝：",
+    ),
+    (PROV_INELIGIBLE, "当前方案无法使用此加速器。"),
+    (SETTINGS_CONTROL_PLANE, "运行时控制"),
+    (SETTINGS_CONTROL_CLI, "Colab CLI"),
+    (SETTINGS_CONTROL_DIRECT, "直接 API"),
+    (
+        SETTINGS_CONTROL_HINT,
+        "直接模式不经过 CLI 连接 Colab。CLI 仍可作为回退。",
     ),
 ];

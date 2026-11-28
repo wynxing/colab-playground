@@ -31,7 +31,7 @@ use colab_playground_core::{
     Error, ErrorKind,
     accounts::AccountsView,
     backend::BackendKind as Flavor,
-    backend::{Backend, DriveMountFlow, LoginFlow, RuntimeRef},
+    backend::{Backend, DriveMountFlow, HardwareCatalog, LoginFlow, RuntimeRef},
     error::Denial,
     host::ProbeReport,
     updater::{Installed, SelfUpdate},
@@ -186,6 +186,8 @@ pub struct AppState {
     login_flow: Option<Box<dyn LoginFlow>>,
     drive_mount_flow: Option<Box<dyn DriveMountFlow>>,
     usage: usage::UsageCache,
+    /// Eligible accelerators for the signed-in plan. Unknown until a fetch succeeds.
+    hardware_catalog: HardwareCatalog,
     defaults_push: Option<Task<()>>,
     _poller: Option<Task<()>>,
     overlay: Option<Overlay>,
@@ -365,6 +367,7 @@ impl AppState {
                 login_flow: None,
                 drive_mount_flow: None,
                 usage: usage::UsageCache::default(),
+                hardware_catalog: HardwareCatalog::unknown(),
                 defaults_push: None,
                 _poller: None,
                 overlay: None,
@@ -511,6 +514,8 @@ impl AppState {
             self.route = route;
             if route != Route::Settings {
                 self.settings_focus = false;
+            } else {
+                self.refresh_hardware_catalog(cx);
             }
             cx.notify();
         }

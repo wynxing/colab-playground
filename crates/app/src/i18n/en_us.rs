@@ -1375,12 +1375,18 @@ pub(super) const MESSAGES: Messages = &[
     (KEEP_DRIVE_MOUNTED_BADGE, "Drive mounted"),
     (KEEP_DRIVE_UNMOUNTED_BADGE, "Drive not mounted"),
     (KEEP_DRIVE_MODAL_TITLE, "Authorize Google Drive mount"),
-    (KEEP_DRIVE_MODAL_STARTING, "Starting Google Drive authorization…"),
+    (
+        KEEP_DRIVE_MODAL_STARTING,
+        "Starting Google Drive authorization…",
+    ),
     (
         KEEP_DRIVE_MODAL_BODY,
         "Authorize Google Drive access for {name}, then confirm to finish mounting at {path}.",
     ),
-    (KEEP_DRIVE_MODAL_CONFIRMING, "Verifying Drive mount on {name}…"),
+    (
+        KEEP_DRIVE_MODAL_CONFIRMING,
+        "Verifying Drive mount on {name}…",
+    ),
     (KEEP_DRIVE_MODAL_CONFIRM, "Finish Drive mount"),
     (KEEP_DRIVE_MODAL_OPEN_AGAIN, "Open link again"),
     (KEEP_DRIVE_MOUNTED_TOAST, "Google Drive mounted on {name}."),
@@ -1399,7 +1405,10 @@ pub(super) const MESSAGES: Messages = &[
     (STOP_FORCE_ACTION, "Stop anyway without saving"),
     (VM_UPLOAD_ACTION, "Upload file"),
     (VM_UPLOAD_TITLE, "Upload file to {name}"),
-    (VM_UPLOAD_INTRO, "Copy a file from this computer onto the running VM."),
+    (
+        VM_UPLOAD_INTRO,
+        "Copy a file from this computer onto the running VM.",
+    ),
     (VM_UPLOAD_LOCAL, "Local file path"),
     (VM_UPLOAD_LOCAL_PLACEHOLDER, "/path/to/file.safetensors"),
     (VM_UPLOAD_REMOTE, "Destination path on VM"),
@@ -1449,5 +1458,16 @@ pub(super) const MESSAGES: Messages = &[
     (
         REMOTE_SSH_RESET_HINT,
         "If an IDE or earlier SSH client left a stale connection and refuses with HTTP 429:",
+    ),
+    (
+        PROV_INELIGIBLE,
+        "This accelerator is not available on the signed-in plan.",
+    ),
+    (SETTINGS_CONTROL_PLANE, "Runtime control"),
+    (SETTINGS_CONTROL_CLI, "Colab CLI"),
+    (SETTINGS_CONTROL_DIRECT, "Direct API"),
+    (
+        SETTINGS_CONTROL_HINT,
+        "Direct talks to Colab without the CLI. The CLI remains available as a fallback.",
     ),
 ];

@@ -59,6 +59,9 @@ pub(super) fn render(
                 })
             };
             let blocked = state.is_provisioning();
+            let ineligible = state
+                .hardware_catalog()
+                .blocks(session.spec.accelerator, session.spec.high_mem);
             let form = div()
                 .flex()
                 .flex_col()
@@ -74,6 +77,7 @@ pub(super) fn render(
                     state.measured_rate(&session.spec),
                     edit,
                     Some(&session.scroll),
+                    ineligible,
                     cx,
                 ));
             let (cancel, start) = (tr(cx, keys::ACTION_CANCEL), tr(cx, keys::NEW_START));
@@ -98,7 +102,7 @@ pub(super) fn render(
                         Button::new(NEW_SESSION_START, start)
                             .primary()
                             .icon(IconName::Play)
-                            .disabled(blocked)
+                            .disabled(blocked || ineligible)
                             .on_click(move |_, _, cx| {
                                 let name = name.read(cx).text().to_owned();
                                 go.update(cx, |state, cx| state.start_provision(name, cx))

@@ -181,6 +181,7 @@ impl AppState {
 
     pub fn open_run_form(&mut self, plugin: String, cx: &mut Context<Self>) {
         self.navigate(Route::Plugins, cx);
+        self.refresh_hardware_catalog(cx);
         let work_plugin = plugin.clone();
         self.run_backend(
             Op::RunTemplate,

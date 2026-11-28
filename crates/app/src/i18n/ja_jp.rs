@@ -1457,7 +1457,10 @@ pub(super) const MESSAGES: Messages = &[
     (KEEP_SAVE, "保持プランを保存"),
     (KEEP_SAVED, "{name} の保持プランを保存しました。"),
     (KEEP_RUN_FORM_SAVED, "この実行の保持プランを更新しました。"),
-    (KEEP_SYNC_DONE, "{name} から {files} 件のファイルを保存しました。"),
+    (
+        KEEP_SYNC_DONE,
+        "{name} から {files} 件のファイルを保存しました。",
+    ),
     (KEEP_PATHS, "保持する VM パス"),
     (KEEP_PATHS_PLACEHOLDER, "/content/ComfyUI/output"),
     (
@@ -1491,15 +1494,24 @@ pub(super) const MESSAGES: Messages = &[
     (KEEP_DRIVE_MOUNTED_BADGE, "Drive マウント済み"),
     (KEEP_DRIVE_UNMOUNTED_BADGE, "Drive 未マウント"),
     (KEEP_DRIVE_MODAL_TITLE, "Google Drive マウントの承認"),
-    (KEEP_DRIVE_MODAL_STARTING, "Google Drive 認証を開始しています…"),
+    (
+        KEEP_DRIVE_MODAL_STARTING,
+        "Google Drive 認証を開始しています…",
+    ),
     (
         KEEP_DRIVE_MODAL_BODY,
         "{name} の Google Drive アクセスを承認し、{path} へのマウントを確定してください。",
     ),
-    (KEEP_DRIVE_MODAL_CONFIRMING, "{name} の Drive マウントを確認しています…"),
+    (
+        KEEP_DRIVE_MODAL_CONFIRMING,
+        "{name} の Drive マウントを確認しています…",
+    ),
     (KEEP_DRIVE_MODAL_CONFIRM, "Drive マウントを完了"),
     (KEEP_DRIVE_MODAL_OPEN_AGAIN, "リンクを再度開く"),
-    (KEEP_DRIVE_MOUNTED_TOAST, "{name} に Google Drive をマウントしました。"),
+    (
+        KEEP_DRIVE_MOUNTED_TOAST,
+        "{name} に Google Drive をマウントしました。",
+    ),
     (KEEP_TARGET_LOCAL, "ローカル"),
     (KEEP_TARGET_HF, "Hugging Face"),
     (KEEP_TARGET_DRIVE, "Google Drive"),
@@ -1515,7 +1527,10 @@ pub(super) const MESSAGES: Messages = &[
     (STOP_FORCE_ACTION, "保存せず強制停止"),
     (VM_UPLOAD_ACTION, "ファイルをアップロード"),
     (VM_UPLOAD_TITLE, "{name} にファイルをアップロード"),
-    (VM_UPLOAD_INTRO, "このコンピューター上のファイルを稼働中の VM にコピーします。"),
+    (
+        VM_UPLOAD_INTRO,
+        "このコンピューター上のファイルを稼働中の VM にコピーします。",
+    ),
     (VM_UPLOAD_LOCAL, "ローカルファイルパス"),
     (VM_UPLOAD_LOCAL_PLACEHOLDER, "/path/to/file.safetensors"),
     (VM_UPLOAD_REMOTE, "VM 上の保存先パス"),
@@ -1565,5 +1580,16 @@ pub(super) const MESSAGES: Messages = &[
     (
         REMOTE_SSH_RESET_HINT,
         "IDE や以前の SSH クライアントの接続が残り HTTP 429 で拒否される場合:",
+    ),
+    (
+        PROV_INELIGIBLE,
+        "このアクセラレータは、サインイン中のプランでは使えません。",
+    ),
+    (SETTINGS_CONTROL_PLANE, "ランタイム制御"),
+    (SETTINGS_CONTROL_CLI, "Colab CLI"),
+    (SETTINGS_CONTROL_DIRECT, "直接 API"),
+    (
+        SETTINGS_CONTROL_HINT,
+        "直接モードは CLI を使わず Colab に接続します。CLI はフォールバックとして残ります。",
     ),
 ];

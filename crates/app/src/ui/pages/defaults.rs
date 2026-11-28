@@ -19,6 +19,7 @@ use crate::{
     backend,
     i18n::{keys, tr, tr_args},
     platform,
+    settings::ControlPlane,
     state::AppState,
     ui::{Inputs, duration_field::DurationField, metrics, runtime_options::Controls, tagged},
 };
@@ -100,6 +101,10 @@ pub fn defaults_section(state: &AppState, handle: &Entity<AppState>, cx: &App) -
     let attempts = controls.attempts(d.max_attempts, edit(handle, |d, v| d.max_attempts = v));
     let exhausted = controls.on_exhausted(d.on_exhausted, edit(handle, |d, v| d.on_exhausted = v));
     let accelerator = controls.accelerator(d.accelerator, edit(handle, |d, v| d.accelerator = v));
+    let accelerator_hint = state
+        .hardware_catalog()
+        .blocks(d.accelerator, d.high_mem)
+        .then(|| tr(cx, keys::PROV_INELIGIBLE));
     let high_mem = controls.high_mem(d.high_mem, edit(handle, |d, on| d.high_mem = on));
     let min_vram = controls.min_vram(d.min_vram_mib, edit(handle, |d, v| d.min_vram_mib = v));
     let reset = {
@@ -182,7 +187,7 @@ pub fn defaults_section(state: &AppState, handle: &Entity<AppState>, cx: &App) -
         .row(row(
             "accelerator",
             keys::DEF_ACCELERATOR,
-            None,
+            accelerator_hint,
             accelerator,
             cx,
         ))
@@ -240,8 +245,40 @@ pub fn host_section(
     let theme = cx.theme();
     let simulated = backend::shows_demo_badge(state.flavor());
     let busy = !state.can_change_host();
+    let plane = state.settings().control_plane;
+    let pick_plane = handle.clone();
     let mut section =
         SettingsSection::new(tr(cx, keys::HOST_TITLE)).description(tr(cx, keys::HOST_DESCRIPTION));
+    section = section.row(row(
+        "control_plane",
+        keys::SETTINGS_CONTROL_PLANE,
+        Some(tr(cx, keys::SETTINGS_CONTROL_HINT)),
+        div().w(theme.menu_width()).child(
+            Select::new(
+                "host-control-plane",
+                vec![
+                    Choice::new("cli", tr(cx, keys::SETTINGS_CONTROL_CLI)),
+                    Choice::new("direct", tr(cx, keys::SETTINGS_CONTROL_DIRECT)),
+                ],
+            )
+            .label(tr(cx, keys::SETTINGS_CONTROL_PLANE))
+            .selected(if plane == ControlPlane::Direct {
+                "direct"
+            } else {
+                "cli"
+            })
+            .disabled(busy)
+            .on_change(move |value, _, cx| {
+                let plane = if value == "direct" {
+                    ControlPlane::Direct
+                } else {
+                    ControlPlane::Cli
+                };
+                pick_plane.update(cx, |state, cx| state.set_control_plane(plane, cx));
+            }),
+        ),
+        cx,
+    ));
     if platform::uses_wsl() {
         let distros: Vec<String> = state
             .probe()
