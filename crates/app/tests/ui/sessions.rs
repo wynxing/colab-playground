@@ -7,13 +7,17 @@ use std::time::{Duration, SystemTime};
 use colab_playground::{
     i18n::{self, Language},
     route::Route,
-    state::{EndReason, Overlay, ProvisionPhase, ProvisionProgress},
+    state::{EndReason, Load, Overlay, ProvisionPhase, ProvisionProgress},
     ui::{
         overlays::{
-            FORWARD_BODY, FORWARD_SUBMIT, NEW_SESSION_FORM, NEW_SESSION_LIMIT, NEW_SESSION_START,
-            RESERVED_NOTE,
+            FORWARD_BODY, FORWARD_RESET_SSH, FORWARD_SUBMIT, NEW_SESSION_FORM, NEW_SESSION_LIMIT,
+            NEW_SESSION_START, REMOTE_SSH_BODY, REMOTE_SSH_RESET_SSH, REMOTE_SSH_TEMP_COMMAND,
+            REMOTE_SSH_WRITE_TEMP, RESERVED_NOTE, RESTART_KERNEL_CONFIRM,
         },
-        pages::sessions::{NEW_SESSION_SELECTOR, forward_selector, stop_selector},
+        pages::sessions::{
+            NEW_SESSION_SELECTOR, forward_selector, ide_ssh_selector, open_browser_selector,
+            restart_kernel_selector, stop_selector, switch_selector,
+        },
         progress, provision_form,
     },
 };
@@ -1400,4 +1404,181 @@ fn an_emptied_name_field_after_a_failed_attempt_starts_under_a_suggested_name(
         panic!("expected a ready runtime, got {:?}", phase(&mut app));
     };
     assert!(outcome.name.starts_with("h100-"), "{}", outcome.name);
+}
+
+#[gpui::test]
+fn open_in_colab_opens_the_runtime_url_without_creating_another_vm(cx: &mut TestAppContext) {
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+    let before_count = runtime_names(&mut app).len();
+
+    app.click(&open_browser_selector("a100-7f3a"));
+    let opened = app.opened_url().expect("the Colab runtime URL was opened");
+    assert!(
+        opened.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="),
+        "{opened}"
+    );
+    assert_eq!(app.mock.opened_urls(), vec![opened]);
+    assert_eq!(
+        runtime_names(&mut app).len(),
+        before_count,
+        "opening the attached URL must not allocate another VM"
+    );
+    let toast = app.cx.update(|_, cx| {
+        i18n::tr_args(
+            cx,
+            i18n::keys::OPEN_BROWSER_DONE,
+            &[("name", "a100-7f3a")],
+        )
+    });
+    assert!(app.toasts().contains(&toast), "{:?}", app.toasts());
+}
+
+#[gpui::test]
+fn restart_kernel_confirms_once_and_keeps_the_runtime(cx: &mut TestAppContext) {
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+    app.click(&restart_kernel_selector("a100-7f3a"));
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::RestartKernel(ref prompt)) if prompt.label == "a100-7f3a"
+    ));
+    assert!(
+        app.mock.restarted_kernels().is_empty(),
+        "kernel must not restart before confirmation"
+    );
+    assert!(app.shown(RESTART_KERNEL_CONFIRM));
+
+    app.click(RESTART_KERNEL_CONFIRM);
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    assert_eq!(app.mock.restarted_kernels(), vec!["a100-7f3a".to_owned()]);
+    assert!(
+        runtime_names(&mut app).contains(&"a100-7f3a".to_owned()),
+        "restarting the kernel keeps the runtime alive"
+    );
+
+    app.set_failures(MockFailures {
+        restart_kernel_fails: true,
+        ..MockFailures::default()
+    });
+    app.click(&restart_kernel_selector("a100-7f3a"));
+    app.click(RESTART_KERNEL_CONFIRM);
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::RestartKernel(ref prompt))
+            if prompt.error.as_ref().is_some_and(|e| e.is(ErrorKind::ConnectionLost))
+    ));
+    assert!(app.shown("error-restart-kernel"));
+}
+
+#[gpui::test]
+fn ssh_busy_offers_reset_ssh_recovery_in_forward_dialog_and_inactive_or_unnamed_actions_are_guarded(
+    cx: &mut TestAppContext,
+) {
+    let options = Options {
+        failures: MockFailures {
+            ssh_busy_attempts: 5,
+            ..MockFailures::default()
+        },
+        ..Options::default()
+    };
+    let mut app = TestApp::with(cx, options);
+    on_sessions(&mut app);
+
+    // Inactive account shows Switch instead of active-only controls.
+    assert!(!app.shown(&open_browser_selector("cpu-0b5e")));
+    assert!(!app.shown(&restart_kernel_selector("cpu-0b5e")));
+    assert!(!app.shown(&ide_ssh_selector("cpu-0b5e")));
+    assert!(app.shown(&switch_selector("cpu-0b5e")));
+
+    // Unnamed runtime on the active account disables named-only controls.
+    assert!(app.shown(&open_browser_selector("L4")));
+    assert!(app.shown(&restart_kernel_selector("L4")));
+    assert!(app.shown(&ide_ssh_selector("L4")));
+    app.click(&open_browser_selector("L4"));
+    assert!(app.opened_url().is_none());
+    app.click(&restart_kernel_selector("L4"));
+    assert!(app.read(|state, _| state.overlay().is_none()));
+    app.click(&ide_ssh_selector("L4"));
+    assert!(app.read(|state, _| state.overlay().is_none()));
+
+    // Hitting HTTP 429 (`ErrorKind::SshBusy`) offers `Reset SSH sessions` recovery.
+    app.click(&forward_selector("a100-7f3a"));
+    app.fill(|inputs| inputs.forward_remote.clone(), "8000");
+    app.click(FORWARD_SUBMIT);
+    assert!(app.shown("error-forward"));
+    assert!(app.shown(FORWARD_RESET_SSH));
+
+    app.click(FORWARD_RESET_SSH);
+    assert_eq!(app.mock.ssh_resets(), vec!["a100-7f3a".to_owned()]);
+    assert!(matches!(
+        app.read(|state, _| state.overlay().cloned()),
+        Some(Overlay::Forward(ref form)) if form.error.is_none()
+    ));
+
+    app.click(FORWARD_SUBMIT);
+    assert!(
+        app.read(|state, _| state.overlay().is_none()),
+        "forwarding succeeds right after clearing stale SSH sessions"
+    );
+}
+
+#[gpui::test]
+fn remote_ssh_dialog_shows_snippets_writes_isolated_temp_config_and_resets_ssh(
+    cx: &mut TestAppContext,
+) {
+    let mut app = TestApp::new(cx);
+    on_sessions(&mut app);
+    app.click(&ide_ssh_selector("a100-7f3a"));
+    assert!(app.shown(REMOTE_SSH_BODY));
+
+    let temp_path = {
+        let Some(Overlay::RemoteSsh(prompt)) = app.read(|state, _| state.overlay().cloned())
+        else {
+            panic!("expected RemoteSsh overlay");
+        };
+        let Load::Ready(info) = prompt.info else {
+            panic!("expected loaded RemoteSsh info, got {:?}", prompt.info);
+        };
+        assert_eq!(info.host_alias, "colab-a100-7f3a");
+        assert!(info.command.contains("ProxyCommand="));
+        assert!(info.config_snippet.contains("--config"));
+        assert!(!info.command.contains(".ssh/config"));
+        assert!(!info.config_snippet.contains(".ssh/config"));
+        assert!(prompt.temp_config_path.is_none());
+
+        let body = app.bounds(REMOTE_SSH_BODY).expect("remote ssh body drawn");
+        for _ in 0..10 {
+            if app.bounds(REMOTE_SSH_WRITE_TEMP).unwrap().bottom() <= body.bottom() {
+                break;
+            }
+            wheel(&mut app, body, -80.0);
+        }
+        app.click(REMOTE_SSH_WRITE_TEMP);
+        let Some(Overlay::RemoteSsh(updated)) = app.read(|state, _| state.overlay().cloned())
+        else {
+            panic!("expected RemoteSsh overlay");
+        };
+        assert!(
+            updated.temp_config_error.is_none(),
+            "unexpected temp config error: {:?}",
+            updated.temp_config_error
+        );
+        let written = updated.temp_config_path.expect("temp config written");
+        assert!(app.shown(REMOTE_SSH_TEMP_COMMAND));
+        assert!(!written.ends_with(".ssh/config"), "{written}");
+        assert!(std::fs::read_to_string(&written).unwrap().contains("Host colab-a100-7f3a"));
+        written
+    };
+    let _ = std::fs::remove_file(&temp_path);
+
+    let body = app.bounds(REMOTE_SSH_BODY).expect("remote ssh body drawn");
+    for _ in 0..10 {
+        if app.bounds(REMOTE_SSH_RESET_SSH).unwrap().bottom() <= body.bottom() {
+            break;
+        }
+        wheel(&mut app, body, -80.0);
+    }
+    app.click(REMOTE_SSH_RESET_SSH);
+    assert_eq!(app.mock.ssh_resets(), vec!["a100-7f3a".to_owned()]);
 }

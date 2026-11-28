@@ -1897,6 +1897,67 @@ impl Backend for RealBackend {
         self.inner.tunnels.list()
     }
 
+    fn open_in_browser(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<String> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        cli.url(&state, &name, cancel)
+    }
+
+    fn restart_kernel(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        cli.restart_kernel(&state, &name, cancel)
+    }
+
+    fn reset_ssh_sessions(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        // Avoid the `colab ssh --proxy-mode -s NAME` cost trap: refuse if the session is not
+        // recorded in the account's state file.
+        match self.inner.fs().read(&state, cancel)? {
+            Some(text) if crate::tunnel::state_has_session(&text, &name) => {}
+            _ => return Err(Error::new(ErrorKind::SessionGone).with("session", &name)),
+        }
+        self.inner.tunnels.close_session(&target.account, &name);
+        cli.reset_ssh(&state, &name, cancel)
+    }
+
+    fn remote_ssh(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<RemoteSsh> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let (_g, cli, state) = self.inner.cli_for(&target.account, cancel)?;
+        match self.inner.fs().read(&state, cancel)? {
+            Some(text) if crate::tunnel::state_has_session(&text, &name) => {}
+            _ => return Err(Error::new(ErrorKind::SessionGone).with("session", &name)),
+        }
+        crate::tunnel::remote_ssh_info(&self.inner.cfg.host, &cli.colab, &state, &name)
+    }
+
+    fn write_temp_ssh_config(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<PathBuf> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let info = self.remote_ssh(target, cancel)?;
+        let path = self
+            .inner
+            .local_layout()
+            .ssh_config_file(&target.account, &name);
+        crate::paths::write_atomic(&path, format!("{}\n", info.config_snippet).as_bytes())?;
+        Ok(path)
+    }
+
     fn plugins(&self) -> Vec<PluginInfo> {
         self.inner.st().plugins.list()
     }

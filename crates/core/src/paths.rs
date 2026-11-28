@@ -106,6 +106,13 @@ impl DataLayout {
     pub fn host_scratch(&self) -> HostPath {
         self.host.join("tmp")
     }
+
+    /// `<local>/ssh/<account>-<session>.conf`: isolated SSH config written only on explicit request.
+    pub fn ssh_config_file(&self, account: &AccountId, session: &str) -> PathBuf {
+        self.local
+            .join("ssh")
+            .join(format!("{}-{session}.conf", account.as_str()))
+    }
 }
 
 /// The path the `colab` CLI has to be given for a file on this computer.

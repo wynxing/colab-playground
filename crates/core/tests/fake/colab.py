@@ -282,6 +282,9 @@ def simulate(code, env, s, ep, a):
         if run:
             run["killed"] = True
         return {"signalled": bool(run)}
+    if "pkill -P $(pgrep -o -x sshd)" in code:
+        s["knobs"]["ssh_busy"] = False
+        return {"reset": True}
     return None
 
 
@@ -421,14 +424,48 @@ def cmd_whoami(state_path, args):
     return 0
 
 
+def cmd_url(state_path, args):
+    from urllib.parse import quote
+
+    require_account()
+    session = opt(args, "-s", "--session")
+    records = load_state(state_path)
+    rec = records.get(session)
+    if rec is None:
+        err("[colab] Session '%s' not found." % session)
+        return 1
+    backend_path = "/tun/m/" + rec["endpoint"]
+    dbu = quote(backend_path, safe="")
+    out(
+        "https://colab.research.google.com/notebooks/empty.ipynb?dbu=%s#datalabBackendUrl=https://colab.research.google.com%s"
+        % (dbu, backend_path)
+    )
+    return 0
+
+
+def cmd_restart_kernel(state_path, args):
+    name = require_account()
+    session = opt(args, "-s", "--session")
+    s, _ep, a = lookup(state_path, name, session)
+    if s["knobs"].get("restart_kernel_fails"):
+        err("RuntimeError: Connection was lost.")
+        return 1
+    a["restarted_kernels"] = a.get("restarted_kernels", 0) + 1
+    fc.save_server(s)
+    return 0
+
+
 def cmd_ssh(state_path, args):
     if "--proxy-mode" not in args:
         err("fake colab: only --proxy-mode is supported")
         return 2
+    s = fc.server()
+    if "--force" in args and s["knobs"].get("ssh_no_force"):
+        err("Error: No such option: --force")
+        return 2
     name = require_account()
     session = opt(args, "-s", "--session")
     records = load_state(state_path)
-    s = fc.server()
     if session not in records:
         # Real CLI behaviour: `--proxy-mode -s NAME` creates a missing session.
         ep = allocate(s, name, session, "NONE", False)
@@ -436,6 +473,16 @@ def cmd_ssh(state_path, args):
         fc.save_server(s)
         records[session] = {"name": session, "token": "t", "url": "u", "endpoint": ep}
         save_state(state_path, records)
+    if "--force" in args:
+        err("[colab] --force: killing stale SSH sessions...")
+        s["knobs"]["ssh_busy"] = False
+        fc.save_server(s)
+        if s["knobs"].get("ssh_no_pubkey"):
+            err(
+                "[colab] no SSH public key found in ~/.ssh/. Run "
+                "`ssh-keygen -t ed25519` to generate one, or pass --identity."
+            )
+            return 2
     if s["knobs"]["ssh_busy"]:
         limit = s["knobs"].get("ssh_busy_limit")
         if limit is not None:
@@ -474,7 +521,8 @@ def main():
         out("Version: 0.8.0-fake")
         return 0
     handlers = {"sessions": cmd_sessions, "usage": cmd_usage, "new": cmd_new, "exec": cmd_exec,
-                "stop": cmd_stop, "whoami": cmd_whoami, "ssh": cmd_ssh}
+                "stop": cmd_stop, "whoami": cmd_whoami, "ssh": cmd_ssh,
+                "url": cmd_url, "restart-kernel": cmd_restart_kernel}
     if cmd not in handlers:
         err("Error: No such command '%s'." % cmd)
         return 2

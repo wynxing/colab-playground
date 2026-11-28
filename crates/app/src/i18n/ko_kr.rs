@@ -602,7 +602,7 @@ pub(super) const MESSAGES: Messages = &[
     (RUNTIME_SWITCH, "이 계정으로 전환"),
     (
         RUNTIME_SWITCH_HINT,
-        "연장, 자동 중지 취소, 포트 포워딩을 하려면 이 계정이 활성 계정이어야 합니다.",
+        "Colab에서 열기, 커널 다시 시작, SSH, 포트 포워딩 및 자동 중지 변경을 하려면 이 계정이 활성 계정이어야 합니다.",
     ),
     (
         RUNTIME_UNNAMED_REASON,
@@ -1341,4 +1341,48 @@ pub(super) const MESSAGES: Messages = &[
         "거부는 최종 답변입니다. 에이전트는 거절을 듣고 다시 묻지 않습니다.",
     ),
     (APPROVAL_CLOSED, "제때 답이 없어 거절로 전달했습니다."),
+    (OPEN_BROWSER_ACTION, "Colab에서 열기"),
+    (OPEN_BROWSER_DONE, "브라우저에서 {name} 을(를) 열었습니다."),
+    (RESTART_KERNEL_ACTION, "커널 다시 시작"),
+    (RESTART_KERNEL_TITLE, "커널을 다시 시작하시겠습니까?"),
+    (
+        RESTART_KERNEL_BODY,
+        "{name} 런타임의 Jupyter 커널을 다시 시작합니다. Python 변수와 메모리 상태가 지워집니다.",
+    ),
+    (
+        RESTART_KERNEL_FILES_NOTE,
+        "VM, 다운로드한 모델, 디스크의 파일은 그대로 유지됩니다.",
+    ),
+    (RESTART_KERNEL_DONE, "{name} 커널을 다시 시작했습니다."),
+    (RESET_SSH_ACTION, "SSH 세션 재설정"),
+    (RESET_SSH_DONE, "{name} 의 SSH 세션을 정리했습니다."),
+    (REMOTE_SSH_ACTION, "IDE로 연결"),
+    (REMOTE_SSH_TITLE, "IDE로 연결 (Remote-SSH)"),
+    (
+        REMOTE_SSH_INTRO,
+        "아래 명령이나 분리된 SSH 설정을 사용해 VS Code, Cursor 또는 Zed를 {name} 에 연결합니다.",
+    ),
+    (
+        REMOTE_SSH_NO_CONFIG_EDIT,
+        "~/.ssh/config 파일은 절대 수정하지 않습니다. 스니펫은 이 계정의 전용 CLI 상태 파일에 연결됩니다.",
+    ),
+    (
+        REMOTE_SSH_STOPPED_NOTE,
+        "이 런타임이 실행 중일 때만 사용하십시오. 중지한 뒤에 colab ssh --proxy-mode 를 실행하면 과금되는 새 VM이 시작됩니다.",
+    ),
+    (REMOTE_SSH_COMMAND_LABEL, "일회성 SSH 명령"),
+    (
+        REMOTE_SSH_CONFIG_LABEL,
+        "분리된 SSH 설정 스니펫 (ssh -F 와 함께 사용)",
+    ),
+    (REMOTE_SSH_WRITE_TEMP, "임시 SSH 설정 파일 쓰기"),
+    (
+        REMOTE_SSH_TEMP_SAVED,
+        "임시 SSH 설정을 {path} 에 저장했습니다.",
+    ),
+    (REMOTE_SSH_TEMP_COMMAND, "{path} 로 실행"),
+    (
+        REMOTE_SSH_RESET_HINT,
+        "IDE나 이전 SSH 클라이언트의 잔여 연결 때문에 HTTP 429 오류가 발생하는 경우:",
+    ),
 ];

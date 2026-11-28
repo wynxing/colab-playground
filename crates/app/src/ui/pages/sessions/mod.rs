@@ -28,7 +28,8 @@ use crate::{
 };
 
 pub use card::{
-    cancel_auto_stop_selector, extend_selector, forward_selector, runtime_selector,
+    cancel_auto_stop_selector, extend_selector, forward_selector, ide_ssh_selector,
+    open_browser_selector, reset_ssh_selector, restart_kernel_selector, runtime_selector,
     set_auto_stop_selector, stop_selector, switch_selector,
 };
 
