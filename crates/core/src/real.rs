@@ -34,8 +34,9 @@ use crate::hostfs::HostFs;
 use crate::http::HttpClient;
 use crate::paths::{DataLayout, HostPath};
 use crate::plugins::{
-    PluginInfo, PluginOrigin, PluginPreview, PluginStore, clear_staging, clone_git,
-    contains_secret, discard_preview, redact, redact_json, resolve_endpoints, resolve_inputs,
+    AfterRun, PluginInfo, PluginOrigin, PluginPreview, PluginStore, RunEnd, capability_env,
+    clear_staging, clone_git, contains_secret, discard_preview, expand_uploads, materialize_assets,
+    redact, redact_json, resolve_endpoints, resolve_inputs, secret_keyring_name, vm_env,
 };
 use crate::provision::{
     self, Hardware, ProvisionEvent, ProvisionOps, ProvisionOutcome, ProvisionSpec,
@@ -1373,9 +1374,10 @@ fn sync_watchdog_hooks(
     }
     let now = inner.now();
     let mut policy = entry.policy.clone();
-    policy.max_runtime = entry
-        .auto_stop_at()
-        .map(|at| at.duration_since(now).unwrap_or_else(|_| Duration::from_secs(60)));
+    policy.max_runtime = entry.auto_stop_at().map(|at| {
+        at.duration_since(now)
+            .unwrap_or_else(|_| Duration::from_secs(60))
+    });
     let grace = inner.st().defaults.winddown_grace;
     let exec_res = cli.exec_json(
         state,
@@ -2065,7 +2067,9 @@ impl Backend for RealBackend {
         targets: Option<Vec<crate::keep::KeepTargetId>>,
         cancel: &CancelToken,
     ) -> Result<crate::keep::KeepSyncReport> {
-        use crate::keep::{KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded};
+        use crate::keep::{
+            KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded,
+        };
 
         let Some(name) = target.name.clone() else {
             return Err(Error::new(ErrorKind::SessionGone));
@@ -2213,7 +2217,9 @@ impl Backend for RealBackend {
                         continue;
                     };
                     let dest = match &hf.path_in_repo {
-                        Some(sub) if !sub.trim().is_empty() => format!("{}/{}", hf.repo, sub.trim()),
+                        Some(sub) if !sub.trim().is_empty() => {
+                            format!("{}/{}", hf.repo, sub.trim())
+                        }
                         _ => hf.repo.clone(),
                     };
                     let token = self.hf_token(cancel).filter(|t| !t.trim().is_empty());
@@ -2301,11 +2307,7 @@ impl Backend for RealBackend {
                         ));
                         continue;
                     };
-                    let dest_sub = format!(
-                        "{}/{}",
-                        drive.dest_subpath.trim_end_matches('/'),
-                        name
-                    );
+                    let dest_sub = format!("{}/{}", drive.dest_subpath.trim_end_matches('/'), name);
                     let dest = format!("{}/{}", drive.mount_path.trim_end_matches('/'), dest_sub);
                     if !drive.consented {
                         results.push((
@@ -2362,11 +2364,13 @@ impl Backend for RealBackend {
                             files: 0,
                             bytes: 0,
                             destination: dest,
-                            error: Some(Error::new(ErrorKind::Io).detail(
-                                v.get("error")
-                                    .and_then(|e| e.as_str())
-                                    .unwrap_or("Google Drive copy failed"),
-                            )),
+                            error: Some(
+                                Error::new(ErrorKind::Io).detail(
+                                    v.get("error")
+                                        .and_then(|e| e.as_str())
+                                        .unwrap_or("Google Drive copy failed"),
+                                ),
+                            ),
                         },
                         Err(e) => KeepTargetResult {
                             files: 0,
@@ -2380,11 +2384,9 @@ impl Backend for RealBackend {
             results.push((id, res));
         }
         let report = KeepSyncReport { at: now, results };
-        let _ = self
-            .inner
-            .st()
-            .ledger
-            .update(&target.account, &name, |e| e.last_keep_sync = Some(report.clone()));
+        let _ = self.inner.st().ledger.update(&target.account, &name, |e| {
+            e.last_keep_sync = Some(report.clone())
+        });
         ensure_report_succeeded(&report)?;
         Ok(report)
     }
@@ -2581,10 +2583,7 @@ impl Backend for RealBackend {
                 // A stop can take long and the app can quit before it returns: what the
                 // round read is saved first.
                 let _ = self.inner.st().ledger.save_changes();
-                let save_keep = e
-                    .keep_plan
-                    .as_ref()
-                    .is_some_and(|p| p.has_enabled_target());
+                let save_keep = e.keep_plan.as_ref().is_some_and(|p| p.has_enabled_target());
                 match self.stop_session(
                     &target,
                     StopOptions {
@@ -2773,20 +2772,25 @@ impl Backend for RealBackend {
         let manifest = &plugin.manifest;
         let resolved = resolve_inputs(manifest, &spec.inputs)?;
         let endpoints = resolve_endpoints(manifest, &resolved.values)?;
+        let helper = self.inner.helper()?;
+        let (cap_env, cap_secrets) = capability_env(manifest, &spec.consent, |name| {
+            helper.secret_get(name, cancel).ok().flatten()
+        })?;
         let mut env = resolved.env.clone();
+        env.extend(cap_env);
         let mut secrets = resolved.secrets.clone();
+        secrets.extend(cap_secrets);
         let mut secret_keys: Vec<String> = manifest
             .inputs
             .iter()
             .filter(|i| i.kind == crate::plugins::InputKind::Secret)
             .map(|i| i.env_key())
             .collect();
-        let helper = self.inner.helper()?;
-        for need in &manifest.needs {
-            if let Ok(Some(v)) = helper.secret_get(need.secret_name(), cancel) {
-                env.push((need.env_key().to_owned(), v.clone()));
-                secret_keys.push(need.env_key().to_owned());
-                secrets.push(v);
+        for (key, _) in &env {
+            if (key == "PLUGIN_HF_TOKEN" || key.starts_with("PLUGIN_SECRET_"))
+                && !secret_keys.iter().any(|existing| existing == key)
+            {
+                secret_keys.push(key.clone());
             }
         }
         // Names only (no values): lets the VM-side poll scrub these values.
@@ -2843,6 +2847,8 @@ impl Backend for RealBackend {
             &account,
             &session,
             env,
+            resolved.vm_rels,
+            resolved.uploads,
             non_secret_inputs,
             &secrets,
             &endpoints,
@@ -2850,23 +2856,26 @@ impl Backend for RealBackend {
             &events,
             cancel,
         );
-        // A cancelled run always gives back the runtime it provisioned.
-        if let Err(e) = &result
-            && provisioned
-            && (e.kind == ErrorKind::Cancelled || spec.stop_on_failure)
-        {
-            let _ = self.inner.stop(
-                &target(&self.inner),
-                &StopOptions {
-                    reason: StopReason::Provision,
-                    save_keep: false,
-                    force_on_keep_error: false,
-                    keep_timeout: None,
-                },
-                &CancelToken::new(),
-            );
+        let end = match &result {
+            Ok(_) => RunEnd::Succeeded,
+            Err(error) if error.kind == ErrorKind::Cancelled => RunEnd::Cancelled,
+            Err(_) => RunEnd::Failed,
+        };
+        let action = crate::plugins::after_run(
+            spec.mode,
+            provisioned,
+            end,
+            spec.stop_on_failure,
+            spec.keep_on_failure,
+        );
+        let follow = self.apply_after_run(action, &target(&self.inner), cancel);
+        match result {
+            Ok(outcome) => follow.map(|()| outcome),
+            Err(error) => {
+                let _ = follow;
+                Err(error)
+            }
         }
-        result
     }
 
     fn discover_runs(
@@ -3266,23 +3275,62 @@ impl RealBackend {
     }
 
     fn needs_secrets(&self, plugin: &str, cancel: &CancelToken) -> Vec<String> {
-        let needs = self
-            .inner
-            .st()
-            .plugins
-            .get(plugin)
-            .map(|p| p.manifest.needs.clone())
-            .unwrap_or_default();
-        if needs.is_empty() {
+        let Some(loaded) = self.inner.st().plugins.get(plugin).cloned() else {
             return Vec::new();
-        }
+        };
         let Ok(helper) = self.inner.helper() else {
             return Vec::new();
         };
-        needs
+        let mut names = Vec::new();
+        for need in &loaded.manifest.needs {
+            if let Some(name) = need.secret_name() {
+                names.push(name.to_owned());
+            }
+        }
+        for slot in &loaded.manifest.secrets {
+            names.push(secret_keyring_name(&loaded.manifest.id, &slot.id));
+        }
+        names
             .into_iter()
-            .filter_map(|need| helper.secret_get(need.secret_name(), cancel).ok().flatten())
+            .filter_map(|name| helper.secret_get(&name, cancel).ok().flatten())
             .collect()
+    }
+
+    /// Keep Plan and teardown after the script stops.
+    /// A stop uses a fresh cancel token so a cancelled run still gives the runtime back.
+    fn apply_after_run(
+        &self,
+        action: AfterRun,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        match action {
+            AfterRun::Leave => Ok(()),
+            AfterRun::SyncKeep => {
+                let has_plan = target.name.as_ref().is_some_and(|name| {
+                    self.inner
+                        .st()
+                        .ledger
+                        .live(&target.account, name)
+                        .and_then(|entry| entry.keep_plan.as_ref())
+                        .is_some_and(|plan| plan.has_enabled_target())
+                });
+                if !has_plan {
+                    return Ok(());
+                }
+                self.sync_keep(target, None, cancel).map(|_| ())
+            }
+            AfterRun::Stop { save_keep } => self.stop_session(
+                target,
+                StopOptions {
+                    reason: StopReason::Provision,
+                    save_keep,
+                    force_on_keep_error: false,
+                    keep_timeout: None,
+                },
+                &CancelToken::new(),
+            ),
+        }
     }
 
     /// Runs the plugin on `session`, then scrubs the CLI history once more,
@@ -3294,6 +3342,8 @@ impl RealBackend {
         account: &AccountId,
         session: &str,
         env: Vec<(String, String)>,
+        vm_rels: Vec<(String, String)>,
+        uploads: Vec<crate::plugins::StagedUpload>,
         non_secret_inputs: BTreeMap<String, crate::plugins::InputValue>,
         secrets: &[String],
         endpoints: &[crate::plugins::ResolvedEndpoint],
@@ -3306,6 +3356,8 @@ impl RealBackend {
             account,
             session,
             env,
+            vm_rels,
+            uploads,
             non_secret_inputs,
             secrets,
             endpoints,
@@ -3326,6 +3378,8 @@ impl RealBackend {
         account: &AccountId,
         session: &str,
         mut env: Vec<(String, String)>,
+        vm_rels: Vec<(String, String)>,
+        uploads: Vec<crate::plugins::StagedUpload>,
         non_secret_inputs: BTreeMap<String, crate::plugins::InputValue>,
         secrets: &[String],
         endpoints: &[crate::plugins::ResolvedEndpoint],
@@ -3335,6 +3389,31 @@ impl RealBackend {
     ) -> Result<PluginRunOutcome> {
         let (_g, cli, state) = self.inner.cli_for(account, cancel)?;
         let run_id = format!("{}-{}", plugin.manifest.id, &crate::accounts::nonce()[..8]);
+        let run_dir = vm::run_dir(&run_id);
+        if !uploads.is_empty() || !plugin.assets.is_empty() {
+            let scratch =
+                tempfile::tempdir().map_err(|e| Error::new(ErrorKind::Io).detail(e.to_string()))?;
+            let mut staged = uploads;
+            staged.extend(materialize_assets(&plugin.assets, scratch.path())?);
+            let files = expand_uploads(&staged)?;
+            let upload_target = RuntimeRef {
+                account: account.clone(),
+                endpoint: String::new(),
+                name: Some(session.to_owned()),
+            };
+            for (local, rel) in files {
+                let local_str = local
+                    .to_str()
+                    .ok_or_else(|| Error::invalid("path", "the local path is not usable"))?;
+                self.vm_upload(
+                    &upload_target,
+                    local_str,
+                    &format!("{run_dir}/{rel}"),
+                    cancel,
+                )?;
+            }
+        }
+        env.extend(vm_env(&run_dir, &vm_rels));
         let script_name = plugin
             .manifest
             .run

@@ -1,12 +1,13 @@
 //! Plugins: declarative manifests whose script runs on the Colab VM.
 //!
 //! A plugin never runs anything on the user's machine. It is a directory with
-//! `plugin.toml` and one script (`.py` or `.sh`) that the host uploads with
-//! `colab exec` and starts detached on the VM. Manifests are validated
-//! strictly (`api = 1`, unknown fields rejected). Bundled plugins are embedded
-//! in the binary; user plugins are copied into `<data>/plugins/<id>/` from a
-//! folder or a `git clone --depth 1` checkout made by the *local* `git`.
-//! See `docs/PLUGINS.md` for the author guide.
+//! `plugin.toml`, one script (`.py` or `.sh`), and optional static assets that
+//! the host uploads and starts detached on the VM. Manifests are validated
+//! strictly (`api = 1` or `api = 2`, unknown fields rejected). `api = 1`
+//! plugins keep working; the job-mode fields are optional additions on both.
+//! Bundled plugins are embedded in the binary; user plugins are copied into
+//! `<data>/plugins/<id>/` from a folder or a `git clone --depth 1` checkout
+//! made by the *local* `git`. See `docs/PLUGINS.md` for the author guide.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -19,11 +20,27 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::host::{Host, is_env_key, tail};
 use crate::sessions::Accelerator;
 
-/// Manifest API version understood by this build.
+/// Original manifest API. Still accepted, including the optional v2 fields.
 pub const API_VERSION: u32 = 1;
+/// Manifest API that documents job mode, file inputs, secret slots and assets.
+pub const API_VERSION_V2: u32 = 2;
 pub const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 /// Largest accepted script (it travels inside a `colab exec` payload).
 pub const MAX_SCRIPT_BYTES: u64 = 512 * 1024;
+/// Largest single static asset, and how many a plugin may bundle.
+pub const MAX_ASSET_BYTES: u64 = 512 * 1024;
+pub const MAX_ASSETS: usize = 16;
+/// Longest textarea, in bytes (not characters).
+pub const MAX_TEXTAREA_BYTES: usize = 64 * 1024;
+/// Caps for files the user picks. Checked before anything is read into memory.
+pub const MAX_UPLOAD_FILES: usize = 256;
+pub const MAX_UPLOAD_FILE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_UPLOAD_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+/// `true` for the manifest versions this build loads.
+pub fn supported_api(api: u32) -> bool {
+    api == API_VERSION || api == API_VERSION_V2
+}
 
 /// Text with translations, keyed by locale (`en`, `zh-CN`, `zh-TW`, …).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +100,14 @@ pub enum InputKind {
     Secret,
     /// A Hugging Face model repo id (`owner/name`) with host-side search.
     HfModel,
+    /// A local file, uploaded to `$PLUGIN_RUN_DIR/inputs/<id>/<name>`.
+    File,
+    /// A local directory, uploaded under `$PLUGIN_RUN_DIR/inputs/<id>/`.
+    Dir,
+    /// A local `.ipynb`, uploaded like a file. The host does not open it.
+    Notebook,
+    /// Multi-line text (a prompt or a small config).
+    Textarea,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -145,6 +170,17 @@ impl InputValue {
     }
 }
 
+/// How a run ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    /// A long-lived server. The runtime stays up after the script reports ready.
+    #[default]
+    Service,
+    /// A batch job: on success, run the Keep Plan and stop a runtime this run opened.
+    Job,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSpec {
@@ -152,9 +188,16 @@ pub struct RunSpec {
     /// `.sh` with bash).
     pub script: String,
     /// The script keeps running after it reports ready (a server), so the app
-    /// keeps reading its status.
+    /// keeps reading its status. Not allowed together with [`RunMode::Job`].
     #[serde(default)]
     pub keep_alive: bool,
+    /// `service` (default) or `job`.
+    #[serde(default)]
+    pub mode: RunMode,
+    /// Job mode only: leave a runtime this run opened when the script fails,
+    /// so the user can look. Default is to stop it.
+    #[serde(default)]
+    pub keep_on_failure: bool,
 }
 
 /// A progress stage shown in the run view.
@@ -209,28 +252,79 @@ pub struct KeepSpec {
     pub label: LocalizedText,
 }
 
+/// A named keyring slot the plugin may receive (`PLUGIN_SECRET_<ID>`).
+/// The value is stored per plugin and is never written to the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretSlot {
+    /// `[a-z][a-z0-9_]*`, at most 32 characters.
+    pub id: String,
+    /// When true, a run refuses to start until the user has saved a value.
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub label: LocalizedText,
+}
+
+/// A static file shipped with the plugin (not executed on this computer).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetSpec {
+    /// Relative path inside the plugin directory (`requirements.txt`, `workflows/a.json`).
+    pub path: String,
+}
+
+/// One static file after it has been read (bytes only; nothing is executed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginAsset {
+    pub path: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// The user's saved Hugging Face token, passed as `PLUGIN_HF_TOKEN`
     /// when one is stored (optional for the plugin).
     HfToken,
+    /// Consent flag `PLUGIN_GCP_AUTH=1`. Not a stored secret and not a `colab` command.
+    GcpAuth,
+    /// The script may use Google Drive on the VM. The user must opt in on the run form.
+    Drive,
 }
 
 impl Capability {
-    /// Vault secret name holding the value.
-    pub fn secret_name(self) -> &'static str {
+    /// Vault secret name holding the value. `None` for capabilities that are a
+    /// consent flag rather than a stored secret.
+    pub fn secret_name(self) -> Option<&'static str> {
         match self {
-            Capability::HfToken => "hf_token",
+            Capability::HfToken => Some("hf_token"),
+            Capability::GcpAuth | Capability::Drive => None,
         }
     }
 
-    /// Environment variable the script receives.
-    pub fn env_key(self) -> &'static str {
+    /// Environment variable the script receives, when the capability is granted.
+    pub fn env_key(self) -> Option<&'static str> {
         match self {
-            Capability::HfToken => "PLUGIN_HF_TOKEN",
+            Capability::HfToken => Some("PLUGIN_HF_TOKEN"),
+            Capability::GcpAuth => Some("PLUGIN_GCP_AUTH"),
+            Capability::Drive => Some("PLUGIN_DRIVE"),
         }
     }
+
+    /// The run form must record an explicit yes before this is granted.
+    pub fn needs_consent(self) -> bool {
+        matches!(self, Capability::GcpAuth | Capability::Drive)
+    }
+}
+
+/// Explicit yes for the capabilities that touch Google. Both default to no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CapabilityConsent {
+    #[serde(default)]
+    pub gcp_auth: bool,
+    #[serde(default)]
+    pub drive: bool,
 }
 
 /// A parsed, validated `plugin.toml`.
@@ -260,6 +354,12 @@ pub struct Manifest {
     pub keep: Vec<KeepSpec>,
     #[serde(default)]
     pub needs: Vec<Capability>,
+    /// Named keyring slots beyond `hf_token`.
+    #[serde(default)]
+    pub secrets: Vec<SecretSlot>,
+    /// Static files uploaded next to the script.
+    #[serde(default)]
+    pub assets: Vec<AssetSpec>,
 }
 
 fn invalid(field: &str, reason: &str) -> Error {
@@ -342,7 +442,7 @@ impl Manifest {
         let raw: toml::Table =
             toml::from_str(text).map_err(|e| invalid("toml", "syntax").detail(e.to_string()))?;
         match raw.get("api").and_then(|v| v.as_integer()) {
-            Some(v) if v == i64::from(API_VERSION) => {}
+            Some(v) if u32::try_from(v).ok().is_some_and(supported_api) => {}
             Some(_) => return Err(invalid("api", "unsupported api version")),
             None => return Err(invalid("api", "missing")),
         }
@@ -354,7 +454,7 @@ impl Manifest {
 
     /// Checks every rule documented in `docs/PLUGINS.md`.
     pub fn validate(&self) -> Result<()> {
-        if self.api != API_VERSION {
+        if !supported_api(self.api) {
             return Err(invalid("api", "unsupported api version"));
         }
         if !is_slug(&self.id, 48, false) || self.id.contains('_') {
@@ -372,6 +472,18 @@ impl Manifest {
         check_text("name", &self.name, true)?;
         check_text("description", &self.description, false)?;
         check_script_name(&self.run.script)?;
+        if self.run.mode == RunMode::Job && self.run.keep_alive {
+            return Err(invalid(
+                "run.keep_alive",
+                "a job stops when the script finishes",
+            ));
+        }
+        if self.run.mode != RunMode::Job && self.run.keep_on_failure {
+            return Err(invalid(
+                "run.keep_on_failure",
+                "only a job can stay up after a failure",
+            ));
+        }
         if self.provision.min_vram_mib > 0
             && !self.provision.accelerator.is_some_and(|a| a.is_gpu())
         {
@@ -398,8 +510,14 @@ impl Manifest {
             check_text(&f("label"), &input.label, false)?;
             check_text(&f("help"), &input.help, false)?;
             match (input.kind, &input.default) {
-                (InputKind::Secret, Some(_)) => {
-                    return Err(invalid(&f("default"), "secrets cannot have defaults"));
+                (
+                    InputKind::Secret | InputKind::File | InputKind::Dir | InputKind::Notebook,
+                    Some(_),
+                ) => {
+                    return Err(invalid(
+                        &f("default"),
+                        "secrets and local paths cannot have defaults",
+                    ));
                 }
                 (InputKind::Number, Some(d)) if !matches!(d, InputValue::Number(_)) => {
                     return Err(invalid(&f("default"), "must be a number"));
@@ -407,9 +525,10 @@ impl Manifest {
                 (InputKind::Bool, Some(d)) if !matches!(d, InputValue::Bool(_)) => {
                     return Err(invalid(&f("default"), "must be true or false"));
                 }
-                (InputKind::Text | InputKind::Select | InputKind::HfModel, Some(d))
-                    if !matches!(d, InputValue::Text(_)) =>
-                {
+                (
+                    InputKind::Text | InputKind::Textarea | InputKind::Select | InputKind::HfModel,
+                    Some(d),
+                ) if !matches!(d, InputValue::Text(_)) => {
                     return Err(invalid(&f("default"), "must be a string"));
                 }
                 _ => {}
@@ -504,6 +623,40 @@ impl Manifest {
         if needs.len() != self.needs.len() {
             return Err(invalid("needs", "duplicate capability"));
         }
+
+        let mut slot_ids = BTreeSet::new();
+        let mut slot_keys = BTreeSet::new();
+        for (i, slot) in self.secrets.iter().enumerate() {
+            let f = |name: &str| format!("secrets[{i}].{name}");
+            if !is_secret_slot(&slot.id) {
+                return Err(invalid(&f("id"), "use [a-z][a-z0-9_]*"));
+            }
+            if !slot_ids.insert(slot.id.clone()) {
+                return Err(invalid(&f("id"), "duplicate id"));
+            }
+            let key = secret_env_key(&slot.id);
+            if !is_env_key(&key) || !slot_keys.insert(key) {
+                return Err(invalid(&f("id"), "environment name collides"));
+            }
+            check_text(&f("label"), &slot.label, false)?;
+        }
+
+        let mut asset_paths = BTreeSet::new();
+        for (i, asset) in self.assets.iter().enumerate() {
+            check_asset_path(&format!("assets[{i}].path"), &asset.path)?;
+            if asset.path == self.run.script {
+                return Err(invalid(
+                    &format!("assets[{i}].path"),
+                    "an asset cannot be the script",
+                ));
+            }
+            if !asset_paths.insert(asset.path.clone()) {
+                return Err(invalid(&format!("assets[{i}].path"), "duplicate path"));
+            }
+        }
+        if self.assets.len() > MAX_ASSETS {
+            return Err(invalid("assets", "too many files"));
+        }
         Ok(())
     }
 
@@ -512,15 +665,31 @@ impl Manifest {
     }
 }
 
+/// A local file or directory to upload. The local path is an argument to
+/// `colab upload`; it is never copied into script text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedUpload {
+    pub local: PathBuf,
+    /// Path relative to the run directory (`inputs/<id>/name`). Safe characters only.
+    pub remote_rel: String,
+    pub is_dir: bool,
+}
+
 /// Values for a run, after defaults and validation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedInputs {
     /// `PLUGIN_INPUT_*` pairs for `colab exec --env`.
+    /// File inputs are not here yet: their VM path needs the run directory.
     pub env: Vec<(String, String)>,
     /// Secret values to redact from logs.
     pub secrets: Vec<String>,
     /// Final values by input id (secrets included; never persist this).
+    /// File inputs store the VM-relative path, not the local path.
     pub values: BTreeMap<String, InputValue>,
+    /// Local paths to upload before the script starts.
+    pub uploads: Vec<StagedUpload>,
+    /// `(PLUGIN_INPUT_*, remote_rel)` filled in once the run directory exists.
+    pub vm_rels: Vec<(String, String)>,
 }
 
 /// Validates repo ids like `owner/name`.
@@ -603,6 +772,20 @@ pub fn resolve_inputs(
                     return Err(Error::invalid(&spec.id, "too long"));
                 }
             }
+            (InputKind::Textarea, InputValue::Text(t)) => {
+                if t.len() > MAX_TEXTAREA_BYTES || t.contains('\0') {
+                    return Err(Error::invalid(&spec.id, "too long"));
+                }
+            }
+            (InputKind::File | InputKind::Dir | InputKind::Notebook, InputValue::Text(t)) => {
+                let staged = stage_local(spec, t)?;
+                out.vm_rels
+                    .push((spec.env_key(), staged.remote_rel.clone()));
+                out.values
+                    .insert(spec.id.clone(), InputValue::Text(staged.remote_rel.clone()));
+                out.uploads.push(staged);
+                continue;
+            }
             _ => return Err(Error::invalid(&spec.id, "wrong type")),
         }
         let env_value = match &value {
@@ -616,6 +799,13 @@ pub fn resolve_inputs(
         out.values.insert(spec.id.clone(), value);
     }
     Ok(out)
+}
+
+/// Prefixes each file input's relative path with the run directory.
+pub fn vm_env(run_dir: &str, rels: &[(String, String)]) -> Vec<(String, String)> {
+    rels.iter()
+        .map(|(key, rel)| (key.clone(), format!("{run_dir}/{rel}")))
+        .collect()
 }
 
 /// An endpoint with its port resolved from the inputs.
@@ -678,6 +868,8 @@ pub enum PluginSource {
 pub struct LoadedPlugin {
     pub manifest: Manifest,
     pub script: Vec<u8>,
+    /// Static files. Empty for the bundled plugins.
+    pub assets: Vec<PluginAsset>,
     pub source: PluginSource,
 }
 
@@ -709,6 +901,8 @@ pub struct PluginPreview {
     pub manifest: Manifest,
     pub origin: PluginOrigin,
     pub script_bytes: u64,
+    /// Static files staged with the script (still not executed here).
+    pub assets: Vec<PluginAsset>,
     /// Version currently installed with the same id, if any.
     pub replaces_version: Option<String>,
     /// Staged copy of the files (manifest + script) to install from.
@@ -729,23 +923,51 @@ pub fn bundled() -> Vec<(&'static str, &'static [u8])> {
     ]
 }
 
+/// A plugin directory after validation: manifest, script bytes, static assets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginBundle {
+    pub manifest: Manifest,
+    pub script: Vec<u8>,
+    pub assets: Vec<PluginAsset>,
+}
+
 /// Reads and validates a plugin directory (no symlinked or oversized files,
-/// script confined to the directory).
-pub fn load_dir(dir: &Path) -> Result<(Manifest, Vec<u8>)> {
+/// script and assets confined to the directory). Nothing in the directory is executed.
+pub fn load_dir(dir: &Path) -> Result<PluginBundle> {
     let manifest_path = dir.join("plugin.toml");
     let text = read_regular(&manifest_path, MAX_MANIFEST_BYTES, "plugin.toml")?;
     let manifest =
         Manifest::parse(&String::from_utf8(text).map_err(|_| invalid("toml", "not UTF-8"))?)?;
-    let script_path = dir.join(&manifest.run.script);
     let canon_dir = dir.canonicalize()?;
-    let canon_script = script_path
-        .canonicalize()
-        .map_err(|_| invalid("run.script", "file not found"))?;
-    if !canon_script.starts_with(&canon_dir) {
-        return Err(invalid("run.script", "outside the plugin directory"));
+    let script = read_confined(
+        &canon_dir,
+        &dir.join(&manifest.run.script),
+        MAX_SCRIPT_BYTES,
+        "run.script",
+    )?;
+    let mut assets = Vec::with_capacity(manifest.assets.len());
+    for spec in &manifest.assets {
+        let bytes = read_confined(&canon_dir, &dir.join(&spec.path), MAX_ASSET_BYTES, "assets")?;
+        assets.push(PluginAsset {
+            path: spec.path.clone(),
+            bytes,
+        });
     }
-    let script = read_regular(&script_path, MAX_SCRIPT_BYTES, "run.script")?;
-    Ok((manifest, script))
+    Ok(PluginBundle {
+        manifest,
+        script,
+        assets,
+    })
+}
+
+fn read_confined(canon_dir: &Path, path: &Path, max: u64, field: &str) -> Result<Vec<u8>> {
+    let canon = path
+        .canonicalize()
+        .map_err(|_| invalid(field, "file not found"))?;
+    if !canon.starts_with(canon_dir) {
+        return Err(invalid(field, "outside the plugin directory"));
+    }
+    read_regular(path, max, field)
 }
 
 fn read_regular(path: &Path, max: u64, field: &str) -> Result<Vec<u8>> {
@@ -928,6 +1150,7 @@ impl PluginStore {
             store.plugins.push(LoadedPlugin {
                 manifest,
                 script: script.to_vec(),
+                assets: Vec::new(),
                 source: PluginSource::Bundled,
             });
         }
@@ -951,21 +1174,22 @@ impl PluginStore {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 match load_dir(&d) {
-                    Ok((m, _)) if m.id != label => {
+                    Ok(bundle) if bundle.manifest.id != label => {
                         store
                             .load_errors
                             .push((label, invalid("id", "does not match its directory")));
                     }
-                    Ok((m, _)) if store.get(&m.id).is_some() => {
+                    Ok(bundle) if store.get(&bundle.manifest.id).is_some() => {
                         store.load_errors.push((
                             label,
-                            Error::new(ErrorKind::PluginExists).with("plugin", &m.id),
+                            Error::new(ErrorKind::PluginExists).with("plugin", &bundle.manifest.id),
                         ));
                     }
-                    Ok((manifest, script)) => {
+                    Ok(bundle) => {
                         store.plugins.push(LoadedPlugin {
-                            manifest,
-                            script,
+                            manifest: bundle.manifest,
+                            script: bundle.script,
+                            assets: bundle.assets,
                             source: PluginSource::User,
                         });
                     }
@@ -1003,23 +1227,26 @@ impl PluginStore {
         staging: &Path,
         origin: PluginOrigin,
     ) -> Result<PluginPreview> {
-        let (manifest, script) = load_dir(path)?;
+        let bundle = load_dir(path)?;
         if self
-            .get(&manifest.id)
+            .get(&bundle.manifest.id)
             .is_some_and(|p| p.source == PluginSource::Bundled)
         {
-            return Err(Error::new(ErrorKind::PluginExists).with("plugin", &manifest.id));
+            return Err(Error::new(ErrorKind::PluginExists).with("plugin", &bundle.manifest.id));
         }
         let toml = std::fs::read(path.join("plugin.toml"))?;
         let staged = staging.join(format!("{STAGE_PREFIX}{}", crate::accounts::nonce()));
-        if let Err(error) = write_plugin_files(&staged, &manifest, &toml, &script) {
+        if let Err(error) = write_plugin_files(&staged, &bundle, &toml) {
             let _ = std::fs::remove_dir_all(&staged);
             return Err(error);
         }
         Ok(PluginPreview {
-            replaces_version: self.get(&manifest.id).map(|p| p.manifest.version.clone()),
-            script_bytes: script.len() as u64,
-            manifest,
+            replaces_version: self
+                .get(&bundle.manifest.id)
+                .map(|p| p.manifest.version.clone()),
+            script_bytes: bundle.script.len() as u64,
+            assets: bundle.assets,
+            manifest: bundle.manifest,
             origin,
             staged_dir: staged,
         })
@@ -1035,29 +1262,31 @@ impl PluginStore {
     }
 
     fn install_staged(&mut self, preview: &PluginPreview) -> Result<PluginInfo> {
-        let (manifest, script) = load_dir(&preview.staged_dir)?;
-        if manifest != preview.manifest {
+        let bundle = load_dir(&preview.staged_dir)?;
+        if bundle.manifest != preview.manifest || bundle.assets != preview.assets {
             return Err(invalid("plugin.toml", "changed since it was previewed"));
         }
         if self
-            .get(&manifest.id)
+            .get(&bundle.manifest.id)
             .is_some_and(|p| p.source == PluginSource::Bundled)
         {
-            return Err(Error::new(ErrorKind::PluginExists).with("plugin", &manifest.id));
+            return Err(Error::new(ErrorKind::PluginExists).with("plugin", &bundle.manifest.id));
         }
         if let Some(dir) = &self.dir {
-            let target = dir.join(&manifest.id);
+            let target = dir.join(&bundle.manifest.id);
             let toml = std::fs::read(preview.staged_dir.join("plugin.toml"))?;
-            let tmp = dir.join(format!(".{}.new", manifest.id));
+            let tmp = dir.join(format!(".{}.new", bundle.manifest.id));
             let _ = std::fs::remove_dir_all(&tmp);
-            write_plugin_files(&tmp, &manifest, &toml, &script)?;
+            write_plugin_files(&tmp, &bundle, &toml)?;
             let _ = std::fs::remove_dir_all(&target);
             std::fs::rename(&tmp, &target)?;
         }
+        let manifest = bundle.manifest;
         self.plugins.retain(|p| p.manifest.id != manifest.id);
         self.plugins.push(LoadedPlugin {
             manifest: manifest.clone(),
-            script,
+            script: bundle.script,
+            assets: bundle.assets,
             source: PluginSource::User,
         });
         self.flags.remove(&manifest.id);
@@ -1109,15 +1338,342 @@ impl PluginStore {
     }
 }
 
-fn write_plugin_files(dir: &Path, manifest: &Manifest, toml: &[u8], script: &[u8]) -> Result<()> {
+fn write_plugin_files(dir: &Path, bundle: &PluginBundle, toml: &[u8]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("plugin.toml"), toml)?;
-    let script_path = dir.join(&manifest.run.script);
+    let script_path = dir.join(&bundle.manifest.run.script);
     if let Some(parent) = script_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(script_path, script)?;
+    std::fs::write(script_path, &bundle.script)?;
+    for asset in &bundle.assets {
+        let path = dir.join(&asset.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &asset.bytes)?;
+    }
     Ok(())
+}
+
+fn is_secret_slot(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn check_asset_path(field: &str, path: &str) -> Result<()> {
+    let ok_chars = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c));
+    if path.is_empty()
+        || path.len() > 128
+        || path.starts_with('/')
+        || !ok_chars
+        || path
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..")
+    {
+        return Err(invalid(
+            field,
+            "must be a relative path inside the plugin directory",
+        ));
+    }
+    Ok(())
+}
+
+/// `PLUGIN_SECRET_<ID>` for a named slot.
+pub fn secret_env_key(id: &str) -> String {
+    format!("PLUGIN_SECRET_{}", id.to_ascii_uppercase())
+}
+
+/// Keyring name for one plugin's slot. Plugin ids cannot contain `_`, so
+/// replacing `-` does not collide. Fits [`crate::accounts::validate_secret_name`].
+pub fn secret_keyring_name(plugin_id: &str, slot_id: &str) -> String {
+    format!("p_{}_{}", plugin_id.replace('-', "_"), slot_id)
+}
+
+fn safe_leaf(name: &str) -> Result<String> {
+    if name.is_empty()
+        || name.len() > 128
+        || name == "."
+        || name == ".."
+        || name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
+        return Err(Error::invalid("path", "the file name is not usable"));
+    }
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_matches('.').to_owned();
+    if safe.is_empty() || safe.chars().all(|c| c == '_') {
+        return Err(Error::invalid("path", "the file name is not usable"));
+    }
+    Ok(safe)
+}
+
+fn path_leaf(path: &str) -> Result<&str> {
+    let trimmed = path.trim().trim_end_matches(['/', '\\']);
+    let leaf = trimmed.rsplit(['/', '\\']).next().unwrap_or("");
+    if leaf.is_empty() || leaf == "." || leaf == ".." {
+        return Err(Error::invalid("path", "the file name is not usable"));
+    }
+    Ok(leaf)
+}
+
+fn stage_local(spec: &InputSpec, raw: &str) -> Result<StagedUpload> {
+    let text = raw.trim();
+    if text.is_empty()
+        || text.len() > 4096
+        || text.contains('\0')
+        || text.contains('\n')
+        || text.starts_with('-')
+    {
+        return Err(Error::invalid(&spec.id, "the local path is not usable"));
+    }
+    let remote_rel = match spec.kind {
+        InputKind::Dir => format!("inputs/{}", spec.id),
+        InputKind::File | InputKind::Notebook => {
+            let leaf = path_leaf(text)?;
+            if spec.kind == InputKind::Notebook && !leaf.to_ascii_lowercase().ends_with(".ipynb") {
+                return Err(Error::invalid(&spec.id, "expected a .ipynb file"));
+            }
+            let safe = safe_leaf(leaf)?;
+            format!("inputs/{}/{safe}", spec.id)
+        }
+        _ => return Err(Error::invalid(&spec.id, "wrong type")),
+    };
+    Ok(StagedUpload {
+        local: PathBuf::from(text),
+        remote_rel,
+        is_dir: spec.kind == InputKind::Dir,
+    })
+}
+
+/// Expands staged directories into individual files. Symlinks are rejected.
+/// File bytes are not read here and nothing is executed.
+pub fn expand_uploads(staged: &[StagedUpload]) -> Result<Vec<(PathBuf, String)>> {
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    for item in staged {
+        if item.is_dir {
+            walk_dir(&item.local, &item.remote_rel, &mut out, &mut total)?;
+        } else {
+            push_file(&item.local, &item.remote_rel, &mut out, &mut total)?;
+        }
+    }
+    Ok(out)
+}
+
+fn push_file(
+    local: &Path,
+    remote_rel: &str,
+    out: &mut Vec<(PathBuf, String)>,
+    total: &mut u64,
+) -> Result<()> {
+    let meta = std::fs::symlink_metadata(local).map_err(|_| {
+        Error::invalid("path", "file not found").with("path", local.display().to_string())
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(
+            Error::invalid("path", "must be a regular file (no symlinks)")
+                .with("path", local.display().to_string()),
+        );
+    }
+    if meta.len() > MAX_UPLOAD_FILE_BYTES {
+        return Err(
+            Error::invalid("path", "file too large").with("path", local.display().to_string())
+        );
+    }
+    *total = total.saturating_add(meta.len());
+    if *total > MAX_UPLOAD_TOTAL_BYTES || out.len() >= MAX_UPLOAD_FILES {
+        return Err(Error::invalid("path", "too many or too large files"));
+    }
+    out.push((local.to_owned(), remote_rel.to_owned()));
+    Ok(())
+}
+
+fn walk_dir(
+    dir: &Path,
+    remote_rel: &str,
+    out: &mut Vec<(PathBuf, String)>,
+    total: &mut u64,
+) -> Result<()> {
+    let meta = std::fs::symlink_metadata(dir).map_err(|_| {
+        Error::invalid("path", "file not found").with("path", dir.display().to_string())
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(Error::invalid("path", "must be a directory (no symlinks)")
+            .with("path", dir.display().to_string()));
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        Error::new(ErrorKind::Io)
+            .with("path", dir.display().to_string())
+            .detail(e.to_string())
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| Error::new(ErrorKind::Io).detail(e.to_string()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let safe = safe_leaf(&name)?;
+        let child_rel = format!("{remote_rel}/{safe}");
+        let child_meta = std::fs::symlink_metadata(entry.path()).map_err(|e| {
+            Error::new(ErrorKind::Io)
+                .with("path", entry.path().display().to_string())
+                .detail(e.to_string())
+        })?;
+        if child_meta.file_type().is_symlink() {
+            return Err(
+                Error::invalid("path", "must be a regular file (no symlinks)")
+                    .with("path", entry.path().display().to_string()),
+            );
+        }
+        if child_meta.is_dir() {
+            walk_dir(&entry.path(), &child_rel, out, total)?;
+        } else if child_meta.is_file() {
+            push_file(&entry.path(), &child_rel, out, total)?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes asset bytes under `scratch` so they can be uploaded. Does not execute them.
+pub fn materialize_assets(assets: &[PluginAsset], scratch: &Path) -> Result<Vec<StagedUpload>> {
+    let mut staged = Vec::with_capacity(assets.len());
+    for asset in assets {
+        check_asset_path("assets", &asset.path)?;
+        if asset.bytes.len() as u64 > MAX_ASSET_BYTES {
+            return Err(invalid("assets", "file too large"));
+        }
+        let dest = scratch.join(&asset.path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, &asset.bytes)?;
+        staged.push(StagedUpload {
+            local: dest,
+            remote_rel: format!("assets/{}", asset.path),
+            is_dir: false,
+        });
+    }
+    Ok(staged)
+}
+
+/// Host capabilities and named slots, as env pairs plus the secret values to mask.
+/// `lookup` reads the keyring. A missing optional secret is omitted.
+pub fn capability_env(
+    manifest: &Manifest,
+    consent: &CapabilityConsent,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<(Vec<(String, String)>, Vec<String>)> {
+    let mut env = Vec::new();
+    let mut secrets = Vec::new();
+    for need in &manifest.needs {
+        match need {
+            Capability::HfToken => {
+                if let Some(value) = need.secret_name().and_then(&lookup) {
+                    if let Some(key) = need.env_key() {
+                        env.push((key.to_owned(), value.clone()));
+                    }
+                    secrets.push(value);
+                }
+            }
+            Capability::GcpAuth => {
+                if !consent.gcp_auth {
+                    return Err(Error::invalid(
+                        "gcp_auth",
+                        "this plugin needs Google Cloud auth, which you have not allowed",
+                    ));
+                }
+                if let Some(key) = need.env_key() {
+                    env.push((key.to_owned(), "1".to_owned()));
+                }
+            }
+            Capability::Drive => {
+                if !consent.drive {
+                    return Err(Error::invalid(
+                        "drive",
+                        "this plugin needs Google Drive, which you have not allowed",
+                    ));
+                }
+                if let Some(key) = need.env_key() {
+                    env.push((key.to_owned(), "1".to_owned()));
+                }
+            }
+        }
+    }
+    for slot in &manifest.secrets {
+        let name = secret_keyring_name(&manifest.id, &slot.id);
+        match lookup(&name) {
+            Some(value) => {
+                env.push((secret_env_key(&slot.id), value.clone()));
+                secrets.push(value);
+            }
+            None if slot.required => {
+                return Err(Error::invalid(
+                    &slot.id,
+                    "save this secret in Plugins before starting",
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok((env, secrets))
+}
+
+/// Why a plugin run stopped waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEnd {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+/// What to do with the runtime after the script stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterRun {
+    /// Leave the runtime as it is.
+    Leave,
+    /// Run the Keep Plan already attached to the session, and leave it up.
+    SyncKeep,
+    /// Stop the runtime. `save_keep` runs the Keep Plan first.
+    Stop { save_keep: bool },
+}
+
+/// Job mode on a runtime this run opened: persist, then stop.
+/// A failure can leave that runtime up when the user asked.
+/// A runtime that was already running is never stopped here.
+pub fn after_run(
+    mode: RunMode,
+    provisioned: bool,
+    end: RunEnd,
+    stop_on_failure: bool,
+    keep_on_failure: bool,
+) -> AfterRun {
+    match end {
+        RunEnd::Cancelled if provisioned => AfterRun::Stop { save_keep: false },
+        RunEnd::Cancelled => AfterRun::Leave,
+        RunEnd::Succeeded if mode == RunMode::Job && provisioned => {
+            AfterRun::Stop { save_keep: true }
+        }
+        RunEnd::Succeeded if mode == RunMode::Job => AfterRun::SyncKeep,
+        RunEnd::Succeeded => AfterRun::Leave,
+        RunEnd::Failed if mode == RunMode::Job && keep_on_failure => AfterRun::Leave,
+        RunEnd::Failed if provisioned && stop_on_failure => AfterRun::Stop { save_keep: false },
+        RunEnd::Failed => AfterRun::Leave,
+    }
 }
 
 pub fn redact_json(value: &mut serde_json::Value, secrets: &[String]) {
@@ -1239,7 +1795,7 @@ keep_alive = \"yes\"",
     #[test]
     fn strict_validation() {
         let bad = [
-            MINIMAL.replace("api = 1", "api = 2"),
+            MINIMAL.replace("api = 1", "api = 3"),
             MINIMAL.replace("api = 1\n", ""),
             MINIMAL.replace("id = \"demo\"", "id = \"../x\""),
             MINIMAL.replace("en = \"Demo\"", "fr = \"Demo\""),
@@ -1264,11 +1820,14 @@ keep_alive = \"yes\"",
             assert!(err.is(ErrorKind::ManifestInvalid), "case {i}: {err}");
         }
         assert_eq!(
-            Manifest::parse(&MINIMAL.replace("api = 1", "api = 2"))
+            Manifest::parse(&MINIMAL.replace("api = 1", "api = 3"))
                 .unwrap_err()
                 .param("field"),
             Some("api")
         );
+        let v2 = Manifest::parse(&MINIMAL.replace("api = 1", "api = 2")).unwrap();
+        assert_eq!(v2.api, 2);
+        assert_eq!(v2.run.mode, RunMode::Service);
         let ok = top("needs = [\"hf_token\"]")
             + "\n[[keep]]\npath = \"/content/out\"\n[keep.label]\nen = \"Outputs\"\n";
         assert!(Manifest::parse(&top("needs = [\"hf_token\", \"hf_token\"]")).is_err());
@@ -1350,6 +1909,226 @@ kind = "openai"
             !contains_secret("ab", &["ab".to_owned()]),
             "too short to redact"
         );
+    }
+
+    #[test]
+    fn job_manifest_accepts_files_secrets_assets_and_rejects_bad_combinations() {
+        let text = r#"
+api = 2
+id = "train"
+version = "0.1.0"
+needs = ["hf_token", "gcp_auth", "drive"]
+[name]
+en = "Train"
+[run]
+script = "main.py"
+mode = "job"
+keep_on_failure = true
+[[inputs]]
+id = "data"
+type = "file"
+required = true
+[[inputs]]
+id = "folder"
+type = "dir"
+[[inputs]]
+id = "book"
+type = "notebook"
+[[inputs]]
+id = "prompt"
+type = "textarea"
+[[secrets]]
+id = "civitai_token"
+required = true
+[secrets.label]
+en = "Civitai"
+[[assets]]
+path = "requirements.txt"
+[[assets]]
+path = "workflows/demo.json"
+[[keep]]
+path = "/content/out"
+"#;
+        let m = Manifest::parse(text).unwrap();
+        assert_eq!(m.run.mode, RunMode::Job);
+        assert!(m.run.keep_on_failure);
+        assert!(m.needs.contains(&Capability::GcpAuth));
+        assert_eq!(m.assets.len(), 2);
+        assert_eq!(
+            secret_keyring_name(&m.id, "civitai_token"),
+            "p_train_civitai_token"
+        );
+
+        let both = text.replace("mode = \"job\"", "mode = \"job\"\nkeep_alive = true");
+        assert!(Manifest::parse(&both).is_err());
+        let service_keep = MINIMAL.replace(
+            "script = \"main.py\"",
+            "script = \"main.py\"\nkeep_on_failure = true",
+        );
+        assert!(Manifest::parse(&service_keep).is_err());
+        let bad_slot = text.replace("id = \"civitai_token\"", "id = \"Civitai\"");
+        assert!(Manifest::parse(&bad_slot).is_err());
+        let linked = text.replace("path = \"requirements.txt\"", "path = \"../secret\"");
+        assert!(Manifest::parse(&linked).is_err());
+
+        let mut given = BTreeMap::new();
+        given.insert("data".into(), InputValue::Text("/tmp/My Notes.txt".into()));
+        given.insert("book".into(), InputValue::Text("/tmp/run.ipynb".into()));
+        given.insert(
+            "prompt".into(),
+            InputValue::Text("line one\nline two".into()),
+        );
+        let resolved = resolve_inputs(&m, &given).unwrap();
+        let rels: BTreeMap<_, _> = resolved.vm_rels.iter().cloned().collect();
+        assert_eq!(rels["PLUGIN_INPUT_DATA"], "inputs/data/My_Notes.txt");
+        assert_eq!(rels["PLUGIN_INPUT_BOOK"], "inputs/book/run.ipynb");
+        assert!(!resolved.env.iter().any(|(_, v)| v.contains("/tmp/")));
+        assert_eq!(
+            resolved
+                .env
+                .iter()
+                .find(|(k, _)| k == "PLUGIN_INPUT_PROMPT")
+                .map(|(_, v)| v.as_str()),
+            Some("line one\nline two")
+        );
+        let vm = vm_env("/root/.colab-playground/runs/r1", &resolved.vm_rels);
+        assert!(
+            vm.iter()
+                .any(|(_, v)| v == "/root/.colab-playground/runs/r1/inputs/data/My_Notes.txt")
+        );
+        given.insert("book".into(), InputValue::Text("/tmp/notes.txt".into()));
+        assert!(resolve_inputs(&m, &given).is_err());
+        given.insert("book".into(), InputValue::Text("/tmp/run.ipynb".into()));
+        given.insert(
+            "data".into(),
+            InputValue::Text("$(touch /tmp/pwn).txt".into()),
+        );
+        let sneaky = resolve_inputs(&m, &given).unwrap();
+        assert!(
+            sneaky
+                .uploads
+                .iter()
+                .all(|u| !u.remote_rel.contains("$(") && !u.remote_rel.contains("touch"))
+        );
+
+        assert!(
+            capability_env(&m, &CapabilityConsent::default(), |_| None)
+                .unwrap_err()
+                .is(ErrorKind::InvalidInput)
+        );
+        let consent = CapabilityConsent {
+            gcp_auth: true,
+            drive: true,
+        };
+        let err = capability_env(&m, &consent, |_| None).unwrap_err();
+        assert!(err.is(ErrorKind::InvalidInput));
+        let (env, secrets) = capability_env(&m, &consent, |name| {
+            (name == "p_train_civitai_token" || name == "hf_token").then(|| format!("sek-{name}"))
+        })
+        .unwrap();
+        let joined = env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("PLUGIN_GCP_AUTH=1"));
+        assert!(joined.contains("PLUGIN_DRIVE=1"));
+        assert!(joined.contains("PLUGIN_SECRET_CIVITAI_TOKEN=sek-p_train_civitai_token"));
+        let shown = redact(&joined, &secrets);
+        assert!(!shown.contains("sek-"));
+        assert!(shown.contains("***"));
+    }
+
+    #[test]
+    fn a_job_stops_the_runtime_it_opened_and_a_failure_can_keep_it() {
+        assert_eq!(
+            after_run(RunMode::Job, true, RunEnd::Succeeded, true, false),
+            AfterRun::Stop { save_keep: true }
+        );
+        assert_eq!(
+            after_run(RunMode::Job, false, RunEnd::Succeeded, true, false),
+            AfterRun::SyncKeep,
+            "an existing runtime is not stopped"
+        );
+        assert_eq!(
+            after_run(RunMode::Job, true, RunEnd::Failed, true, true),
+            AfterRun::Leave
+        );
+        assert_eq!(
+            after_run(RunMode::Job, true, RunEnd::Failed, true, false),
+            AfterRun::Stop { save_keep: false }
+        );
+        assert_eq!(
+            after_run(RunMode::Service, true, RunEnd::Succeeded, true, false),
+            AfterRun::Leave
+        );
+        assert_eq!(
+            after_run(RunMode::Service, true, RunEnd::Cancelled, false, false),
+            AfterRun::Stop { save_keep: false }
+        );
+    }
+
+    #[test]
+    fn uploads_reject_symlinks_and_assets_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("notes.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let staged = vec![StagedUpload {
+            local: file.clone(),
+            remote_rel: "inputs/data/notes.txt".into(),
+            is_dir: false,
+        }];
+        let expanded = expand_uploads(&staged).unwrap();
+        assert_eq!(expanded[0].1, "inputs/data/notes.txt");
+
+        let link = tmp.path().join("link.txt");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            let bad = vec![StagedUpload {
+                local: link,
+                remote_rel: "inputs/data/link.txt".into(),
+                is_dir: false,
+            }];
+            assert!(expand_uploads(&bad).is_err());
+        }
+
+        let manifest = r#"
+api = 1
+id = "demo"
+version = "0.1.0"
+[name]
+en = "Demo"
+[run]
+script = "main.py"
+[[assets]]
+path = "requirements.txt"
+[[assets]]
+path = "workflows/demo.json"
+"#;
+        std::fs::write(tmp.path().join("plugin.toml"), manifest).unwrap();
+        std::fs::write(tmp.path().join("main.py"), "print('hi')\n").unwrap();
+        std::fs::create_dir(tmp.path().join("workflows")).unwrap();
+        std::fs::write(tmp.path().join("requirements.txt"), "torch\n").unwrap();
+        std::fs::write(tmp.path().join("workflows").join("demo.json"), "{}\n").unwrap();
+        let bundle = load_dir(tmp.path()).unwrap();
+        assert_eq!(bundle.assets.len(), 2);
+        assert_eq!(bundle.assets[0].bytes, b"torch\n");
+
+        #[cfg(unix)]
+        {
+            let sneaky = tempfile::tempdir().unwrap();
+            std::fs::write(sneaky.path().join("plugin.toml"), manifest).unwrap();
+            std::fs::write(sneaky.path().join("main.py"), "print('hi')\n").unwrap();
+            std::fs::create_dir(sneaky.path().join("workflows")).unwrap();
+            std::fs::write(sneaky.path().join("requirements.txt"), "torch\n").unwrap();
+            std::os::unix::fs::symlink(
+                sneaky.path().join("requirements.txt"),
+                sneaky.path().join("workflows").join("demo.json"),
+            )
+            .unwrap();
+            assert!(load_dir(sneaky.path()).is_err());
+        }
     }
 
     #[test]

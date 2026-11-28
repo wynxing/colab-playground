@@ -14,7 +14,9 @@ use colab_playground_core::{
         Backend, DiscoveredRun, PluginRunEvent, PluginRunOutcome, PluginRunSpec, RunTarget, Runtime,
     },
     hf::HfModel,
-    plugins::{InputKind, InputValue, PluginInfo, ResolvedEndpoint, resolve_endpoints},
+    plugins::{
+        Capability, InputKind, InputValue, PluginInfo, ResolvedEndpoint, RunMode, resolve_endpoints,
+    },
     provision::ProvisionSpec,
     quant::GgufListing,
     tunnel::TunnelSpec,
@@ -74,6 +76,12 @@ pub struct RunForm {
     pub target_lost: Option<TargetLost>,
     /// Stop a session provisioned for this run when the run fails.
     pub stop_on_failure: bool,
+    /// Job mode: leave a runtime this run opened when the script fails.
+    pub keep_on_failure: bool,
+    /// Explicit yes for Google Cloud auth on the runtime.
+    pub consent_gcp: bool,
+    /// Explicit yes for Google Drive on the runtime.
+    pub consent_drive: bool,
     /// Optional Keep Plan to attach when the run starts.
     pub keep_plan: Option<colab_playground_core::keep::KeepPlan>,
     pub hf: HfLookup,
@@ -208,7 +216,13 @@ impl AppState {
         for input in &info.manifest.inputs {
             let value = template.inputs.get(&input.id).cloned();
             match input.kind {
-                InputKind::Text | InputKind::HfModel | InputKind::Number => {
+                InputKind::Text
+                | InputKind::HfModel
+                | InputKind::Number
+                | InputKind::File
+                | InputKind::Dir
+                | InputKind::Notebook
+                | InputKind::Textarea => {
                     let text = value.map(|v| v.to_env()).unwrap_or_default();
                     self.set_input(InputSlot::Field(input.id.clone()), text);
                 }
@@ -231,6 +245,9 @@ impl AppState {
             existing_account: None,
             target_lost: None,
             stop_on_failure: template.stop_on_failure,
+            keep_on_failure: template.keep_on_failure,
+            consent_gcp: template.consent.gcp_auth,
+            consent_drive: template.consent.drive,
             keep_plan: template.keep_plan,
             hf: HfLookup::default(),
             error: None,
@@ -455,6 +472,23 @@ impl AppState {
             cx.notify();
             return false;
         }
+        // Copy the flags out first: `form` still borrows `self`, and the error path writes it.
+        let allow_gcp = form.consent_gcp;
+        let allow_drive = form.consent_drive;
+        if info.manifest.needs.contains(&Capability::GcpAuth) && !allow_gcp {
+            if let Some(form) = &mut self.run_form {
+                form.error = Some(Error::new(ErrorKind::InvalidInput).with("field", "gcp_auth"));
+            }
+            cx.notify();
+            return false;
+        }
+        if info.manifest.needs.contains(&Capability::Drive) && !allow_drive {
+            if let Some(form) = &mut self.run_form {
+                form.error = Some(Error::new(ErrorKind::InvalidInput).with("field", "drive"));
+            }
+            cx.notify();
+            return false;
+        }
         let target = match &form.existing {
             Some(name) => RunTarget::Existing { name: name.clone() },
             None => {
@@ -469,6 +503,10 @@ impl AppState {
         let keep_alive = self
             .plugin(&form.plugin)
             .is_some_and(|info| info.manifest.run.keep_alive);
+        let mode = self
+            .plugin(&form.plugin)
+            .map(|info| info.manifest.run.mode)
+            .unwrap_or(RunMode::Service);
         let endpoints = self
             .plugin(&form.plugin)
             .and_then(|info| resolve_endpoints(&info.manifest, &inputs).ok())
@@ -479,6 +517,12 @@ impl AppState {
             target,
             stop_on_failure: form.stop_on_failure,
             keep_alive,
+            mode,
+            keep_on_failure: form.keep_on_failure,
+            consent: colab_playground_core::plugins::CapabilityConsent {
+                gcp_auth: form.consent_gcp,
+                drive: form.consent_drive,
+            },
             keep_plan: form.keep_plan.clone(),
         };
         self.plugin_run = Some(PluginRun {
@@ -529,7 +573,11 @@ impl AppState {
         if view.runtimes.is_empty() {
             return;
         }
-        let targets: Vec<_> = view.runtimes.iter().map(|runtime| runtime.id.clone()).collect();
+        let targets: Vec<_> = view
+            .runtimes
+            .iter()
+            .map(|runtime| runtime.id.clone())
+            .collect();
         self.run_backend(
             Op::DiscoverRuns,
             cx,
@@ -685,7 +733,11 @@ impl AppState {
             self.answer_agent_run_stage(cx);
             let kind = if became_ready { "ready" } else { "stage" };
             self.answer_agent_watch(kind, cx);
-            self.notify_run_event(if became_ready { "run_ready" } else { "run_stage" });
+            self.notify_run_event(if became_ready {
+                "run_ready"
+            } else {
+                "run_stage"
+            });
         }
     }
 
@@ -715,16 +767,13 @@ impl AppState {
             Err(error) if error.is(ErrorKind::SessionGone) => "run_gone",
             Err(_) => "run_failed",
         };
-        let forwards_target = result
-            .as_ref()
-            .ok()
-            .map(|outcome| {
-                (
-                    outcome.account.clone(),
-                    outcome.session.clone(),
-                    outcome.endpoints.clone(),
-                )
-            });
+        let forwards_target = result.as_ref().ok().map(|outcome| {
+            (
+                outcome.account.clone(),
+                outcome.session.clone(),
+                outcome.endpoints.clone(),
+            )
+        });
         let next_phase = match result {
             Ok(outcome) => {
                 if let Some(run) = &mut self.plugin_run {

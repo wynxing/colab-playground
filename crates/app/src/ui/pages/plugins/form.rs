@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use colab_playground_core::{
-    plugins::{InputKind, InputSpec, InputValue, PluginInfo},
+    plugins::{Capability, InputKind, InputSpec, InputValue, PluginInfo, RunMode},
     quant::{self, FitInput, GgufListing},
 };
 use ely_gpui_component::{
@@ -76,6 +76,9 @@ pub(super) fn render(
             .child(div().flex().flex_col().gap_3().children(fields))
             .w_full(),
     );
+    if let Some(extra) = job_and_consent(form, info, handle, cx) {
+        page = page.child(extra);
+    }
     if AppState::wants_hf_token(info) {
         let text = match state.hf_token() {
             Load::Ready(true) => tr(cx, keys::RUN_HF_TOKEN_SENT),
@@ -98,7 +101,14 @@ pub(super) fn render(
             .filter(|i| {
                 matches!(
                     i.kind,
-                    InputKind::Text | InputKind::Secret | InputKind::HfModel | InputKind::Number
+                    InputKind::Text
+                        | InputKind::Secret
+                        | InputKind::HfModel
+                        | InputKind::Number
+                        | InputKind::File
+                        | InputKind::Dir
+                        | InputKind::Notebook
+                        | InputKind::Textarea
                 )
             })
             .map(|i| (i.id.clone(), i.kind == InputKind::Secret))
@@ -160,12 +170,17 @@ fn input_row(
         text
     };
     let control: AnyElement = match input.kind {
-        InputKind::Text | InputKind::Secret | InputKind::HfModel | InputKind::Number => {
-            match inputs.field(&input.id) {
-                Some(field) => Input::new(&field).into_any_element(),
-                None => Caption::new("").into_any_element(),
-            }
-        }
+        InputKind::Text
+        | InputKind::Secret
+        | InputKind::HfModel
+        | InputKind::Number
+        | InputKind::File
+        | InputKind::Dir
+        | InputKind::Notebook
+        | InputKind::Textarea => match inputs.field(&input.id) {
+            Some(field) => Input::new(&field).into_any_element(),
+            None => Caption::new("").into_any_element(),
+        },
         InputKind::Bool => {
             let on = matches!(form.values.get(&input.id), Some(InputValue::Bool(true)));
             let (handle, id) = (handle.clone(), input.id.clone());
@@ -230,6 +245,16 @@ fn input_row(
     );
     if input.kind == InputKind::Secret {
         row = row.child(Caption::new(tr(cx, keys::RUN_SECRET_NOTE)));
+    }
+    let path_note = match input.kind {
+        InputKind::File => Some(keys::RUN_PATH_FILE),
+        InputKind::Dir => Some(keys::RUN_PATH_DIR),
+        InputKind::Notebook => Some(keys::RUN_PATH_NOTEBOOK),
+        InputKind::Textarea => Some(keys::RUN_TEXTAREA_HINT),
+        _ => None,
+    };
+    if let Some(note) = path_note {
+        row = row.child(Caption::new(tr(cx, note)));
     }
     if input.kind == InputKind::HfModel {
         row = row.child(hf_lookup(input, form, info, handle, inputs, cx));
@@ -417,6 +442,78 @@ fn quant_preview(
 }
 
 /// Where to run: a new session (its options and name) or an existing one.
+fn job_and_consent(
+    form: &RunForm,
+    info: &PluginInfo,
+    handle: &Entity<AppState>,
+    cx: &App,
+) -> Option<AnyElement> {
+    let job = info.manifest.run.mode == RunMode::Job;
+    let gcp = info.manifest.needs.contains(&Capability::GcpAuth);
+    let drive = info.manifest.needs.contains(&Capability::Drive);
+    if !job && !gcp && !drive {
+        return None;
+    }
+    let mut card = Card::new().header(CardHeader::new(tr(cx, keys::PLUGIN_MODE)));
+    if job {
+        let keep = handle.clone();
+        card = card.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(tagged(
+                    "run-keep-on-failure",
+                    Switch::new("run-keep-on-failure", form.keep_on_failure)
+                        .label(tr(cx, keys::RUN_KEEP_ON_FAILURE))
+                        .on_change(move |on, _, cx| {
+                            keep.update(cx, |state, cx| {
+                                state.edit_run_form(|form| form.keep_on_failure = on, cx)
+                            })
+                        }),
+                ))
+                .child(Caption::new(tr(
+                    cx,
+                    if form.keep_on_failure {
+                        keys::RUN_KEEP_ON_FAILURE_ON
+                    } else {
+                        keys::RUN_KEEP_ON_FAILURE_OFF
+                    },
+                ))),
+        );
+    }
+    if gcp {
+        let allow = handle.clone();
+        card = card.child(tagged(
+            "run-consent-gcp",
+            Switch::new("run-consent-gcp", form.consent_gcp)
+                .label(tr(cx, keys::RUN_CONSENT_GCP))
+                .on_change(move |on, _, cx| {
+                    allow.update(cx, |state, cx| {
+                        state.edit_run_form(|form| form.consent_gcp = on, cx)
+                    })
+                }),
+        ));
+    }
+    if drive {
+        let allow = handle.clone();
+        card = card.child(tagged(
+            "run-consent-drive",
+            Switch::new("run-consent-drive", form.consent_drive)
+                .label(tr(cx, keys::RUN_CONSENT_DRIVE))
+                .on_change(move |on, _, cx| {
+                    allow.update(cx, |state, cx| {
+                        state.edit_run_form(|form| form.consent_drive = on, cx)
+                    })
+                }),
+        ));
+    }
+    if (gcp && !form.consent_gcp) || (drive && !form.consent_drive) {
+        card = card.child(Caption::new(tr(cx, keys::RUN_CONSENT_REQUIRED)));
+    }
+    Some(card.w_full().into_any_element())
+}
+
 fn target_card(
     form: &RunForm,
     state: &AppState,

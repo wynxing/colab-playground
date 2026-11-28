@@ -36,6 +36,8 @@ pub struct RootView {
     fields_plugin: Option<String>,
     /// The label and kind each run-form field was made with.
     field_specs: std::collections::BTreeMap<String, (String, InputKind)>,
+    /// Label each plugin secret field was made with, so a language change rebuilds it.
+    secret_labels: std::collections::BTreeMap<String, String>,
     page_scroll: gpui::ScrollHandle,
     shown_route: crate::route::Route,
     _subscriptions: Vec<Subscription>,
@@ -199,6 +201,7 @@ impl RootView {
                 cx,
             ),
             fields: Default::default(),
+            secret_slots: Default::default(),
         };
         // Closing (system and drawn close alike) quits, asking first while runtimes still
         // bill. The close itself never removes the window: quitting does. Ely keeps the check
@@ -224,6 +227,7 @@ impl RootView {
             inputs,
             fields_plugin: None,
             field_specs: Default::default(),
+            secret_labels: Default::default(),
             page_scroll: gpui::ScrollHandle::new(),
             shown_route: crate::route::Route::default(),
             _subscriptions: subscriptions,
@@ -261,6 +265,10 @@ impl RootView {
                                     | InputKind::Secret
                                     | InputKind::HfModel
                                     | InputKind::Number
+                                    | InputKind::File
+                                    | InputKind::Dir
+                                    | InputKind::Notebook
+                                    | InputKind::Textarea
                             )
                         })
                         .map(|input| {
@@ -327,11 +335,48 @@ impl RootView {
             }
         }
     }
+
+    /// Masked fields for named plugin secret slots. Their ids cannot collide with run-form
+    /// inputs, and clearing a run form does not clear them.
+    fn sync_secret_slots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, String)> = {
+            let state = self.state.read(cx);
+            let Some(list) = state.plugins().ready() else {
+                return;
+            };
+            let tag = state.language().tag();
+            list.iter()
+                .flat_map(|info| {
+                    let plugin = info.manifest.id.clone();
+                    info.manifest.secrets.iter().map(move |slot| {
+                        let key = format!("secret-slot/{plugin}/{}", slot.id);
+                        let label = slot.label.get(tag).unwrap_or(&slot.id).to_owned();
+                        (key, label)
+                    })
+                })
+                .collect()
+        };
+        let keep: std::collections::BTreeSet<_> =
+            wanted.iter().map(|(key, _)| key.clone()).collect();
+        self.inputs.secret_slots.retain(|key, _| keep.contains(key));
+        self.secret_labels.retain(|key, _| keep.contains(key));
+        for (key, label) in wanted {
+            if self.secret_labels.get(&key) == Some(&label)
+                && self.inputs.secret_slots.contains_key(&key)
+            {
+                continue;
+            }
+            let field = cx.new(|cx| TextInput::new(window, cx).label(label.clone()).masked());
+            self.secret_labels.insert(key.clone(), label);
+            self.inputs.secret_slots.insert(key, field);
+        }
+    }
 }
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_inputs(window, cx);
+        self.sync_secret_slots(window, cx);
         // A new page starts at its top, not at the previous page's scroll offset.
         let route = self.state.read(cx).route();
         if route != self.shown_route {

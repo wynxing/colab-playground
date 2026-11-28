@@ -137,6 +137,26 @@ impl AppState {
         );
     }
 
+    /// Saves one named plugin secret. The caller clears the masked field; the value is not kept.
+    pub fn save_plugin_secret(&mut self, name: String, value: String, cx: &mut Context<Self>) {
+        let value = value.trim().to_owned();
+        if value.is_empty() {
+            return;
+        }
+        self.run_backend(
+            Op::Secret,
+            cx,
+            move |backend, cancel| backend.set_secret(&name, &value, cancel),
+            |state, result, cx| {
+                match result {
+                    Ok(()) => state.toast_done(crate::i18n::tr(cx, keys::ACTION_SAVE), cx),
+                    Err(error) => state.toast_error(&error, cx),
+                }
+                cx.notify();
+            },
+        );
+    }
+
     pub fn delete_hf_token(&mut self, cx: &mut Context<Self>) {
         self.run_backend(
             Op::Secret,

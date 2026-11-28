@@ -44,7 +44,7 @@ READ_TIMEOUT_S = 30.0
 MARKER = "__CPG_RESULT__ "
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 ENDPOINT_RE = re.compile(r"^[A-Za-z0-9._:-]{1,256}$")
-SECRET_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+SECRET_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 MAX_SECRET_BYTES = 16384
 # Where the Colab CLI appends every executed cell (its HistoryLogger default;
 # independent of --config). Expanded with the same HOME as the CLI.

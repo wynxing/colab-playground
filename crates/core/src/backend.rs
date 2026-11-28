@@ -238,6 +238,15 @@ pub struct PluginRunSpec {
     /// The script is a server: it keeps running after it reports ready, and
     /// the app keeps reading its status.
     pub keep_alive: bool,
+    /// `service` (default) or `job`. A job persists and then stops a runtime it opened.
+    #[serde(default)]
+    pub mode: crate::plugins::RunMode,
+    /// Job mode: leave a runtime this run opened when the script fails.
+    #[serde(default)]
+    pub keep_on_failure: bool,
+    /// Explicit yes for `gcp_auth` and `drive`. Both default to no.
+    #[serde(default)]
+    pub consent: crate::plugins::CapabilityConsent,
     /// Optional Keep Plan to attach to the session for this run.
     #[serde(default)]
     pub keep_plan: Option<KeepPlan>,
@@ -537,8 +546,7 @@ pub trait Backend: Send + Sync {
         cancel: &CancelToken,
     ) -> Result<PluginRunOutcome> {
         let _ = (run, events, cancel);
-        Err(Error::new(ErrorKind::Unsupported)
-            .detail("this backend cannot reattach plugin runs"))
+        Err(Error::new(ErrorKind::Unsupported).detail("this backend cannot reattach plugin runs"))
     }
 
     // ---- app secrets (stored in the keyring vault; never returned to the UI)
@@ -655,6 +663,9 @@ pub fn run_template(info: &PluginInfo, defaults: &Defaults, taken: &[String]) ->
         target: RunTarget::Provision(spec),
         stop_on_failure: true,
         keep_alive: m.run.keep_alive,
+        mode: m.run.mode,
+        keep_on_failure: m.run.keep_on_failure,
+        consent: crate::plugins::CapabilityConsent::default(),
         keep_plan: None,
     }
 }
