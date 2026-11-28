@@ -356,6 +356,38 @@ fn mock_vram(a: Accelerator) -> Option<u32> {
     }
 }
 
+/// A demo reading with the same byte sizes colab-vscode's resources fixture uses.
+/// A CPU runtime still has RAM and disk; it simply has no GPU.
+fn mock_resources(runtime: &MRuntime) -> crate::resources::RuntimeResources {
+    const RAM_TOTAL: u64 = 13_605_834_752;
+    const RAM_FREE: u64 = 12_475_244_544;
+    const DISK_TOTAL: u64 = 115_658_190_848;
+    const DISK_USED: u64 = 22_869_635_072;
+    let gpus = runtime.vram_mib.map(|mib| {
+        let total = u64::from(mib) * 1024 * 1024;
+        crate::resources::GpuReading {
+            name: mock_gpu(runtime.accelerator, runtime.vram_mib),
+            memory_used_bytes: Some(total / 5),
+            memory_total_bytes: Some(total),
+            utilization: Some(0.15),
+            memory_utilization: Some(0.21),
+            ever_used: Some(true),
+        }
+    });
+    crate::resources::RuntimeResources {
+        memory: crate::resources::MemoryReading {
+            total_bytes: Some(RAM_TOTAL),
+            free_bytes: Some(RAM_FREE),
+        },
+        gpus: gpus.into_iter().collect(),
+        disks: vec![crate::resources::DiskReading {
+            label: Some("kernel".into()),
+            total_bytes: Some(DISK_TOTAL),
+            used_bytes: Some(DISK_USED),
+        }],
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MAccount {
     id: AccountId,
@@ -438,6 +470,8 @@ struct World {
     opened_urls: Vec<String>,
     restarted_kernels: Vec<String>,
     ssh_resets: Vec<String>,
+    /// When set, every resource fetch reports this instead of a live reading.
+    resource_fault: Option<crate::resources::ResourceFault>,
 }
 
 /// Email of the credential `MockFailures::unadopted_slot` puts in the slot.
@@ -763,6 +797,7 @@ impl MockBackend {
             opened_urls: Vec::new(),
             restarted_kernels: Vec::new(),
             ssh_resets: Vec::new(),
+            resource_fault: None,
         };
         let off = MockFailures {
             cli_missing: cfg.failures.cli_missing,
@@ -867,6 +902,11 @@ impl MockBackend {
         let mut w = self.w();
         let old = std::mem::replace(&mut w.failures, failures);
         w.apply_switches(&old);
+    }
+
+    /// Makes the next resource reads fail without a zero reading. `None` restores the demo numbers.
+    pub fn set_resource_fault(&self, fault: Option<crate::resources::ResourceFault>) {
+        self.w().resource_fault = fault;
     }
 
     /// Adds an unmanaged runtime (as if opened in the browser) to `account`.
@@ -2962,6 +3002,39 @@ impl Backend for MockBackend {
         }
         self.step(cancel)?;
         Ok(mock_listing(repo))
+    }
+
+    fn runtime_resources(
+        &self,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<crate::resources::ResourceStatus> {
+        cancel.check()?;
+        // A local world read. `step` waits `step_delay` (5s in the demo), and a poll of every
+        // runtime would stall the UI for that long each.
+        let world = self.w();
+        if let Some(fault) = world.resource_fault {
+            return Ok(match fault {
+                crate::resources::ResourceFault::Unavailable => {
+                    crate::resources::ResourceStatus::Unavailable
+                }
+                crate::resources::ResourceFault::Expired => {
+                    crate::resources::ResourceStatus::Expired
+                }
+                crate::resources::ResourceFault::Unreachable => {
+                    crate::resources::ResourceStatus::Unreachable
+                }
+            });
+        }
+        let Some(name) = target.name.as_deref().filter(|name| !name.is_empty()) else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        let Some(runtime) = world.runtime(&target.account, name) else {
+            return Ok(crate::resources::ResourceStatus::Unavailable);
+        };
+        Ok(crate::resources::ResourceStatus::Fresh(mock_resources(
+            runtime,
+        )))
     }
 
     fn check_for_update(&self, cancel: &CancelToken) -> Result<crate::update::UpdateStatus> {

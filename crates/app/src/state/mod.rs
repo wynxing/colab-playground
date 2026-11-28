@@ -65,7 +65,8 @@ pub use runs::{
     TargetLost,
 };
 pub use sessions::{
-    EndReason, Ended, RemoteSshPrompt, RestartKernelPrompt, StopPrompt, runtime_label,
+    EndReason, Ended, RemoteSshPrompt, ResourceView, RestartKernelPrompt, StopPrompt,
+    runtime_label,
 };
 pub use tunnels::{FORWARD_START_PORT, ForwardForm, local_url};
 pub use updates::{UPDATE_INTERVAL, UpdateCheck, UpdatePhase, UpdatePrompt, is_newer};
