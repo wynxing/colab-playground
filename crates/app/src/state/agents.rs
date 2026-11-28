@@ -9,10 +9,11 @@
 //! second truth, which is the whole reason the snapshot exists.
 //!
 //! The response is held open while that happens, which is what makes an answer mean "it is done"
-//! rather than "it was accepted". A call that would open a runtime or move its auto-stop waits for
-//! the user's word in the app's own dialog first, while that question is switched on, and a
-//! refusal is final: a denial says which kind it was, and it carries no next step because asking
-//! again is wrong.
+//! rather than "it was accepted". A call that would open a runtime, move its auto-stop, or start
+//! a job waits for the user's word in the app's own dialog first, while that question is switched
+//! on, and a refusal is final: a denial says which kind it was, and it carries no next step
+//! because asking again is wrong. Selecting an account does not spend, and the token is never
+//! part of the call.
 
 use std::{
     collections::VecDeque,
@@ -30,7 +31,7 @@ use colab_playground_core::{
     backend::{PluginRunSpec, RunTarget, RuntimeRef, accelerator_prefix},
     error::Denial,
     mcp::actions::{Action, Actions},
-    plugins::{InputKind, InputValue, PluginInfo, PluginPreview},
+    plugins::{InputKind, InputValue, PluginInfo, PluginPreview, RunMode},
     provision::ProvisionSpec,
     sessions::Accelerator,
     tunnel::{TunnelId, TunnelSpec},
@@ -39,7 +40,9 @@ use ely_gpui_component::{feedback::Toast, primitives::Severity};
 use gpui::{Context, Task};
 use serde_json::{Map, Value, json};
 
-use super::{AppState, Op, Overlay, PluginView, RunForm, ops::key_of, tunnels::forward_key};
+use super::{
+    AppState, Op, Overlay, PluginView, RunForm, RunPhase, ops::key_of, tunnels::forward_key,
+};
 
 /// How long the endpoint holds an agent's HTTP response while it waits for the window. A backstop,
 /// not the app's own wait: the approval's two minutes and the work itself are where a call really
@@ -258,6 +261,12 @@ impl AppState {
             call.answer(Err(error));
             return;
         }
+        // A job that is not a job, or a call that tries to hand over a secret, is refused before
+        // the window asks: there is nothing to allow.
+        if let Err(error) = self.prepare_agent_call(&call.action) {
+            call.answer(Err(error));
+            return;
+        }
         if call.action.needs_approval() && self.agents_confirm() {
             self.ask_to_allow(call, cx);
         } else {
@@ -274,6 +283,8 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
+            | Action::JobRun { .. }
+            | Action::JobCancel { .. }
             | Action::RunWatch { .. }
             | Action::SessionWatch { .. } => Ok(None),
             other => self.agent_op(other).map(Some),
@@ -459,7 +470,7 @@ impl AppState {
         let prompt = ApprovalPrompt {
             client: call.client().to_owned(),
             action: name.to_owned(),
-            target: call.action.target(),
+            target: self.approval_target(&call.action),
             units_per_hour: self.rate_for(&call.action),
             error: None,
         };
@@ -565,9 +576,20 @@ impl AppState {
                 plugin,
                 session,
                 inputs,
+            }
+            | Action::JobRun {
+                plugin,
+                session,
+                inputs,
             } => {
                 let (plugin, session, inputs) = (plugin.clone(), session.clone(), inputs.clone());
                 self.run_plugin_for_agent(call, plugin, session, inputs, cx);
+                return;
+            }
+            Action::JobCancel { plugin } => {
+                let answer = self.cancel_job_for_agent(plugin, cx);
+                call.answer(answer);
+                self.publish_snapshot();
                 return;
             }
             // A session the agent did not name is named by the app, the way its own new-session
@@ -716,7 +738,7 @@ impl AppState {
                 let path = self.download_path(plugin)?;
                 Op::DownloadOutputs(key_of(&path))
             }
-            Action::AccountsSwitch { .. } => Op::Switch,
+            Action::AccountsSwitch { .. } | Action::AccountUse { .. } => Op::Switch,
             Action::PluginEnable { plugin, .. } => Op::PluginChange(key_of(plugin)),
             Action::ForwardOpen {
                 session,
@@ -733,6 +755,8 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
+            | Action::JobRun { .. }
+            | Action::JobCancel { .. }
             | Action::RunWatch { .. }
             | Action::SessionWatch { .. } => {
                 unreachable!("answered from the window's own events")
@@ -769,10 +793,11 @@ impl AppState {
                 let path = self.download_path(plugin)?;
                 self.save_run_outputs(&path, cx);
             }
-            Action::AccountsSwitch { account } => {
+            Action::AccountsSwitch { account } | Action::AccountUse { name: account } => {
                 let to = self.account_named(account)?;
                 // The path a click takes: the switch is asked for, then confirmed — the same two
-                // steps, in one turn of the foreground, so no dialog is left standing.
+                // steps, in one turn of the foreground, so no dialog is left standing. The token
+                // stays in the account store; the answer names the address only.
                 self.request_switch(to, cx);
                 self.confirm_switch(cx);
                 if !self.ops.is_running(Op::Switch) {
@@ -806,12 +831,93 @@ impl AppState {
             Action::SettingsSet { .. }
             | Action::PluginInstall { .. }
             | Action::PluginRun { .. }
+            | Action::JobRun { .. }
+            | Action::JobCancel { .. }
             | Action::RunWatch { .. }
             | Action::SessionWatch { .. } => {
                 unreachable!("answered from the window's own events")
             }
         }
         Ok(())
+    }
+
+    /// What the approval dialog names. A job also names the account that would be billed, which
+    /// is the active one: the agent selected it by address and does not hold its token.
+    fn approval_target(&self, action: &Action) -> String {
+        let target = action.target();
+        if !matches!(action, Action::JobRun { .. }) {
+            return target;
+        }
+        match self
+            .accounts()
+            .ready()
+            .and_then(|view| view.active_email.clone())
+            .filter(|email| !email.is_empty())
+        {
+            Some(email) => format!("{target}, account {email}"),
+            None => target,
+        }
+    }
+
+    /// Refuses a `job_run` the app cannot start, before the window asks.
+    fn prepare_agent_call(&self, action: &Action) -> Result<()> {
+        let Action::JobRun {
+            plugin,
+            session,
+            inputs,
+        } = action
+        else {
+            return Ok(());
+        };
+        let info = self
+            .plugin(plugin)
+            .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
+        if info.manifest.run.mode != RunMode::Job {
+            return Err(Error::invalid(
+                "plugin",
+                "only a plugin whose run mode is job",
+            ));
+        }
+        for id in inputs.keys() {
+            if info
+                .manifest
+                .input(id)
+                .is_some_and(|input| input.kind == InputKind::Secret)
+            {
+                return Err(Error::invalid(
+                    id,
+                    "a secret stays in the app and is not an argument",
+                ));
+            }
+        }
+        if let Some(session) = session {
+            self.runtime_named(session)?;
+        }
+        Ok(())
+    }
+
+    /// Cancels the running job through the same stop the run page uses.
+    fn cancel_job_for_agent(&mut self, plugin: &str, cx: &mut Context<Self>) -> Result<Value> {
+        let info = self
+            .plugin(plugin)
+            .ok_or_else(|| Error::new(ErrorKind::PluginNotFound).with("plugin", plugin))?;
+        if info.manifest.run.mode != RunMode::Job {
+            return Err(Error::invalid(
+                "plugin",
+                "only a plugin whose run mode is job",
+            ));
+        }
+        let running = self
+            .plugin_run()
+            .is_some_and(|run| run.plugin == plugin && matches!(run.phase, RunPhase::Running));
+        if !running {
+            return Err(Error::invalid(
+                "plugin",
+                format!("no running job of {plugin}"),
+            ));
+        }
+        self.cancel_run(cx);
+        Ok(json!({ "plugin": plugin, "cancel_requested": true }))
     }
 
     /// The `Op` an agent's call started has landed: the call is answered with the state the window
@@ -851,7 +957,8 @@ impl AppState {
             || self.ops.is_running(Op::PluginRun)
             || self.ops.is_running(Op::RunTemplate);
         if busy {
-            call.answer(Err(Error::denied("plugin_run", Denial::Busy)));
+            let name = call.action.name();
+            call.answer(Err(Error::denied(name, Denial::Busy)));
             return;
         }
         if self.plugin(&plugin).is_none() {
@@ -932,7 +1039,8 @@ impl AppState {
         });
         self.plugin_view = PluginView::Form;
         if self.ops.is_running(Op::PluginRun) {
-            call.answer(Err(Error::denied("plugin_run", Denial::Busy)));
+            let name = call.action.name();
+            call.answer(Err(Error::denied(name, Denial::Busy)));
             cx.notify();
             return;
         }
@@ -1122,6 +1230,10 @@ impl AppState {
         let session = match action {
             Action::SessionStop { session } | Action::SessionExtend { session, .. } => session,
             Action::PluginRun {
+                session: Some(session),
+                ..
+            }
+            | Action::JobRun {
                 session: Some(session),
                 ..
             } => session,

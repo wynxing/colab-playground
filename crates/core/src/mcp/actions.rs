@@ -56,6 +56,18 @@ pub enum Action {
     SettingsSet { changes: Map<String, Value> },
     /// Make another account the active one.
     AccountsSwitch { account: String },
+    /// Make the named account the active one. The name is the address `accounts_list` reports.
+    /// The token is not an argument and not part of the action.
+    AccountUse { name: String },
+    /// Start a plugin whose manifest mode is job. Starting bills, so the window asks first even
+    /// when the session is already open.
+    JobRun {
+        plugin: String,
+        session: Option<String>,
+        inputs: Map<String, Value>,
+    },
+    /// Stop a job the app is running. Cancelling does not open a new charge.
+    JobCancel { plugin: String },
     /// Enable or disable an installed plugin.
     PluginEnable { plugin: String, enabled: bool },
     /// Install a plugin from a folder on this computer or a Git URL.
@@ -84,6 +96,9 @@ impl Action {
             Action::SessionWatch { .. } => "session_watch",
             Action::SettingsSet { .. } => "settings_set",
             Action::AccountsSwitch { .. } => "accounts_switch",
+            Action::AccountUse { .. } => "account_use",
+            Action::JobRun { .. } => "job_run",
+            Action::JobCancel { .. } => "job_cancel",
             Action::PluginEnable { .. } => "plugin_enable",
             Action::PluginInstall { .. } => "plugin_install",
             Action::ForwardOpen { .. } => "forward_open",
@@ -95,13 +110,15 @@ impl Action {
     ///
     /// Stopping ends a charge, and a plugin on a runtime that is already open does not open
     /// another, so neither is a decision to spend more. Opening a runtime is, and so is moving
-    /// its auto-stop: zero minutes removes the cap the app would have stopped it with.
+    /// its auto-stop: zero minutes removes the cap the app would have stopped it with. A job
+    /// always asks, even on a runtime that is already open, because starting it bills.
     pub fn needs_approval(&self) -> bool {
         matches!(
             self,
             Action::SessionStart { .. }
                 | Action::SessionExtend { .. }
                 | Action::PluginRun { session: None, .. }
+                | Action::JobRun { .. }
         )
     }
 
@@ -124,14 +141,23 @@ impl Action {
             Action::RunDownload { plugin }
             | Action::RunWatch { plugin }
             | Action::PluginEnable { plugin, .. } => plugin.clone(),
-            Action::SessionWatch { session } => session
-                .clone()
-                .unwrap_or_else(|| "all sessions".to_owned()),
+            Action::SessionWatch { session } => {
+                session.clone().unwrap_or_else(|| "all sessions".to_owned())
+            }
             Action::SettingsSet { changes } => {
                 let names: Vec<&str> = changes.keys().map(String::as_str).collect();
                 names.join(", ")
             }
-            Action::AccountsSwitch { account } => account.clone(),
+            Action::AccountsSwitch { account } | Action::AccountUse { name: account } => {
+                account.clone()
+            }
+            Action::JobRun {
+                plugin, session, ..
+            } => match session {
+                Some(session) => format!("{plugin} on {session}"),
+                None => plugin.clone(),
+            },
+            Action::JobCancel { plugin } => plugin.clone(),
             Action::PluginInstall { source } => source.clone(),
             Action::ForwardOpen {
                 session,
@@ -232,6 +258,17 @@ mod tests {
                 session: "run-1".to_owned(),
                 local_port: 8188,
             },
+            Action::AccountUse {
+                name: "a@b.c".to_owned(),
+            },
+            Action::JobRun {
+                plugin: "batch".to_owned(),
+                session: Some("run-1".to_owned()),
+                inputs: Map::new(),
+            },
+            Action::JobCancel {
+                plugin: "batch".to_owned(),
+            },
         ]
     }
 
@@ -252,6 +289,9 @@ mod tests {
                 "plugin_install",
                 "forward_open",
                 "forward_close",
+                "account_use",
+                "job_run",
+                "job_cancel",
             ]
         );
         let mut sorted = names.clone();
@@ -309,6 +349,29 @@ mod tests {
             }
             .needs_approval(),
             "leaving the session out opens a runtime"
+        );
+        assert!(
+            Action::JobRun {
+                plugin: "batch".to_owned(),
+                session: Some("run-1".to_owned()),
+                inputs: Map::new(),
+            }
+            .needs_approval(),
+            "a job bills even when its runtime is already open"
+        );
+        assert!(
+            !Action::JobCancel {
+                plugin: "batch".to_owned(),
+            }
+            .needs_approval(),
+            "cancelling a job does not open a charge"
+        );
+        assert!(
+            !Action::AccountUse {
+                name: "a@b.c".to_owned(),
+            }
+            .needs_approval(),
+            "selecting an account does not itself spend"
         );
     }
 

@@ -1333,7 +1333,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_CONFIRM, "비용이 들기 전에 묻기"),
     (
         SETTINGS_AGENTS_CONFIRM_HINT,
-        "에이전트가 런타임을 새로 열거나, 연장하거나, 자동 중지를 끄기 전에 묻습니다. 중지와, 이미 열린 런타임에서의 플러그인 실행은 묻지 않습니다. 끄면 그 호출도 바로 실행됩니다.",
+        "에이전트가 런타임을 새로 열거나, 연장하거나, 자동 중지를 끄거나, 작업을 시작하기 전에 묻습니다. 중지와, 이미 열린 런타임에서의 플러그인 실행은 묻지 않습니다. 끄면 그 호출도 바로 실행됩니다.",
     ),
     (APPROVAL_TITLE, "에이전트가 비용이 드는 작업을 요청했습니다"),
     (
@@ -1499,10 +1499,7 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_NEEDS_GCP_AUTH,
         "런타임의 Google Cloud 인증(허용한 경우에만)",
     ),
-    (
-        PLUGIN_NEEDS_DRIVE,
-        "런타임의 Google Drive(허용한 경우에만)",
-    ),
+    (PLUGIN_NEEDS_DRIVE, "런타임의 Google Drive(허용한 경우에만)"),
     (PLUGIN_NEEDS_SECRET, "{name}(저장된 비밀)"),
     (PLUGIN_MODE, "실행"),
     (
@@ -1525,8 +1522,14 @@ pub(super) const MESSAGES: Messages = &[
         RUN_KEEP_ON_FAILURE_OFF,
         "이 작업이 연 런타임은 스크립트가 실패하면 중지됩니다.",
     ),
-    (RUN_CONSENT_GCP, "이 실행에서 런타임의 Google Cloud 인증을 허용"),
-    (RUN_CONSENT_DRIVE, "이 실행에서 런타임의 Google Drive를 허용"),
+    (
+        RUN_CONSENT_GCP,
+        "이 실행에서 런타임의 Google Cloud 인증을 허용",
+    ),
+    (
+        RUN_CONSENT_DRIVE,
+        "이 실행에서 런타임의 Google Drive를 허용",
+    ),
     (
         RUN_CONSENT_REQUIRED,
         "시작하기 전에 이 플러그인이 요청하는 접근을 허용하세요.",

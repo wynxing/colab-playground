@@ -1319,7 +1319,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_CONFIRM, "Ask before spending"),
     (
         SETTINGS_AGENTS_CONFIRM_HINT,
-        "Asks before an agent opens a runtime, lengthens one, or turns off its auto-stop. Stopping a runtime, and running a plugin on one that is already open, never ask. Off, and those calls run at once too.",
+        "Asks before an agent opens a runtime, lengthens one, turns off its auto-stop, or starts a job. Stopping a runtime, and running a plugin on one that is already open, never ask. Off, and those calls run at once too.",
     ),
     (APPROVAL_TITLE, "An agent asks to spend money"),
     (
@@ -1499,7 +1499,10 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_SECRET_HINT,
         "Saved in the keyring for this plugin. The value is masked and is not kept in the form.",
     ),
-    (RUN_KEEP_ON_FAILURE, "Leave the new runtime up if this job fails"),
+    (
+        RUN_KEEP_ON_FAILURE,
+        "Leave the new runtime up if this job fails",
+    ),
     (
         RUN_KEEP_ON_FAILURE_ON,
         "The runtime stays so you can look. It keeps using compute units.",

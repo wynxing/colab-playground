@@ -1137,7 +1137,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_CONFIRM, "花錢前詢問"),
     (
         SETTINGS_AGENTS_CONFIRM_HINT,
-        "智慧代理新開一台執行環境、延長它，或關掉自動停止之前，先問你。停止執行環境，以及在已經開著的機器上執行外掛，從不問。關掉後，這些也會直接執行。",
+        "智慧代理新開一台執行環境、延長它、關掉自動停止，或啟動一個任務之前，先問你。停止執行環境，以及在已經開著的機器上執行外掛，從不問。關掉後，這些也會直接執行。",
     ),
     (APPROVAL_TITLE, "有 agent 要求花錢的操作"),
     (
@@ -1288,7 +1288,10 @@ pub(super) const MESSAGES: Messages = &[
         PLUGIN_NEEDS_GCP_AUTH,
         "執行階段上的 Google Cloud 授權，僅在你允許時",
     ),
-    (PLUGIN_NEEDS_DRIVE, "執行階段上的 Google Drive，僅在你允許時"),
+    (
+        PLUGIN_NEEDS_DRIVE,
+        "執行階段上的 Google Drive，僅在你允許時",
+    ),
     (PLUGIN_NEEDS_SECRET, "{name}（已儲存的機密）"),
     (PLUGIN_MODE, "執行方式"),
     (
@@ -1311,8 +1314,14 @@ pub(super) const MESSAGES: Messages = &[
         RUN_KEEP_ON_FAILURE_OFF,
         "這次工作新開的執行階段在指令碼失敗時會停止。",
     ),
-    (RUN_CONSENT_GCP, "允許這次執行在執行階段上使用 Google Cloud 授權"),
-    (RUN_CONSENT_DRIVE, "允許這次執行在執行階段上使用 Google Drive"),
+    (
+        RUN_CONSENT_GCP,
+        "允許這次執行在執行階段上使用 Google Cloud 授權",
+    ),
+    (
+        RUN_CONSENT_DRIVE,
+        "允許這次執行在執行階段上使用 Google Drive",
+    ),
     (RUN_CONSENT_REQUIRED, "開始前請允許此外掛程式所要求的存取。"),
     (RUN_METRICS, "指標"),
     (RUN_METRIC_STEP, "步數"),

@@ -1117,7 +1117,7 @@ pub(super) const MESSAGES: Messages = &[
     (SETTINGS_AGENTS_CONFIRM, "花钱前询问"),
     (
         SETTINGS_AGENTS_CONFIRM_HINT,
-        "智能体新开一台运行环境、延长它，或关掉自动停止之前，先问你。停止运行环境，以及在已经开着的机器上运行插件，从不询问。关掉后，这些也会直接执行。",
+        "智能体新开一台运行环境、延长它、关掉自动停止，或启动一个任务之前，先问你。停止运行环境，以及在已经开着的机器上运行插件，从不询问。关掉后，这些也会直接执行。",
     ),
     (APPROVAL_TITLE, "有 agent 请求花钱的操作"),
     (
@@ -1291,7 +1291,10 @@ pub(super) const MESSAGES: Messages = &[
         RUN_KEEP_ON_FAILURE_OFF,
         "本次任务新开的运行时在脚本失败时会停止。",
     ),
-    (RUN_CONSENT_GCP, "允许本次运行在运行时上使用 Google Cloud 授权"),
+    (
+        RUN_CONSENT_GCP,
+        "允许本次运行在运行时上使用 Google Cloud 授权",
+    ),
     (RUN_CONSENT_DRIVE, "允许本次运行在运行时上使用 Google Drive"),
     (RUN_CONSENT_REQUIRED, "开始前请允许此插件所要求的访问。"),
     (RUN_METRICS, "指标"),
