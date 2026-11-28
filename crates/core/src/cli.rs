@@ -1,9 +1,10 @@
 //! Typed wrapper over the `colab` CLI.
 //!
 //! Failures are classified by [`classify_failure`] from the CLI's own messages
-//! (see `google-colab-cli` sources), because exit codes are unreliable:
-//! `colab stop` of a missing session exits 0, and `colab exec` exits 0 even
-//! when the remote code raised.
+//! (see `google-colab-cli` sources), because exit codes vary across versions:
+//! in `0.8.0`, `colab stop` of a missing session and `colab exec` after a
+//! remote Python exception exit `0`, whereas post-`0.8.0` exits `1` (or
+//! propagates `SystemExit` codes).
 
 use std::time::Duration;
 
@@ -55,6 +56,21 @@ pub enum CliCommand {
         /// Session name.
         name: String,
     },
+    /// `colab url -s NAME`.
+    Url {
+        /// Session name.
+        name: String,
+    },
+    /// `colab restart-kernel -s NAME`.
+    RestartKernel {
+        /// Session name.
+        name: String,
+    },
+    /// `colab ssh --force --proxy-mode -s NAME`.
+    SshReset {
+        /// Session name.
+        name: String,
+    },
     /// `colab download -s NAME REMOTE LOCAL`.
     Download {
         /// Session name.
@@ -63,6 +79,29 @@ pub enum CliCommand {
         remote: String,
         /// Where the file lands on this computer.
         local: String,
+    },
+    /// `colab ls -s NAME PATH`.
+    Ls {
+        /// Session name.
+        name: String,
+        /// Directory or file path on the VM.
+        path: String,
+    },
+    /// `colab upload -s NAME LOCAL REMOTE`.
+    Upload {
+        /// Session name.
+        name: String,
+        /// Local file path on the host.
+        local: String,
+        /// Target path on the VM.
+        remote: String,
+    },
+    /// `colab drivemount -s NAME PATH`.
+    DriveMount {
+        /// Session name.
+        name: String,
+        /// Mount path on the VM (e.g. `/content/drive`).
+        path: String,
     },
     /// `colab version`.
     Version,
@@ -125,6 +164,24 @@ pub fn build_argv(state_file: Option<&HostPath>, cmd: &CliCommand) -> Result<Vec
             validate_session_name(name)?;
             argv.extend(["stop".into(), "-s".into(), name.clone()]);
         }
+        CliCommand::Url { name } => {
+            validate_session_name(name)?;
+            argv.extend(["url".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::RestartKernel { name } => {
+            validate_session_name(name)?;
+            argv.extend(["restart-kernel".into(), "-s".into(), name.clone()]);
+        }
+        CliCommand::SshReset { name } => {
+            validate_session_name(name)?;
+            argv.extend([
+                "ssh".into(),
+                "--force".into(),
+                "--proxy-mode".into(),
+                "-s".into(),
+                name.clone(),
+            ]);
+        }
         CliCommand::Download {
             name,
             remote,
@@ -141,6 +198,35 @@ pub fn build_argv(state_file: Option<&HostPath>, cmd: &CliCommand) -> Result<Vec
                 remote.clone(),
                 local.clone(),
             ]);
+        }
+        CliCommand::Ls { name, path } => {
+            validate_session_name(name)?;
+            if path.trim().is_empty() || path.contains('\0') {
+                return Err(Error::invalid("ls", "the path may not be empty"));
+            }
+            argv.extend(["ls".into(), "-s".into(), name.clone(), path.clone()]);
+        }
+        CliCommand::Upload {
+            name,
+            local,
+            remote,
+        } => {
+            validate_session_name(name)?;
+            if local.is_empty() || remote.is_empty() {
+                return Err(Error::invalid("upload", "the path may not be empty"));
+            }
+            argv.extend([
+                "upload".into(),
+                "-s".into(),
+                name.clone(),
+                local.clone(),
+                remote.clone(),
+            ]);
+        }
+        CliCommand::DriveMount { name, path } => {
+            validate_session_name(name)?;
+            crate::keep::validate_vm_path("drive_mount_path", path)?;
+            argv.extend(["drivemount".into(), "-s".into(), name.clone(), path.clone()]);
         }
     }
     Ok(argv)
@@ -235,7 +321,13 @@ fn describe(cmd: &CliCommand) -> String {
         CliCommand::Version => "version".to_owned(),
         CliCommand::Whoami => "whoami".to_owned(),
         CliCommand::Stop { name } => format!("stop -s {name}"),
+        CliCommand::Url { name } => format!("url -s {name}"),
+        CliCommand::RestartKernel { name } => format!("restart-kernel -s {name}"),
+        CliCommand::SshReset { name } => format!("ssh --force --proxy-mode -s {name}"),
         CliCommand::Download { name, remote, .. } => format!("download -s {name} {remote} <here>"),
+        CliCommand::Ls { name, path } => format!("ls -s {name} {path}"),
+        CliCommand::Upload { name, remote, .. } => format!("upload -s {name} <here> {remote}"),
+        CliCommand::DriveMount { name, path } => format!("drivemount -s {name} {path}"),
         CliCommand::Exec {
             name,
             env,
@@ -254,6 +346,32 @@ fn describe(cmd: &CliCommand) -> String {
     }
 }
 
+/// Parses `colab ls` output (`name/` for directories, `name` for files).
+pub fn parse_ls(stdout: &str) -> Vec<crate::backend::VmEntry> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("[colab]")
+                && !line.starts_with("A new version of colab-cli")
+        })
+        .map(|line| {
+            if let Some(dir) = line.strip_suffix('/') {
+                crate::backend::VmEntry {
+                    name: dir.to_owned(),
+                    is_dir: true,
+                }
+            } else {
+                crate::backend::VmEntry {
+                    name: line.to_owned(),
+                    is_dir: false,
+                }
+            }
+        })
+        .collect()
+}
+
 /// Extracts the JSON value printed after [`RESULT_MARKER`] (last one wins).
 pub fn find_result(stdout: &str) -> Option<serde_json::Value> {
     stdout
@@ -261,6 +379,89 @@ pub fn find_result(stdout: &str) -> Option<serde_json::Value> {
         .rev()
         .find_map(|l| l.trim_start().strip_prefix(RESULT_MARKER))
         .and_then(|j| serde_json::from_str(j.trim()).ok())
+}
+
+/// Parses `"N of M [SSH] sessions in use"` from a `colab ssh` HTTP 429 message.
+pub(crate) fn parse_ssh_session_limit(text: &str) -> Option<u32> {
+    let (before, _) = text.split_once(" sessions in use")?;
+    let before = before.strip_suffix(" SSH").unwrap_or(before);
+    let mut rev = before.split_whitespace().rev();
+    let limit = rev.next()?.parse::<u32>().ok()?;
+    let of = rev.next()?;
+    let used = rev.next()?.parse::<u32>().ok()?;
+    (of == "of" && used > 0 && limit > 0).then_some(limit)
+}
+
+fn failure_error(kind: ErrorKind, out: &ScriptOutput) -> Error {
+    let detail = if out.stderr.trim().is_empty() {
+        &out.stdout
+    } else {
+        &out.stderr
+    };
+    let mut e = Error::new(kind).detail(tail(detail, 800));
+    if let Some(code) = out.code {
+        e = e.with("exit_code", code);
+    }
+    e
+}
+
+fn is_local_not_installed(colab: &str, out: &ScriptOutput) -> bool {
+    if !matches!(out.code, Some(126 | 127)) {
+        return false;
+    }
+    let stderr = &out.stderr;
+    let mentions_exec =
+        stderr.contains("bash: line 1:") || (!colab.is_empty() && stderr.contains(colab));
+    let missing_or_denied = stderr.contains("No such file")
+        || stderr.contains("not found")
+        || stderr.contains("Permission denied")
+        || stderr.contains("cannot execute");
+    mentions_exec && missing_or_denied
+}
+
+fn is_local_cli_exec_failure(out: &ScriptOutput) -> bool {
+    if out.code.is_none() {
+        return true;
+    }
+    let stderr = &out.stderr;
+    stderr.contains("Usage: colab")
+        || stderr.contains("No such command")
+        || stderr.contains("No such option")
+        || stderr.contains("Invalid value for")
+        || stderr.contains("Missing option")
+        || stderr.contains("[colab] Invalid --env")
+        || stderr.contains("colab_cli/")
+        || stderr.contains(r"colab_cli\")
+        || stderr.contains("No module named 'colab_cli'")
+        || stderr.contains("ColabRequestError")
+        || out.stdout.contains("[colab] Error: No input provided")
+}
+
+fn classify_exec_failure(colab: &str, out: &ScriptOutput) -> Option<Error> {
+    if is_local_not_installed(colab, out) {
+        return Some(failure_error(ErrorKind::NotInstalled, out));
+    }
+    let all = format!("{}\n{}", out.stdout, out.stderr);
+    let has = |s: &str| all.contains(s);
+    let kind = if has("Could not read the OAuth token from the OS keyring") {
+        Some(ErrorKind::KeyringUnavailable)
+    } else if has(AUTH_PROMPT_MARKER) || has("Enter the authorization code") {
+        Some(ErrorKind::AuthRequired)
+    } else if has("appears to be lost") || (has("ession '") && has("' not found")) {
+        Some(ErrorKind::SessionGone)
+    } else if has("Connection was lost")
+        || has("Kernel dead before")
+        || has("Kernel restarting before")
+    {
+        Some(ErrorKind::ConnectionLost)
+    } else if has("Timeout waiting for") {
+        Some(ErrorKind::ExecTimeout)
+    } else if is_local_cli_exec_failure(out) {
+        Some(ErrorKind::Other)
+    } else {
+        None
+    };
+    kind.map(|k| failure_error(k, out))
 }
 
 pub fn classify_failure(out: &ScriptOutput) -> Error {
@@ -285,21 +486,35 @@ pub fn classify_failure(out: &ScriptOutput) -> Error {
         ErrorKind::SshBusy
     } else if has("appears to be lost") || (has("ession '") && has("' not found")) {
         ErrorKind::SessionGone
-    } else if has("Connection was lost") {
+    } else if has("Connection was lost")
+        || has("Kernel dead before")
+        || has("Kernel restarting before")
+    {
         ErrorKind::ConnectionLost
     } else if has("Timeout waiting for") {
         ErrorKind::ExecTimeout
+    } else if (has("Download failed:") || has("Upload failed:"))
+        && (has("ReadTimeout")
+            || has("ConnectTimeout")
+            || has("Read timed out")
+            || has("read timeout=")
+            || has("connect timeout="))
+    {
+        ErrorKind::Timeout
+    } else if has("Local file '") && has("' not found.")
+        || has("File or directory not found:")
+        || has("Upload failed:")
+        || has("Download failed:")
+    {
+        ErrorKind::Io
     } else {
         ErrorKind::Other
     };
-    let detail = if out.stderr.trim().is_empty() {
-        &out.stdout
-    } else {
-        &out.stderr
-    };
-    let mut e = Error::new(kind).detail(tail(detail, 800));
-    if let Some(code) = out.code {
-        e = e.with("exit_code", code);
+    let mut e = failure_error(kind, out);
+    if kind == ErrorKind::SshBusy
+        && let Some(limit) = parse_ssh_session_limit(&all)
+    {
+        e = e.with("limit", limit);
     }
     e
 }
@@ -321,7 +536,7 @@ fn allocation_read_timed_out(stderr: &str) -> bool {
 pub enum StopOutcome {
     /// "Session terminated."
     Terminated,
-    /// The CLI had no local record (it prints "not found" and exits 0).
+    /// The CLI had no local record (it prints "not found" and exits 0 in 0.8.0 or 1 in newer versions).
     NotFound,
 }
 
@@ -496,11 +711,19 @@ impl Cli {
         let stdin = StdinMode::Bytes(format!("{EXEC_PREAMBLE}{code}").into_bytes());
         let overall = Duration::from_secs(u64::from(timeout_secs.max(30)) * 4 + 120);
         let out = self.run(Some(state), &cmd, stdin, Some(overall), cancel, &mut |_| {})?;
-        // CLI-level failures (lost session, dropped connection, idle timeout)
-        // exit non-zero; exceptions raised by `code` itself exit 0, so their
-        // tracebacks are never misread as CLI failures.
+        // CLI-level failures (lost session, dropped connection, idle timeout,
+        // local usage/CLI errors) fail here; exceptions or `SystemExit` raised
+        // by remote `code` exit 0 in 0.8.0 and non-zero in newer CLIs, and are
+        // returned as `ExecOutput` without a `result`.
         if !out.success() {
-            return Err(classify_failure(&out));
+            if let Some(err) = classify_exec_failure(&self.colab, &out) {
+                return Err(err);
+            }
+            return Ok(ExecOutput {
+                result: None,
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
         }
         Ok(ExecOutput {
             result: find_result(&out.stdout),
@@ -537,10 +760,13 @@ impl Cli {
         )?;
         if out.success() && out.stdout.contains("Session terminated") {
             Ok(StopOutcome::Terminated)
-        } else if out.success() && out.stdout.contains("not found") {
-            Ok(StopOutcome::NotFound)
         } else {
-            Err(classify_failure(&out))
+            let err = classify_failure(&out);
+            if err.kind == ErrorKind::SessionGone && matches!(out.code, Some(0 | 1)) {
+                Ok(StopOutcome::NotFound)
+            } else {
+                Err(err)
+            }
         }
     }
 
@@ -569,6 +795,133 @@ impl Cli {
         Ok(())
     }
 
+    /// `colab ls -s NAME PATH`: lists entries in a VM directory.
+    pub fn ls(
+        &self,
+        state: &HostPath,
+        name: &str,
+        path: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<crate::backend::VmEntry>> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Ls {
+                name: name.to_owned(),
+                path: path.to_owned(),
+            },
+            120,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(parse_ls(&out.stdout))
+    }
+
+    /// `colab upload -s NAME LOCAL REMOTE`: sends a local file to the VM.
+    pub fn upload(
+        &self,
+        state: &HostPath,
+        name: &str,
+        local: &str,
+        remote: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Upload {
+                name: name.to_owned(),
+                local: local.to_owned(),
+                remote: remote.to_owned(),
+            },
+            900,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(())
+    }
+
+    pub fn url(&self, state: &HostPath, name: &str, cancel: &CancelToken) -> Result<String> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::Url {
+                name: name.to_owned(),
+            },
+            60,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        out.stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("https://") || line.starts_with("http://"))
+            .map(str::to_owned)
+            .ok_or_else(|| Error::new(ErrorKind::Parse).detail(tail(&out.stdout, 200)))
+    }
+
+    pub fn restart_kernel(
+        &self,
+        state: &HostPath,
+        name: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::RestartKernel {
+                name: name.to_owned(),
+            },
+            120,
+            cancel,
+        )?;
+        if !out.success() {
+            return Err(classify_failure(&out));
+        }
+        Ok(())
+    }
+
+    pub fn reset_ssh(&self, state: &HostPath, name: &str, cancel: &CancelToken) -> Result<()> {
+        let out = self.run_simple(
+            Some(state),
+            &CliCommand::SshReset {
+                name: name.to_owned(),
+            },
+            60,
+            cancel,
+        )?;
+        if out.success() {
+            return Ok(());
+        }
+        // `google-colab-cli` 0.8.0 has no `ssh --force` flag yet; fall back to
+        // the exact `sshd` child cleanup used by post-0.8.0 `_killStaleSshd`.
+        if out.code == Some(2)
+            && out.stderr.contains("--force")
+            && (out.stderr.contains("No such option") || out.stderr.contains("unrecognized"))
+        {
+            self.exec(
+                state,
+                name,
+                &[],
+                "import subprocess; subprocess.run(['sh', '-c', 'pkill -P $(pgrep -o -x sshd) 2>/dev/null || true'])",
+                30,
+                cancel,
+            )?;
+            return Ok(());
+        }
+        // In post-0.8.0, `_killStaleSshd` runs before `_resolve_pubkey`; when no public key exists
+        // yet in `~/.ssh/`, the CLI exits 2 after already killing stale sshd sessions.
+        if out.code == Some(2)
+            && out.stderr.contains("no SSH public key found")
+            && out.stderr.contains("--force: killing stale SSH sessions")
+            && !out.stderr.contains("--force: failed to kill sshd")
+        {
+            return Ok(());
+        }
+        Err(classify_failure(&out))
+    }
     pub fn version(&self, cancel: &CancelToken) -> Result<String> {
         let out = self.run_simple(None, &CliCommand::Version, 60, cancel)?;
         if !out.success() {
@@ -750,6 +1103,39 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(
+            build_argv(Some(&state), &CliCommand::Url { name: "llm".into() }).unwrap(),
+            ["--config", "/d/accounts/a1/sessions.json", "url", "-s", "llm"]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::RestartKernel { name: "llm".into() }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "restart-kernel",
+                "-s",
+                "llm"
+            ]
+        );
+        assert_eq!(
+            build_argv(Some(&state), &CliCommand::SshReset { name: "llm".into() }).unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "ssh",
+                "--force",
+                "--proxy-mode",
+                "-s",
+                "llm"
+            ]
+        );
+        assert!(build_argv(None, &CliCommand::Url { name: "../bad".into() }).is_err());
+        assert!(build_argv(None, &CliCommand::RestartKernel { name: "".into() }).is_err());
+        assert!(build_argv(None, &CliCommand::SshReset { name: "a b".into() }).is_err());
     }
 
     #[test]
@@ -845,7 +1231,41 @@ A new version of colab-cli is available
             ErrorKind::SessionGone
         );
         assert_eq!(
+            k(out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            )),
+            ErrorKind::SshBusy
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] SSH session limit reached (HTTP 429): 5 of 5 SSH sessions in use on this runtime."
+            ))
+            .param("limit"),
+            Some("5")
+        );
+        assert_eq!(
+            classify_failure(&out(
+                255,
+                "",
+                "[colab] Already-active SSH session (HTTP 429): retry 1 of 2"
+            ))
+            .param("limit"),
+            None
+        );
+        assert_eq!(
             k(out(1, "", "RuntimeError: Connection was lost.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel dead before the code finished.")),
+            ErrorKind::ConnectionLost
+        );
+        assert_eq!(
+            k(out(1, "", "RuntimeError: Kernel restarting before the code finished.")),
             ErrorKind::ConnectionLost
         );
         assert_eq!(
@@ -860,6 +1280,38 @@ A new version of colab-cli is available
             k(out(
                 1,
                 "",
+                "TimeoutError: Timeout waiting for output: no message from the kernel for 30s. Use --timeout to allow longer silences."
+            )),
+            ErrorKind::ExecTimeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Download failed: HTTPSConnectionPool(host='x', port=443): Read timed out. (read timeout=300)",
+                ""
+            )),
+            ErrorKind::Timeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Upload failed: HTTPSConnectionPool(host='x', port=443): Max retries exceeded (Caused by ConnectTimeoutError('connect timeout=30'))",
+                ""
+            )),
+            ErrorKind::Timeout
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "[colab] Download failed: timed out waiting for user",
+                ""
+            )),
+            ErrorKind::Io
+        );
+        assert_eq!(
+            k(out(
+                1,
+                "",
                 "To authorize colab-cli, visit this URL in any browser:"
             )),
             ErrorKind::AuthRequired
@@ -868,6 +1320,91 @@ A new version of colab-cli is available
         assert_eq!(
             classify_failure(&out(3, "", "boom")).param("exit_code"),
             Some("3")
+        );
+    }
+
+    #[test]
+    fn local_cli_exec_failures_are_told_apart_from_remote_errors() {
+        let local = |code, stdout, stderr| is_local_cli_exec_failure(&out(code, stdout, stderr));
+        assert!(is_local_cli_exec_failure(&ScriptOutput {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            killed: false,
+        }));
+        assert!(local(2, "", "Usage: colab exec [OPTIONS]"));
+        assert!(local(2, "", "No such command 'bad'."));
+        assert!(local(2, "", "No such option: --bad"));
+        assert!(local(2, "", "Invalid value for '--timeout': bad"));
+        assert!(local(2, "", "Missing option '-s'."));
+        assert!(local(2, "", "[colab] Invalid --env value 'BAD'"));
+        assert!(local(1, "[colab] Error: No input provided.", ""));
+        assert!(local(1, "", "File \"/venv/colab_cli/runtime.py\", line 1"));
+        assert!(local(1, "", r#"File "C:\venv\colab_cli\runtime.py", line 1"#));
+        assert!(local(1, "", "No module named 'colab_cli'"));
+        assert!(local(1, "", "ColabRequestError: Bad Gateway"));
+        assert!(!local(2, "", "Usage: foo [OPTIONS]"));
+        assert!(!local(1, "Usage: colab exec", ""));
+        assert!(!local(1, "", "remote mentioned colab_cli in output"));
+        assert!(!local(1, "File \"/venv/colab_cli/runtime.py\"", ""));
+        assert!(!local(1, "", "Traceback:\nValueError: bad value"));
+        assert!(!local(2, "", ""));
+    }
+
+    #[test]
+    fn exec_failure_classification_ignores_remote_and_non_exec_errors() {
+        let exec_kind = |code, stdout, stderr| {
+            classify_exec_failure("/x/colab", &out(code, stdout, stderr)).map(|e| e.kind)
+        };
+        assert_eq!(exec_kind(127, "", "not found"), None);
+        assert_eq!(exec_kind(127, "", "No such file or directory"), None);
+        assert_eq!(exec_kind(126, "", "Permission denied"), None);
+        assert_eq!(exec_kind(1, "", "(HTTP 429)"), None);
+        assert_eq!(exec_kind(1, "", "Backend rejected accelerator"), None);
+        assert_eq!(exec_kind(1, "", "Allocation refused"), None);
+        assert_eq!(exec_kind(1, "[colab] Download failed: ReadTimeout", ""), None);
+        assert_eq!(exec_kind(2, "", "Usage: foo"), None);
+        assert_eq!(exec_kind(1, "", "Traceback:\nValueError: bad"), None);
+
+        assert_eq!(
+            exec_kind(127, "", "bash: line 1: /x/colab: No such file or directory"),
+            Some(ErrorKind::NotInstalled)
+        );
+        assert_eq!(
+            exec_kind(126, "", "/x/colab: Permission denied"),
+            Some(ErrorKind::NotInstalled)
+        );
+        assert_eq!(
+            exec_kind(1, "", "Could not read the OAuth token from the OS keyring"),
+            Some(ErrorKind::KeyringUnavailable)
+        );
+        assert_eq!(
+            exec_kind(1, "", "To authorize colab-cli, visit this URL:"),
+            Some(ErrorKind::AuthRequired)
+        );
+        assert_eq!(
+            exec_kind(1, "[colab] Session 'x' not found.", ""),
+            Some(ErrorKind::SessionGone)
+        );
+        assert_eq!(
+            exec_kind(1, "", "RuntimeError: Kernel dead before the code finished."),
+            Some(ErrorKind::ConnectionLost)
+        );
+        assert_eq!(
+            exec_kind(1, "", "TimeoutError: Timeout waiting for output: 30s"),
+            Some(ErrorKind::ExecTimeout)
+        );
+        assert_eq!(
+            exec_kind(2, "", "Usage: colab exec [OPTIONS]"),
+            Some(ErrorKind::Other)
+        );
+        assert_eq!(
+            exec_kind(2, "", "[colab] Invalid --env value 'BAD'"),
+            Some(ErrorKind::Other)
+        );
+        assert_eq!(
+            exec_kind(1, "", "File \"/venv/colab_cli/runtime.py\", line 1"),
+            Some(ErrorKind::Other)
         );
     }
 
@@ -902,6 +1439,100 @@ Read timed out. (read timeout=120)";
             .kind,
             ErrorKind::Other,
             "only `colab new` turns it into AllocationTimeout"
+        );
+        assert!(
+            classify_failure(&out(
+                1,
+                "[colab] Local file '/tmp/missing' not found.",
+                ""
+            ))
+            .kind
+                == ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Upload failed: permission denied", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Download failed: bad path", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            classify_failure(&out(1, "[colab] Error: File or directory not found: x", "")).kind,
+            ErrorKind::Io
+        );
+        assert_eq!(
+            parse_ls("A new version of colab-cli is available\nsubdir/\nmodel.safetensors\n[colab] Note\n"),
+            vec![
+                crate::backend::VmEntry {
+                    name: "subdir".into(),
+                    is_dir: true,
+                },
+                crate::backend::VmEntry {
+                    name: "model.safetensors".into(),
+                    is_dir: false,
+                },
+            ]
+        );
+        let state = HostPath::new("/d/accounts/a1/sessions.json");
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::Ls {
+                    name: "s1".into(),
+                    path: "content/out".into(),
+                }
+            )
+            .unwrap(),
+            ["--config", "/d/accounts/a1/sessions.json", "ls", "-s", "s1", "content/out"]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::Upload {
+                    name: "s1".into(),
+                    local: "/tmp/a.bin".into(),
+                    remote: "content/a.bin".into(),
+                }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "upload",
+                "-s",
+                "s1",
+                "/tmp/a.bin",
+                "content/a.bin",
+            ]
+        );
+        assert_eq!(
+            build_argv(
+                Some(&state),
+                &CliCommand::DriveMount {
+                    name: "s1".into(),
+                    path: "/content/drive".into(),
+                }
+            )
+            .unwrap(),
+            [
+                "--config",
+                "/d/accounts/a1/sessions.json",
+                "drivemount",
+                "-s",
+                "s1",
+                "/content/drive",
+            ]
+        );
+        assert!(
+            build_argv(
+                None,
+                &CliCommand::DriveMount {
+                    name: "s1".into(),
+                    path: "relative/drive".into(),
+                }
+            )
+            .is_err()
         );
     }
 }

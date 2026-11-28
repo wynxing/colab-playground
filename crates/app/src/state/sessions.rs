@@ -12,7 +12,7 @@ use std::{
 use colab_playground_core::{
     Error, ErrorKind,
     accounts::AccountId,
-    backend::{GuardReport, Runtime, RuntimeRef, RuntimesView, StopOptions},
+    backend::{GuardReport, RemoteSsh, Runtime, RuntimeRef, RuntimesView, StopOptions},
     guard::{Concern, Decision},
     tunnel::{TunnelId, TunnelInfo},
 };
@@ -69,7 +69,27 @@ pub struct StopPrompt {
     pub target: RuntimeRef,
     pub label: String,
     pub email: Option<String>,
+    pub has_keep_plan: bool,
+    pub save_keep: bool,
+    pub keep_failed: bool,
     pub error: Option<Error>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestartKernelPrompt {
+    pub target: RuntimeRef,
+    pub label: String,
+    pub error: Option<Error>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteSshPrompt {
+    pub target: RuntimeRef,
+    pub label: String,
+    pub info: Load<RemoteSsh>,
+    pub temp_config_path: Option<String>,
+    pub temp_config_error: Option<Error>,
+    pub reset_error: Option<Error>,
 }
 
 /// The name a runtime is shown by: its session name, or its hardware for runtimes opened
@@ -126,6 +146,22 @@ impl AppState {
 
     pub fn is_stopping(&self, target: &RuntimeRef) -> bool {
         self.ops.is_running(Op::Stop(key_of(target)))
+    }
+
+    pub fn is_opening_browser(&self, target: &RuntimeRef) -> bool {
+        self.ops.is_running(Op::OpenBrowser(key_of(target)))
+    }
+
+    pub fn is_restarting_kernel(&self, target: &RuntimeRef) -> bool {
+        self.ops.is_running(Op::RestartKernel(key_of(target)))
+    }
+
+    pub fn is_resetting_ssh(&self, target: &RuntimeRef) -> bool {
+        self.ops.is_running(Op::ResetSsh(key_of(target)))
+    }
+
+    pub fn is_writing_temp_ssh_config(&self, target: &RuntimeRef) -> bool {
+        self.ops.is_running(Op::WriteTempSshConfig(key_of(target)))
     }
 
     /// Whether a guard round may find something to check: the app manages a live runtime, or
@@ -210,13 +246,30 @@ impl AppState {
         let Some(runtime) = self.runtime(&target) else {
             return;
         };
+        let has_keep_plan = runtime
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .is_some_and(|p| p.has_enabled_target() && !p.paths.is_empty());
         self.overlay = Some(Overlay::Stop(StopPrompt {
             label: runtime_label(runtime),
             email: runtime.account_email.clone(),
+            has_keep_plan,
+            save_keep: has_keep_plan,
+            keep_failed: false,
             target,
             error: None,
         }));
         cx.notify();
+    }
+
+    pub fn toggle_stop_save_keep(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Some(Overlay::Stop(prompt)) = &mut self.overlay {
+            prompt.save_keep = on;
+            prompt.keep_failed = false;
+            prompt.error = None;
+            cx.notify();
+        }
     }
 
     pub fn confirm_stop(&mut self, cx: &mut Context<Self>) {
@@ -224,11 +277,45 @@ impl AppState {
             return;
         };
         let prompt = prompt.clone();
-        self.stop_runtime(prompt.target.clone(), cx);
+        self.stop_runtime_with(
+            prompt.target,
+            StopOptions {
+                save_keep: prompt.save_keep,
+                force_on_keep_error: false,
+                ..StopOptions::default()
+            },
+            cx,
+        );
+    }
+
+    /// Stops `target` without saving Keep Plan outputs after a pre-stop Keep Plan failure.
+    pub fn force_stop(&mut self, cx: &mut Context<Self>) {
+        let Some(Overlay::Stop(prompt)) = &self.overlay else {
+            return;
+        };
+        let target = prompt.target.clone();
+        self.stop_runtime_with(
+            target,
+            StopOptions {
+                save_keep: false,
+                force_on_keep_error: true,
+                ..StopOptions::default()
+            },
+            cx,
+        );
     }
 
     /// Stops `target` now (the caller has confirmed).
     pub(crate) fn stop_runtime(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        self.stop_runtime_with(target, StopOptions::default(), cx);
+    }
+
+    pub(crate) fn stop_runtime_with(
+        &mut self,
+        target: RuntimeRef,
+        options: StopOptions,
+        cx: &mut Context<Self>,
+    ) {
         let label = self
             .runtime(&target)
             .map(runtime_label)
@@ -236,12 +323,13 @@ impl AppState {
         let email = self
             .runtime(&target)
             .and_then(|runtime| runtime.account_email.clone());
+        let save_keep = options.save_keep;
         let work_target = target.clone();
         self.run_backend(
             Op::Stop(key_of(&target)),
             cx,
             move |backend, cancel| {
-                backend.stop_session(&work_target, StopOptions::default(), cancel)?;
+                backend.stop_session(&work_target, options, cancel)?;
                 Ok(backend.now())
             },
             move |state, result, cx| {
@@ -274,6 +362,9 @@ impl AppState {
                         log::warn!("sessions: stopping {label} failed: {error}");
                         if prompt_open && let Some(Overlay::Stop(prompt)) = &mut state.overlay {
                             prompt.error = Some(error);
+                            if save_keep {
+                                prompt.keep_failed = true;
+                            }
                         } else {
                             state.toast_error(&error, cx);
                         }
@@ -338,6 +429,9 @@ impl AppState {
         self.overlay = Some(Overlay::CancelAutoStop(StopPrompt {
             label: runtime_label(runtime),
             email: runtime.account_email.clone(),
+            has_keep_plan: false,
+            save_keep: false,
+            keep_failed: false,
             target,
             error: None,
         }));
@@ -749,6 +843,235 @@ impl AppState {
             toast = toast.body(hint);
         }
         self.toast(toast, cx);
+    }
+
+    /// Resolves and opens the Colab notebook URL attached to an existing named runtime.
+    pub fn open_in_browser(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        let Some(runtime) = self.runtime(&target) else {
+            return;
+        };
+        if !runtime.on_active_account || runtime.id.name.is_none() {
+            return;
+        }
+        let label = runtime_label(runtime);
+        let work_target = target.clone();
+        self.run_backend(
+            Op::OpenBrowser(key_of(&target)),
+            cx,
+            move |backend, cancel| backend.open_in_browser(&work_target, cancel),
+            move |state, result, cx| {
+                match result {
+                    Ok(url) => {
+                        cx.open_url(&url);
+                        state.toast_done(
+                            tr_args(cx, keys::OPEN_BROWSER_DONE, &[("name", &label)]),
+                            cx,
+                        );
+                    }
+                    Err(error) => state.toast_error(&error, cx),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Confirms once before restarting a runtime's Jupyter kernel (VM files stay intact).
+    pub fn request_restart_kernel(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        let Some(runtime) = self.runtime(&target) else {
+            return;
+        };
+        if !runtime.on_active_account || runtime.id.name.is_none() {
+            return;
+        }
+        self.overlay = Some(Overlay::RestartKernel(RestartKernelPrompt {
+            label: runtime_label(runtime),
+            target,
+            error: None,
+        }));
+        cx.notify();
+    }
+
+    pub fn confirm_restart_kernel(&mut self, cx: &mut Context<Self>) {
+        let Some(Overlay::RestartKernel(prompt)) = &self.overlay else {
+            return;
+        };
+        let target = prompt.target.clone();
+        let label = prompt.label.clone();
+        let work_target = target.clone();
+        self.run_backend(
+            Op::RestartKernel(key_of(&target)),
+            cx,
+            move |backend, cancel| backend.restart_kernel(&work_target, cancel),
+            move |state, result, cx| {
+                let prompt_open = matches!(
+                    &state.overlay,
+                    Some(Overlay::RestartKernel(prompt)) if prompt.target == target
+                );
+                match result {
+                    Ok(()) => {
+                        if prompt_open {
+                            state.overlay = None;
+                        }
+                        state.toast_done(
+                            tr_args(cx, keys::RESTART_KERNEL_DONE, &[("name", &label)]),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!("sessions: restarting kernel on {label} failed: {error}");
+                        if prompt_open
+                            && let Some(Overlay::RestartKernel(prompt)) = &mut state.overlay
+                        {
+                            prompt.error = Some(error);
+                        } else {
+                            state.toast_error(&error, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Clears stale SSH daemon sessions on `target` (`colab ssh --force` or 0.8.0 cleanup).
+    pub fn reset_ssh_sessions(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        let label = self
+            .runtime(&target)
+            .map(runtime_label)
+            .unwrap_or_else(|| target.name.clone().unwrap_or_default());
+        if let Some(Overlay::RemoteSsh(prompt)) = &mut self.overlay
+            && prompt.target == target
+        {
+            prompt.reset_error = None;
+        }
+        let work_target = target.clone();
+        self.run_backend(
+            Op::ResetSsh(key_of(&target)),
+            cx,
+            move |backend, cancel| backend.reset_ssh_sessions(&work_target, cancel),
+            move |state, result, cx| {
+                match result {
+                    Ok(()) => {
+                        match &mut state.overlay {
+                            Some(Overlay::Forward(form)) if form.target == target => {
+                                form.error = None;
+                            }
+                            Some(Overlay::RemoteSsh(prompt)) if prompt.target == target => {
+                                prompt.reset_error = None;
+                            }
+                            _ => {}
+                        }
+                        state.sessions.tunnels.retain(|_, tunnel| {
+                            !(tunnel.spec.account == target.account
+                                && Some(&tunnel.spec.session) == target.name.as_ref())
+                        });
+                        state.toast_done(
+                            tr_args(cx, keys::RESET_SSH_DONE, &[("name", &label)]),
+                            cx,
+                        );
+                        state.load_runtimes(cx);
+                    }
+                    Err(error) => {
+                        log::warn!("sessions: resetting SSH on {label} failed: {error}");
+                        match &mut state.overlay {
+                            Some(Overlay::RemoteSsh(prompt)) if prompt.target == target => {
+                                prompt.reset_error = Some(error);
+                            }
+                            Some(Overlay::Forward(form)) if form.target == target => {
+                                form.error = Some(error);
+                            }
+                            _ => state.toast_error(&error, cx),
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    pub fn open_remote_ssh_dialog(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        let Some(runtime) = self.runtime(&target) else {
+            return;
+        };
+        if !runtime.on_active_account || runtime.id.name.is_none() {
+            return;
+        }
+        self.overlay = Some(Overlay::RemoteSsh(RemoteSshPrompt {
+            target: target.clone(),
+            label: runtime_label(runtime),
+            info: Load::Loading,
+            temp_config_path: None,
+            temp_config_error: None,
+            reset_error: None,
+        }));
+        self.load_remote_ssh(target, cx);
+        cx.notify();
+    }
+
+    pub fn load_remote_ssh(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        if let Some(Overlay::RemoteSsh(prompt)) = &mut self.overlay
+            && prompt.target == target
+        {
+            prompt.info = Load::Loading;
+        }
+        let work_target = target.clone();
+        self.run_backend(
+            Op::RemoteSsh(key_of(&target)),
+            cx,
+            move |backend, cancel| backend.remote_ssh(&work_target, cancel),
+            move |state, result, cx| {
+                if let Some(Overlay::RemoteSsh(prompt)) = &mut state.overlay
+                    && prompt.target == target
+                {
+                    prompt.info = match result {
+                        Ok(info) => Load::Ready(info),
+                        Err(error) => Load::Failed(error),
+                    };
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    pub fn write_temp_ssh_config(&mut self, target: RuntimeRef, cx: &mut Context<Self>) {
+        if let Some(Overlay::RemoteSsh(prompt)) = &mut self.overlay
+            && prompt.target == target
+        {
+            prompt.temp_config_error = None;
+        }
+        let work_target = target.clone();
+        self.run_backend(
+            Op::WriteTempSshConfig(key_of(&target)),
+            cx,
+            move |backend, cancel| backend.write_temp_ssh_config(&work_target, cancel),
+            move |state, result, cx| {
+                match result {
+                    Ok(path) => {
+                        let display = path.display().to_string();
+                        if let Some(Overlay::RemoteSsh(prompt)) = &mut state.overlay
+                            && prompt.target == target
+                        {
+                            prompt.temp_config_path = Some(display.clone());
+                            prompt.temp_config_error = None;
+                        }
+                        state.toast_done(
+                            tr_args(cx, keys::REMOTE_SSH_TEMP_SAVED, &[("path", &display)]),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        if let Some(Overlay::RemoteSsh(prompt)) = &mut state.overlay
+                            && prompt.target == target
+                        {
+                            prompt.temp_config_error = Some(error);
+                        } else {
+                            state.toast_error(&error, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 }
 

@@ -445,11 +445,25 @@ fn keep_card(
                 }),
             ))
     });
-    Card::new()
+    let mut card = Card::new()
         .header(CardHeader::new(tr(cx, keys::RUN_KEEP)))
-        .child(div().flex().flex_col().gap_1().children(rows))
-        .w_full()
-        .into_any_element()
+        .child(div().flex().flex_col().gap_1().children(rows));
+    if let Some(target) = state.run_runtime() {
+        let open = handle.clone();
+        card = card.child(
+            div().flex().child(tagged(
+                "run-keep-plan",
+                Button::new("run-keep-plan", tr(cx, keys::KEEP_CONFIGURE_ACTION))
+                    .variant(ButtonVariant::Ghost)
+                    .icon(IconName::Settings)
+                    .size(ControlSize::Sm)
+                    .on_click(move |_, _, cx| {
+                        open.update(cx, |state, cx| state.open_keep_plan(target.clone(), cx))
+                    }),
+            )),
+        );
+    }
+    card.w_full().into_any_element()
 }
 
 /// The row that stops a running script.

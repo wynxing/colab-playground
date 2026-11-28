@@ -110,6 +110,7 @@ fn fixture() -> Fixture {
         http: Arc::new(NoHttp),
         defaults: Defaults::default(),
         run_poll_interval: Duration::from_secs(1),
+        guard_keep_timeout: Duration::from_secs(45),
     };
     let b = RealBackend::new(cfg.clone()).unwrap();
     Fixture {
@@ -250,6 +251,163 @@ fn wait_for<T>(rx: &Receiver<T>, secs: u64, mut pred: impl FnMut(&T) -> bool) ->
         }
     }
     None
+}
+
+#[test]
+fn fake_cli_url_returns_existing_session_url() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("url-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "url".into(), "-s".into(), "url-test".into(),
+    ]);
+    req.env = f.cfg.base_env.clone();
+    req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+    let out = Host::Local.run_quiet(req, &nc()).unwrap();
+    assert!(out.success(), "fake CLI failed: {}", out.stderr);
+    assert!(out.stdout.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="));
+    assert_eq!(f.assignments("alice").len(), 1);
+}
+
+#[test]
+fn fake_cli_restart_kernel_and_ssh_force_work_for_existing_session() {
+    use colab_playground_core::host::ScriptRequest;
+    let f = fixture();
+    let account = f.adopt_alice();
+    f.provision("ops-test", Accelerator::None);
+    let state = f.state_file(&account.id);
+    let run_cli = |args: Vec<String>| {
+        let mut req = ScriptRequest::new("exec \"$CPG_COLAB\" \"$@\"").args(args);
+        req.env = f.cfg.base_env.clone();
+        req.env.push(("CPG_COLAB".into(), f.cfg.toolchain.as_ref().unwrap().colab.clone()));
+        Host::Local.run_quiet(req, &nc()).unwrap()
+    };
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "restart-kernel".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "restart-kernel failed: {}", out.stderr);
+
+    f.knob("ssh_busy", json!(true));
+    let out = run_cli(vec![
+        "--config".into(), state.to_string_lossy().into_owned(),
+        "ssh".into(), "--force".into(), "--proxy-mode".into(), "-s".into(), "ops-test".into(),
+    ]);
+    assert!(out.success(), "ssh --force failed: {}", out.stderr);
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+}
+
+#[test]
+fn stop_not_found_across_cli_versions() {
+    use colab_playground_core::cli::StopOutcome;
+    let f = fixture();
+    f.adopt_alice();
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.root.join("sessions.json").to_string_lossy().into_owned());
+    let scratch = HostPath::new(f.root.join("scratch").to_string_lossy().into_owned());
+    std::fs::create_dir_all(f.root.join("scratch")).unwrap();
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        let missing = cli.stop(&state, "missing", &nc()).unwrap();
+        assert_eq!(missing, StopOutcome::NotFound);
+        // A stale local record whose endpoint is no longer assigned to the active account
+        // is pruned and also reports NotFound across 0.8.0 (exit 0) and post-0.8.0 (exit 1).
+        let stale = json!({
+            "stale": {
+                "name": "stale",
+                "token": "t",
+                "url": "http://127.0.0.1:9/",
+                "endpoint": "gone-ep",
+            }
+        });
+        std::fs::write(f.root.join("sessions.json"), stale.to_string()).unwrap();
+        let stale_out = cli.stop(&state, "stale", &nc()).unwrap();
+        assert_eq!(stale_out, StopOutcome::NotFound);
+        assert!(!cli.reap_endpoint(&scratch, "unowned-ep", &nc()).unwrap());
+        f.knob("stop_failure", json!("api_error"));
+        let err = cli.stop(&state, "missing", &nc()).unwrap_err();
+        assert!(err.is(ErrorKind::Other), "newer={newer}: {err}");
+        f.knob("stop_failure", Value::Null);
+    }
+}
+
+#[test]
+fn exec_distinguishes_remote_failures_from_cli_failures_across_cli_versions() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    f.provision("ex", Accelerator::T4);
+    let tc = f.cfg.toolchain.clone().unwrap();
+    let cli = Cli::new(Host::Local, tc.colab, f.cfg.base_env.clone());
+    let state = HostPath::new(f.state_file(&alice.id).to_string_lossy().into_owned());
+    let exec = |session, code| cli.exec(&state, session, &[], code, 30, &nc());
+    let exec_json = |session, code| cli.exec_json(&state, session, &[], code, 30, &nc());
+
+    for newer in [false, true] {
+        f.knob("new_cli", json!(newer));
+        f.knob("exec_failure", Value::Null);
+
+        let syntax = exec("ex", "def broken(:").unwrap();
+        assert!(syntax.result.is_none());
+        assert!(syntax.stderr.contains("SyntaxError"), "{}", syntax.stderr);
+        let syntax_json = exec_json("ex", "def broken(:").unwrap_err();
+        assert!(syntax_json.is(ErrorKind::Parse), "{syntax_json}");
+
+        let raised = exec("ex", "raise ValueError('bad value')").unwrap();
+        assert!(raised.result.is_none());
+        assert!(raised.stderr.contains("ValueError"), "{}", raised.stderr);
+        let raised_json = exec_json("ex", "raise ValueError('bad value')").unwrap_err();
+        assert!(raised_json.is(ErrorKind::Parse), "{raised_json}");
+
+        let exit0 = exec("ex", "sys.exit(0)").unwrap();
+        assert!(exit0.result.is_none());
+        let exit2 = exec("ex", "sys.exit(2)").unwrap();
+        assert!(exit2.result.is_none());
+        let exit_msg = exec("ex", "sys.exit('boom')").unwrap();
+        assert!(exit_msg.stderr.contains("boom"), "{}", exit_msg.stderr);
+        assert!(exit_msg.result.is_none());
+
+        let code_127 = "print('not found', file=sys.stderr)\nsys.exit(127)";
+        let remote_127 = exec("ex", code_127).unwrap();
+        assert!(remote_127.result.is_none());
+        assert!(remote_127.stderr.contains("not found"));
+
+        let code_429 = "print('(HTTP 429)', file=sys.stderr)\nsys.exit(1)";
+        let remote_429 = exec("ex", code_429).unwrap();
+        assert!(remote_429.result.is_none());
+        assert!(remote_429.stderr.contains("(HTTP 429)"));
+
+        let code_usage = "print('Usage: foo', file=sys.stderr)\nsys.exit(2)";
+        let remote_usage = exec("ex", code_usage).unwrap();
+        assert!(remote_usage.result.is_none());
+        assert!(remote_usage.stderr.contains("Usage: foo"));
+
+        if newer {
+            let marker_code = "print('__CPG_RESULT__ {\"ok\": 1}')\nsys.exit(1)";
+            let crashed = exec("ex", marker_code).unwrap();
+            assert!(crashed.result.is_none());
+            let crashed_json = exec_json("ex", marker_code).unwrap_err();
+            assert!(crashed_json.is(ErrorKind::Parse), "{crashed_json}");
+        }
+
+        let missing = exec("missing", "print(1)").unwrap_err();
+        assert!(missing.is(ErrorKind::SessionGone), "{missing}");
+        for (knob, expected) in [
+            ("session_lost", ErrorKind::SessionGone),
+            ("connection_lost", ErrorKind::ConnectionLost),
+            ("kernel_dead", ErrorKind::ConnectionLost),
+            ("timeout", ErrorKind::ExecTimeout),
+            ("invalid_env", ErrorKind::Other),
+            ("local_error", ErrorKind::Other),
+        ] {
+            f.knob("exec_failure", json!(knob));
+            let err = exec("ex", "print(1)").unwrap_err();
+            assert!(err.is(expected), "newer={newer} knob={knob}: {err}");
+        }
+    }
 }
 
 #[test]
@@ -1060,10 +1218,61 @@ fn tunnel_reports_429_and_port_in_use() {
         Some(TunnelEvent::State {
             state: TunnelState::Failed { error },
             ..
-        }) => assert!(error.is(ErrorKind::SshBusy), "{error}"),
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("new_cli", json!(true));
+    f.knob("ssh_busy_limit", json!(5));
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), Some("5"));
+            let detail = &error.detail;
+            assert!(detail.contains("5 of 5 SSH sessions in use"), "{detail}");
+        }
+        other => panic!("{other:?}"),
+    }
+    f.knob("ssh_busy_limit", Value::Null);
+    let (tx, rx) = channel();
+    f.b.open_tunnel(spec.clone(), tx).unwrap();
+    match wait_for(&rx, 90, |e| {
+        matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { .. },
+                ..
+            }
+        )
+    }) {
+        Some(TunnelEvent::State {
+            state: TunnelState::Failed { error },
+            ..
+        }) => {
+            assert!(error.is(ErrorKind::SshBusy), "{error}");
+            assert_eq!(error.param("limit"), None);
+            let detail = &error.detail;
+            assert!(detail.contains("--force"), "{detail}");
+        }
         other => panic!("{other:?}"),
     }
     f.knob("ssh_busy", json!(false));
+    f.knob("ssh_busy_limit", Value::Null);
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let (tx, rx) = channel();
     let spec = TunnelSpec {
@@ -2130,4 +2339,702 @@ fn plugin_run_writes_non_secret_meta_and_reattach_resumes_to_ready_and_cancel() 
     watcher.join().unwrap();
     assert!(err.is(ErrorKind::Cancelled), "{err:?}");
     assert_eq!(f.server()["runs"][cancel_id]["killed"], true);
+}
+
+#[test]
+fn vm_list_dir_and_vm_upload_roundtrip_and_errors() {
+    let f = fixture();
+    let _alice = f.adopt_alice();
+    f.provision("files-rt", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("files-rt"))
+        .unwrap()
+        .id;
+
+    let local_file = f.root.join("lora.safetensors");
+    std::fs::write(&local_file, b"fake-lora-weights").unwrap();
+    f.b.vm_upload(
+        &rt,
+        &local_file.to_string_lossy(),
+        "content/weights/lora.safetensors",
+        &nc(),
+    )
+    .unwrap();
+
+    let entries = f.b.vm_list_dir(&rt, "content/weights", &nc()).unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.name == "lora.safetensors" && !e.is_dir),
+        "{entries:?}"
+    );
+
+    let missing_local = f
+        .b
+        .vm_upload(
+            &rt,
+            &f.root.join("does-not-exist.bin").to_string_lossy(),
+            "content/missing.bin",
+            &nc(),
+        )
+        .unwrap_err();
+    assert!(missing_local.is(ErrorKind::Io), "{missing_local}");
+
+    let missing_remote = f.b.vm_list_dir(&rt, "content/no-such-dir", &nc()).unwrap_err();
+    assert!(!missing_remote.is(ErrorKind::SessionGone), "{missing_remote}");
+}
+
+#[test]
+fn keep_plan_local_sync_and_pre_stop_never_discards_on_failure() {
+    use colab_playground_core::keep::{KeepPlan, KeepTargetId, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("keep-local", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-local"))
+        .unwrap()
+        .id;
+
+    let save_dir = f.root.join("saved-local");
+    let plan = KeepPlan {
+        paths: vec!["/content/out".into()],
+        local: Some(LocalKeepTarget {
+            folder: save_dir.to_string_lossy().into_owned(),
+        }),
+        hf: None,
+        drive: None,
+    };
+    f.b.set_keep_plan(&rt, Some(plan), &nc()).unwrap();
+
+    // No files on VM yet: save must fail, and pre-stop save must abort stop without wiping the VM.
+    assert!(f.b.sync_keep(&rt, None, &nc()).is_err());
+    let stop_err = f
+        .b
+        .stop_session(
+            &rt,
+            StopOptions {
+                reason: StopReason::User,
+                save_keep: true,
+                force_on_keep_error: false,
+                ..StopOptions::default()
+            },
+            &nc(),
+        )
+        .unwrap_err();
+    assert!(!stop_err.is(ErrorKind::OrphanSuspected), "{stop_err}");
+    assert_eq!(
+        f.assignments("alice").len(),
+        1,
+        "runtime must stay alive when pre-stop Keep Plan fails"
+    );
+
+    // Populate simulated VM output file and retry save + pre-stop stop.
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/result.png": "png-bytes"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert!(
+        report
+            .results
+            .iter()
+            .any(|(id, r)| *id == KeepTargetId::Local && r.error.is_none()),
+        "{report:?}"
+    );
+    let downloaded: Vec<_> = std::fs::read_dir(&save_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert!(!downloaded.is_empty(), "archive must exist on local disk");
+    assert!(
+        std::fs::metadata(&downloaded[0]).unwrap().len() > 0,
+        "downloaded archive must be non-empty"
+    );
+
+    // Pre-stop save succeeds and then releases the VM.
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: false,
+            ..StopOptions::default()
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn keep_plan_hf_upload_isolates_secret_and_arms_watchdog_hooks() {
+    use colab_playground_core::keep::{HfKeepTarget, KeepPlan};
+
+    let f = fixture();
+    f.adopt_alice();
+    let secret = "hf_SUPERSECRET_ISSUE19_TOKEN";
+    f.b.set_secret("hf_token", secret, &nc()).unwrap();
+    f.provision("keep-hf", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-hf"))
+        .unwrap()
+        .id;
+
+    let plan = KeepPlan {
+        paths: vec!["/content/checkpoints".into()],
+        local: None,
+        hf: Some(HfKeepTarget {
+            repo: "alice/test-checkpoints".into(),
+            path_in_repo: Some("run-1".into()),
+            interval_minutes: Some(15),
+        }),
+        drive: None,
+    };
+    f.b.set_keep_plan(&rt, Some(plan), &nc()).unwrap();
+
+    // Watchdog must be restarted with the HF wind-down hook, and CLI history must be scrubbed.
+    let starts = f.watchdog_starts();
+    assert!(starts.len() >= 2, "watchdog restarted with keep hooks: {starts:?}");
+    let last_hooks = starts
+        .last()
+        .unwrap()
+        .iter()
+        .find_map(|a| a.strip_prefix("CPG_WD_HOOKS="))
+        .unwrap();
+    assert!(last_hooks.contains("alice/test-checkpoints"), "{last_hooks}");
+    assert!(!f.history("keep-hf").contains(secret), "history leaked HF token!");
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/checkpoints/step-100.safetensors": "ckpt-bytes"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert!(!f.history("keep-hf").contains(secret), "sync leaked HF token!");
+
+    // Deleting hf_token makes HF sync fail clearly without leaking or claiming Ok.
+    f.b.delete_secret("hf_token", &nc()).unwrap();
+    let err = f.b.sync_keep(&rt, None, &nc()).unwrap_err();
+    assert!(!err.detail.contains(secret));
+}
+
+#[test]
+fn keep_plan_drive_mount_requires_explicit_consent_and_handles_auth_flow() {
+    use colab_playground_core::backend::DriveMountStart;
+    use colab_playground_core::keep::{DriveKeepTarget, KeepPlan};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("keep-drive", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-drive"))
+        .unwrap()
+        .id;
+
+    // Drive with consented = false must refuse to sync.
+    let unconsented = KeepPlan {
+        paths: vec!["/content/out".into()],
+        local: None,
+        hf: None,
+        drive: Some(DriveKeepTarget {
+            mount_path: "/content/drive".into(),
+            dest_subpath: "MyDrive/colab-playground".into(),
+            consented: false,
+            mounted: false,
+        }),
+    };
+    f.b.set_keep_plan(&rt, Some(unconsented), &nc()).unwrap();
+    let err = f.b.sync_keep(&rt, None, &nc()).unwrap_err();
+    assert!(err.is(ErrorKind::InvalidInput), "{err}");
+
+    // Interactive Drive mount consent flow: cancel leaves it unmounted, confirm mounts it.
+    match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => {
+            assert!(flow.auth_url().starts_with("https://"));
+            flow.cancel().unwrap();
+        }
+        DriveMountStart::Mounted => panic!("expected consent URL on first mount"),
+    }
+    let (_, _) = f.listed_watchdog("keep-drive");
+    let rt_view = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("keep-drive"))
+        .unwrap();
+    assert!(
+        !rt_view
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.mounted)
+    );
+
+    match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => {
+            flow.confirm(&nc()).unwrap();
+        }
+        DriveMountStart::Mounted => panic!("expected consent URL"),
+    }
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/a.txt": "hello"});
+    });
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+}
+
+#[test]
+fn keep_plan_drive_silent_exit_zero_failure_never_marks_mounted_and_force_stop_releases() {
+    use colab_playground_core::backend::DriveMountStart;
+    use colab_playground_core::keep::{KeepPlan, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("drive-fail", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("drive-fail"))
+        .unwrap()
+        .id;
+
+    // Even if `colab drivemount` exits 0 with its propagation failure message, verify ismount catches it.
+    f.knob("drive_mount_fails", json!(true));
+    let err = match f.b.begin_drive_mount(&rt, "/content/drive", &nc()).unwrap() {
+        DriveMountStart::NeedsConsent(flow) => flow.confirm(&nc()).unwrap_err(),
+        DriveMountStart::Mounted => panic!("must not report mounted on silent failure"),
+    };
+    assert!(!err.detail.is_empty(), "{err}");
+    let listed = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("drive-fail"))
+        .unwrap();
+    assert!(
+        !listed
+            .tracked
+            .as_ref()
+            .and_then(|t| t.keep_plan.as_ref())
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.mounted)
+    );
+
+    // With force_on_keep_error = true, stop still proceeds after Keep Plan failure.
+    let save_dir = f.root.join("force-stop-dir");
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/missing".into()],
+            local: Some(LocalKeepTarget {
+                folder: save_dir.to_string_lossy().into_owned(),
+            }),
+            hf: None,
+            drive: None,
+        }),
+        &nc(),
+    )
+    .unwrap();
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: true,
+            ..StopOptions::default()
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn watchdog_script_runs_periodic_and_idle_winddown_hooks() {
+    use colab_playground_core::watchdog::{WATCHDOG_PY, WatchdogHook};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let wd_py = tmp.path().join("watchdog.py");
+    std::fs::write(&wd_py, WATCHDOG_PY).unwrap();
+    let cfg_path = tmp.path().join("watchdog.json");
+    let log_path = tmp.path().join("watchdog.log");
+    let marker = tmp.path().join("periodic.txt");
+    let idle_marker = tmp.path().join("idle.txt");
+
+    // Start a tiny stdlib HTTP server to accept POST /unassign when idle triggers.
+    let driver = tmp.path().join("run_wd.py");
+    std::fs::write(
+        &driver,
+        r#"import http.server, json, os, subprocess, sys, threading, time
+tmp, wd_py = sys.argv[1], sys.argv[2]
+hits = []
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        hits.append(self.path)
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *a): pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+t = threading.Thread(target=srv.serve_forever, daemon=True)
+t.start()
+port = srv.server_address[1]
+cfg = {
+    "deadline_epoch": None,
+    "idle_timeout_s": 4.0,
+    "cancelled": False,
+    "runtime_addr": f"127.0.0.1:{port}",
+    "heartbeat": os.path.join(tmp, "heartbeat"),
+    "log": os.path.join(tmp, "watchdog.log"),
+    "poll_s": 0.2,
+    "grace_s": 10,
+    "started": time.time() - 1.5,
+}
+cfg_path = os.path.join(tmp, "watchdog.json")
+with open(cfg_path, "w") as fh:
+    json.dump(cfg, fh)
+hooks = json.loads(sys.stdin.read())
+p = subprocess.Popen(
+    [sys.executable, "-B", wd_py, "--config", cfg_path, "--hooks-stdin"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+out, err = p.communicate(json.dumps(hooks).encode(), timeout=30)
+srv.shutdown()
+assert p.returncode == 0, (p.returncode, out, err)
+assert "/unassign" in hits, hits
+print("OK")
+"#,
+    )
+    .unwrap();
+
+    let hooks = vec![
+        WatchdogHook {
+            argv: vec![
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import pathlib; p = pathlib.Path({:?}); p.write_text((p.read_text() if p.exists() else '') + 'periodic\\n')",
+                    marker.to_string_lossy(),
+                ),
+            ],
+            env: BTreeMap::new(),
+            timeout_s: 15,
+            interval_s: Some(1),
+        },
+        WatchdogHook {
+            argv: vec![
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import pathlib; pathlib.Path({:?}).write_text('idle')",
+                    idle_marker.to_string_lossy(),
+                ),
+            ],
+            env: BTreeMap::new(),
+            timeout_s: 15,
+            interval_s: None,
+        },
+    ];
+    let mut child = Command::new("python3")
+        .args(["-B", driver.to_str().unwrap(), tmp.path().to_str().unwrap(), wd_py.to_str().unwrap()])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_string(&hooks).unwrap().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let wd_log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(out.status.success() && stdout.contains("OK"), "stdout={stdout}\nstderr={stderr}\ncfg={cfg_path:?}\nlog={wd_log:?}");
+    assert!(marker.exists(), "periodic hook must have executed");
+    assert!(idle_marker.exists(), "wind-down hook must have run before idle release");
+    let hook0_pos = wd_log.find("hook 0").expect("hook 0 must be logged");
+    let winddown_pos = wd_log.find("wind-down started").expect("wind-down must be logged");
+    assert!(hook0_pos < winddown_pos, "periodic hook 0 must run before wind-down: {wd_log}");
+    let hook1_pos = wd_log.find("hook 1").expect("hook 1 must be logged");
+    assert!(hook1_pos > winddown_pos, "wind-down-only hook 1 must only run during wind-down: {wd_log}");
+}
+
+#[test]
+fn guard_poll_cancels_hanging_keep_sync_and_still_stops_runtime() {
+    use colab_playground_core::guard::GuardPolicy;
+    use colab_playground_core::keep::{KeepPlan, LocalKeepTarget};
+    use std::time::Instant;
+
+    let f = fixture();
+    f.adopt_alice();
+    let mut cfg = f.cfg.clone();
+    cfg.guard_keep_timeout = Duration::from_millis(300);
+    let backend = RealBackend::new(cfg).unwrap();
+    let mut spec = ProvisionSpec::new("guard-keep-timeout", Accelerator::T4, &Defaults::default());
+    spec.guard = GuardPolicy {
+        min_balance_cu: Some(40.0),
+        ..GuardPolicy::unlimited()
+    };
+    let (tx, _rx) = channel();
+    backend.provision(spec, tx, &nc()).unwrap();
+    let rt = backend
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("guard-keep-timeout"))
+        .unwrap()
+        .id;
+
+    let save_dir = f.root.join("guard-timeout-save");
+    backend
+        .set_keep_plan(
+            &rt,
+            Some(KeepPlan {
+                paths: vec!["/content/out".into()],
+                local: Some(LocalKeepTarget {
+                    folder: save_dir.to_string_lossy().into_owned(),
+                }),
+                hf: None,
+                drive: None,
+            }),
+            &nc(),
+        )
+        .unwrap();
+
+    // Drop balance below min_balance_cu so guard_poll issues Decision::Stop, and make Keep sync hang.
+    f.edit_server(|s| s["accounts"]["alice"]["balance"] = json!(30.0));
+    f.knob("keep_sync_hangs", json!(true));
+
+    let started = Instant::now();
+    let report = backend.guard_poll(&nc()).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "guard_poll took too long when Keep Plan hung: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(report.decisions.len(), 1, "{report:?}");
+    assert!(report.decisions[0].stopped, "runtime must still be stopped: {report:?}");
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn unconsented_drive_target_is_skipped_by_default_sync_and_stop_session() {
+    use colab_playground_core::keep::{DriveKeepTarget, KeepPlan, KeepTargetId, LocalKeepTarget};
+
+    let f = fixture();
+    f.adopt_alice();
+    f.provision("unconsented-drive", Accelerator::T4);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("unconsented-drive"))
+        .unwrap()
+        .id;
+
+    f.edit_server(|s| {
+        let eps = s["accounts"]["alice"]["assignments"]
+            .as_object_mut()
+            .unwrap();
+        let (_, a) = eps.iter_mut().next().unwrap();
+        a["vm_files"] = json!({"/content/out/a.txt": "hello"});
+    });
+
+    // Local + unconsented Drive: default sync_keep only syncs Local; explicit Drive still fails.
+    let save_dir = f.root.join("unconsented-local-save");
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: Some(LocalKeepTarget {
+                folder: save_dir.to_string_lossy().into_owned(),
+            }),
+            hf: None,
+            drive: Some(DriveKeepTarget {
+                mount_path: "/content/drive".into(),
+                dest_subpath: "MyDrive/out".into(),
+                consented: false,
+                mounted: false,
+            }),
+        }),
+        &nc(),
+    )
+    .unwrap();
+    assert!(
+        f.b.sync_keep(&rt, Some(vec![KeepTargetId::Drive]), &nc())
+            .is_err()
+    );
+    let report = f.b.sync_keep(&rt, None, &nc()).unwrap();
+    assert!(report.all_succeeded());
+    assert_eq!(report.results.len(), 1);
+    assert_eq!(report.results[0].0, KeepTargetId::Local);
+
+    // Only unconsented Drive: has_enabled_target() is false, so stop_session(save_keep: true)
+    // must not attempt Drive sync or abort stop.
+    f.b.set_keep_plan(
+        &rt,
+        Some(KeepPlan {
+            paths: vec!["/content/out".into()],
+            local: None,
+            hf: None,
+            drive: Some(DriveKeepTarget {
+                mount_path: "/content/drive".into(),
+                dest_subpath: "MyDrive/out".into(),
+                consented: false,
+                mounted: false,
+            }),
+        }),
+        &nc(),
+    )
+    .unwrap();
+    f.b.stop_session(
+        &rt,
+        StopOptions {
+            reason: StopReason::User,
+            save_keep: true,
+            force_on_keep_error: false,
+            ..StopOptions::default()
+        },
+        &nc(),
+    )
+    .unwrap();
+    assert!(f.assignments("alice").is_empty());
+}
+
+#[test]
+fn real_backend_session_controls_work_and_leave_user_ssh_config_untouched() {
+    let f = fixture();
+    let alice = f.adopt_alice();
+    let outcome = f.provision("ctrl-test", Accelerator::None);
+    let rt = f
+        .b
+        .runtimes(&nc())
+        .unwrap()
+        .runtimes
+        .into_iter()
+        .find(|r| r.id.name.as_deref() == Some("ctrl-test"))
+        .unwrap();
+    assert_eq!(rt.id.name.as_deref(), Some(outcome.name.as_str()));
+
+    let url = f.b.open_in_browser(&rt.id, &nc()).unwrap();
+    assert!(
+        url.starts_with("https://colab.research.google.com/notebooks/empty.ipynb?dbu="),
+        "{url}"
+    );
+    assert!(url.contains(&rt.id.endpoint), "{url}");
+
+    f.b.restart_kernel(&rt.id, &nc()).unwrap();
+    assert_eq!(
+        f.assignments("alice")[&rt.id.endpoint]["restarted_kernels"],
+        json!(1)
+    );
+    f.knob("restart_kernel_fails", json!(true));
+    assert!(
+        f.b.restart_kernel(&rt.id, &nc())
+            .unwrap_err()
+            .is(ErrorKind::ConnectionLost)
+    );
+    f.knob("restart_kernel_fails", json!(false));
+
+    // Reset SSH via `colab ssh --force --proxy-mode`, then also verify 0.8.0 fallback.
+    f.knob("ssh_busy", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_force", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_force", json!(false));
+
+    // Post-0.8.0 `--force` kills stale sshd children even if no ~/.ssh/*.pub key exists yet.
+    f.knob("ssh_busy", json!(true));
+    f.knob("ssh_no_pubkey", json!(true));
+    f.b.reset_ssh_sessions(&rt.id, &nc()).unwrap();
+    assert_eq!(f.server()["knobs"]["ssh_busy"], json!(false));
+    f.knob("ssh_no_pubkey", json!(false));
+
+    // Cost trap guard: resetting a missing session must never auto-create a VM.
+    let missing = RuntimeRef {
+        account: alice.id.clone(),
+        endpoint: String::new(),
+        name: Some("missing-session".into()),
+    };
+    assert!(
+        f.b.reset_ssh_sessions(&missing, &nc())
+            .unwrap_err()
+            .is(ErrorKind::SessionGone)
+    );
+    assert_eq!(f.assignments("alice").len(), 1);
+
+    // Remote-SSH snippet and explicit temp config must never create or edit ~/.ssh/config.
+    let user_ssh_config = f.root.join("home/.ssh/config");
+    assert!(!user_ssh_config.exists());
+    let ssh = f.b.remote_ssh(&rt.id, &nc()).unwrap();
+    assert_eq!(ssh.host_alias, "colab-ctrl-test");
+    assert!(ssh.state_file.contains(alice.id.as_str()));
+    assert!(ssh.command.contains("ProxyCommand="));
+    assert!(ssh.config_snippet.contains("--config"));
+    assert!(!user_ssh_config.exists());
+
+    let temp_conf = f.b.write_temp_ssh_config(&rt.id, &nc()).unwrap();
+    assert!(temp_conf.starts_with(&f.cfg.local_dir));
+    assert!(
+        temp_conf
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-", alice.id.as_str()))
+    );
+    assert!(std::fs::read_to_string(&temp_conf).unwrap().contains("Host colab-ctrl-test"));
+    assert!(!user_ssh_config.exists());
 }

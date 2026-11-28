@@ -114,6 +114,12 @@ pub struct MockFailures {
     /// and report each account in `RuntimesView::errors`. Leaving such an account affects
     /// `switch_impact` as `runtimes_listing_fails` does.
     pub unlisted_accounts: Vec<String>,
+    /// Keep Plan sync fails (simulated upload/archive/copy failure).
+    pub keep_sync_fails: bool,
+    /// `begin_drive_mount` / `confirm` fails without mounting Drive.
+    pub drive_mount_fails: bool,
+    /// `restart_kernel` fails with `ConnectionLost`.
+    pub restart_kernel_fails: bool,
 }
 
 impl Default for MockFailures {
@@ -143,6 +149,9 @@ impl Default for MockFailures {
             update_relaunch_fails: false,
             runtimes_listing_fails: false,
             unlisted_accounts: vec![],
+            keep_sync_fails: false,
+            drive_mount_fails: false,
+            restart_kernel_fails: false,
         }
     }
 }
@@ -365,6 +374,9 @@ struct MRuntime {
     vram_mib: Option<u32>,
     /// Its VM watchdog is running (a cancelled one exits).
     watchdog_alive: bool,
+    vm_files: BTreeMap<String, Vec<u8>>,
+    drive_mounts: BTreeSet<String>,
+    uploads: Vec<String>,
 }
 
 impl MRuntime {
@@ -423,6 +435,9 @@ struct World {
     downloads: Vec<String>,
     update_installs: u32,
     update_relaunches: u32,
+    opened_urls: Vec<String>,
+    restarted_kernels: Vec<String>,
+    ssh_resets: Vec<String>,
 }
 
 /// Email of the credential `MockFailures::unadopted_slot` puts in the slot.
@@ -745,6 +760,9 @@ impl MockBackend {
             downloads: Vec::new(),
             update_installs: 0,
             update_relaunches: 0,
+            opened_urls: Vec::new(),
+            restarted_kernels: Vec::new(),
+            ssh_resets: Vec::new(),
         };
         let off = MockFailures {
             cli_missing: cfg.failures.cli_missing,
@@ -775,6 +793,9 @@ impl MockBackend {
                 high_mem: false,
                 vram_mib: mock_vram(r.accelerator),
                 watchdog_alive: watchdog.is_some(),
+                vm_files: BTreeMap::new(),
+                drive_mounts: BTreeSet::new(),
+                uploads: Vec::new(),
             });
             if let (true, Some(name)) = (r.managed, &r.name) {
                 let _ = world.ledger.upsert(TrackedSession {
@@ -790,6 +811,8 @@ impl MockBackend {
                     spend: SpendMeter::new(started),
                     stopped: None,
                     measured_rate: None,
+                    keep_plan: None,
+                    last_keep_sync: None,
                 });
             }
         }
@@ -823,6 +846,18 @@ impl MockBackend {
         self.w().update_relaunches
     }
 
+    pub fn opened_urls(&self) -> Vec<String> {
+        self.w().opened_urls.clone()
+    }
+
+    pub fn restarted_kernels(&self) -> Vec<String> {
+        self.w().restarted_kernels.clone()
+    }
+
+    pub fn ssh_resets(&self) -> Vec<String> {
+        self.w().ssh_resets.clone()
+    }
+
     /// Replaces the failure switches at runtime (UI tests flip them mid-test).
     /// Every switch takes effect immediately: switches read on use apply to
     /// the next call; state switches (`cli_missing`, `unadopted_slot`,
@@ -848,6 +883,9 @@ impl MockBackend {
             high_mem: false,
             vram_mib: mock_vram(accelerator),
             watchdog_alive: false,
+            vm_files: BTreeMap::new(),
+            drive_mounts: BTreeSet::new(),
+            uploads: Vec::new(),
         });
         endpoint
     }
@@ -1094,6 +1132,9 @@ impl ProvisionOps for MockOps<'_> {
             high_mem,
             vram_mib: vram,
             watchdog_alive: false,
+            vm_files: BTreeMap::new(),
+            drive_mounts: BTreeSet::new(),
+            uploads: Vec::new(),
         });
         Ok(())
     }
@@ -1222,6 +1263,28 @@ impl LoginFlow for MockLoginFlow {
     }
 }
 
+struct MockDriveMountFlow {
+    m: MockBackend,
+    target: RuntimeRef,
+    mount_path: String,
+    url: String,
+}
+
+impl DriveMountFlow for MockDriveMountFlow {
+    fn auth_url(&self) -> &str {
+        &self.url
+    }
+
+    fn confirm(self: Box<Self>, cancel: &CancelToken) -> Result<()> {
+        self.m.step(cancel)?;
+        self.m.finish_drive_mount(&self.target, &self.mount_path)
+    }
+
+    fn cancel(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+}
+
 fn catalog() -> Vec<(&'static str, f64)> {
     // (repo, billions of parameters) for synthetic file sizes
     vec![
@@ -1326,6 +1389,34 @@ impl MockBackend {
             runtime,
             watchdog: info,
         })
+    }
+
+    fn finish_drive_mount(&self, target: &RuntimeRef, mount_path: &str) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        let mut w = self.w();
+        if w.failures.drive_mount_fails {
+            return Err(
+                Error::new(ErrorKind::Other).detail("Drive credentials could not be propagated")
+            );
+        }
+        let rt = w
+            .runtime_mut(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        rt.drive_mounts.insert(mount_path.to_owned());
+        let _ = w.ledger.update(&target.account, &name, |e| {
+            let mut plan = e.keep_plan.clone().unwrap_or_default();
+            let mut drive = plan.drive.unwrap_or_default();
+            drive.mount_path = mount_path.to_owned();
+            drive.consented = true;
+            drive.mounted = true;
+            plan.drive = Some(drive);
+            e.keep_plan = Some(plan);
+        });
+        Ok(())
     }
 }
 
@@ -1695,6 +1786,8 @@ impl Backend for MockBackend {
             watchdog: outcome.watchdog.clone(),
             stopped: None,
             measured_rate: None,
+            keep_plan: None,
+            last_keep_sync: None,
         })?;
         Ok(outcome)
     }
@@ -1707,6 +1800,21 @@ impl Backend for MockBackend {
     ) -> Result<()> {
         self.ready()?;
         self.step(cancel)?;
+        if options.save_keep {
+            let has_plan = target.name.as_ref().is_some_and(|name| {
+                self.w()
+                    .ledger
+                    .live(&target.account, name)
+                    .and_then(|e| e.keep_plan.as_ref())
+                    .is_some_and(|p| p.has_enabled_target())
+            });
+            if has_plan
+                && let Err(err) = self.sync_keep(target, None, cancel)
+                && !options.force_on_keep_error
+            {
+                return Err(err);
+            }
+        }
         self.stop_inner(target, options.reason)
     }
 
@@ -1728,6 +1836,61 @@ impl Backend for MockBackend {
         ])
     }
 
+    fn vm_list_dir(
+        &self,
+        target: &RuntimeRef,
+        path: &str,
+        cancel: &CancelToken,
+    ) -> Result<Vec<VmEntry>> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        self.step(cancel)?;
+        let w = self.w();
+        let rt = w
+            .runtime(&target.account, name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", name))?;
+        if w.failures.vm_listing_empty {
+            return Err(Error::new(ErrorKind::Io)
+                .detail(format!("File or directory not found: {path}")));
+        }
+        let norm = format!("/{}", path.trim_start_matches('/'));
+        if rt.vm_files.contains_key(&norm) {
+            let base = norm.rsplit('/').next().unwrap_or(&norm).to_owned();
+            return Ok(vec![VmEntry {
+                name: base,
+                is_dir: false,
+            }]);
+        }
+        let prefix = if norm == "/" {
+            "/".to_owned()
+        } else {
+            format!("{}/", norm.trim_end_matches('/'))
+        };
+        let mut dirs = BTreeSet::new();
+        let mut files = BTreeSet::new();
+        for key in rt.vm_files.keys() {
+            if let Some(rest) = key.strip_prefix(&prefix) {
+                if let Some((dir, _)) = rest.split_once('/') {
+                    dirs.insert(dir.to_owned());
+                } else if !rest.is_empty() {
+                    files.insert(rest.to_owned());
+                }
+            }
+        }
+        let mut entries: Vec<VmEntry> = dirs
+            .into_iter()
+            .map(|name| VmEntry { name, is_dir: true })
+            .collect();
+        entries.extend(files.into_iter().map(|name| VmEntry {
+            name,
+            is_dir: false,
+        }));
+        Ok(entries)
+    }
+
     fn vm_download(
         &self,
         _target: &RuntimeRef,
@@ -1740,6 +1903,332 @@ impl Backend for MockBackend {
         let mut w = self.w();
         w.downloads.push(format!("{remote} -> {local}"));
         Ok(())
+    }
+
+    fn vm_upload(
+        &self,
+        target: &RuntimeRef,
+        local: &str,
+        remote: &str,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        self.step(cancel)?;
+        let bytes = std::fs::read(local).map_err(|e| {
+            Error::new(ErrorKind::Io)
+                .with("path", local)
+                .detail(e.to_string())
+        })?;
+        let mut w = self.w();
+        let rt = w
+            .runtime_mut(&target.account, name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", name))?;
+        let norm = format!("/{}", remote.trim_start_matches('/'));
+        rt.vm_files.insert(norm, bytes);
+        rt.uploads.push(format!("{local} -> {remote}"));
+        Ok(())
+    }
+
+    fn set_keep_plan(
+        &self,
+        target: &RuntimeRef,
+        plan: Option<crate::keep::KeepPlan>,
+        cancel: &CancelToken,
+    ) -> Result<()> {
+        if let Some(ref p) = plan {
+            p.validate()?;
+        }
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        if w.runtime(&target.account, name).is_none() {
+            return Err(Error::new(ErrorKind::SessionGone).with("session", name));
+        }
+        let found = w
+            .ledger
+            .update(&target.account, name, |e| e.keep_plan = plan.clone())?;
+        if !found {
+            return Err(Error::new(ErrorKind::SessionGone).with("session", name));
+        }
+        Ok(())
+    }
+
+    fn sync_keep(
+        &self,
+        target: &RuntimeRef,
+        targets: Option<Vec<crate::keep::KeepTargetId>>,
+        cancel: &CancelToken,
+    ) -> Result<crate::keep::KeepSyncReport> {
+        use crate::keep::{KeepSyncReport, KeepTargetId, KeepTargetResult, ensure_report_succeeded};
+
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        self.step(cancel)?;
+        let now = self.now_();
+        let (plan, vm_empty, sync_fails, has_hf_token, drive_mounts, vm_count, vm_bytes) = {
+            let w = self.w();
+            let rt = w
+                .runtime(&target.account, &name)
+                .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+            let plan = w
+                .ledger
+                .live(&target.account, &name)
+                .and_then(|e| e.keep_plan.clone())
+                .ok_or_else(|| Error::invalid("keep_plan", "no Keep Plan configured"))?;
+            let count = rt.vm_files.len() as u64;
+            let bytes: u64 = rt.vm_files.values().map(|v| v.len() as u64).sum();
+            (
+                plan,
+                w.failures.vm_listing_empty,
+                w.failures.keep_sync_fails,
+                w.secrets
+                    .get("hf_token")
+                    .is_some_and(|t| !t.trim().is_empty()),
+                rt.drive_mounts.clone(),
+                count.max(1),
+                bytes.max(64),
+            )
+        };
+        if plan.paths.is_empty() {
+            return Err(Error::invalid("keep_paths", "no VM paths configured"));
+        }
+        plan.validate()?;
+        let selected: Vec<KeepTargetId> = match targets {
+            Some(list) if !list.is_empty() => list,
+            _ => {
+                let mut list = Vec::new();
+                if plan.local.is_some() {
+                    list.push(KeepTargetId::Local);
+                }
+                if plan.hf.is_some() {
+                    list.push(KeepTargetId::HuggingFace);
+                }
+                if plan.drive.as_ref().is_some_and(|d| d.consented) {
+                    list.push(KeepTargetId::Drive);
+                }
+                list
+            }
+        };
+        if selected.is_empty() {
+            return Err(Error::invalid("keep_plan", "no Keep Plan targets enabled"));
+        }
+        let mut results = Vec::new();
+        for id in selected {
+            let res = match id {
+                KeepTargetId::Local => {
+                    let Some(local) = &plan.local else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "local_folder",
+                                    "local Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let stamp = now
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let local_file = std::path::PathBuf::from(&local.folder)
+                        .join(format!("{name}-{stamp}.tar.gz"));
+                    let dest = local_file.to_string_lossy().into_owned();
+                    if sync_fails || vm_empty {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(
+                                Error::new(ErrorKind::Io)
+                                    .detail("simulated Keep Plan sync failure"),
+                            ),
+                        }
+                    } else if let Err(e) = std::fs::create_dir_all(&local.folder)
+                        .and_then(|()| std::fs::write(&local_file, b"mock-keep-archive"))
+                    {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error::from(e)),
+                        }
+                    } else {
+                        KeepTargetResult {
+                            files: vm_count,
+                            bytes: vm_bytes,
+                            destination: dest,
+                            error: None,
+                        }
+                    }
+                }
+                KeepTargetId::HuggingFace => {
+                    let Some(hf) = &plan.hf else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "hf_repo",
+                                    "Hugging Face Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let dest = match &hf.path_in_repo {
+                        Some(sub) if !sub.trim().is_empty() => {
+                            format!("{}/{}", hf.repo, sub.trim())
+                        }
+                        _ => hf.repo.clone(),
+                    };
+                    if !has_hf_token {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error::invalid("hf_token", "no Hugging Face token saved")),
+                        }
+                    } else if sync_fails || vm_empty {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(
+                                Error::new(ErrorKind::Other)
+                                    .detail("simulated Hugging Face upload failure"),
+                            ),
+                        }
+                    } else {
+                        KeepTargetResult {
+                            files: vm_count,
+                            bytes: vm_bytes,
+                            destination: dest,
+                            error: None,
+                        }
+                    }
+                }
+                KeepTargetId::Drive => {
+                    let Some(drive) = &plan.drive else {
+                        results.push((
+                            id,
+                            KeepTargetResult {
+                                files: 0,
+                                bytes: 0,
+                                destination: String::new(),
+                                error: Some(Error::invalid(
+                                    "drive",
+                                    "Google Drive Keep Plan target is not configured",
+                                )),
+                            },
+                        ));
+                        continue;
+                    };
+                    let dest = format!(
+                        "{}/{}/{}",
+                        drive.mount_path.trim_end_matches('/'),
+                        drive.dest_subpath.trim_end_matches('/'),
+                        name
+                    );
+                    if !drive.consented {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error::invalid(
+                                "drive_consent",
+                                "Google Drive mount requires explicit user consent",
+                            )),
+                        }
+                    } else if !drive.mounted || !drive_mounts.contains(&drive.mount_path) {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(Error::invalid(
+                                "drive_mount",
+                                "Google Drive is not mounted on this runtime",
+                            )),
+                        }
+                    } else if sync_fails || vm_empty {
+                        KeepTargetResult {
+                            files: 0,
+                            bytes: 0,
+                            destination: dest,
+                            error: Some(
+                                Error::new(ErrorKind::Io)
+                                    .detail("simulated Google Drive copy failure"),
+                            ),
+                        }
+                    } else {
+                        KeepTargetResult {
+                            files: vm_count,
+                            bytes: vm_bytes,
+                            destination: dest,
+                            error: None,
+                        }
+                    }
+                }
+            };
+            results.push((id, res));
+        }
+        let report = KeepSyncReport { at: now, results };
+        let _ = self
+            .w()
+            .ledger
+            .update(&target.account, &name, |e| e.last_keep_sync = Some(report.clone()));
+        ensure_report_succeeded(&report)?;
+        Ok(report)
+    }
+
+    fn begin_drive_mount(
+        &self,
+        target: &RuntimeRef,
+        mount_path: &str,
+        cancel: &CancelToken,
+    ) -> Result<DriveMountStart> {
+        crate::keep::validate_vm_path("drive_mount_path", mount_path)?;
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone))?;
+        self.step(cancel)?;
+        let already_mounted = {
+            let w = self.w();
+            let rt = w
+                .runtime(&target.account, name)
+                .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", name))?;
+            rt.drive_mounts.contains(mount_path)
+        };
+        if already_mounted {
+            self.finish_drive_mount(target, mount_path)?;
+            return Ok(DriveMountStart::Mounted);
+        }
+        Ok(DriveMountStart::NeedsConsent(Box::new(MockDriveMountFlow {
+            m: self.clone(),
+            target: target.clone(),
+            mount_path: mount_path.to_owned(),
+            url: "https://accounts.google.com/o/oauth2/auth?client_id=mock-drive&scope=drive"
+                .into(),
+        })))
     }
 
     fn extend_session(
@@ -1838,11 +2327,21 @@ impl Backend for MockBackend {
             };
             let (mut stopped, mut error) = (false, None);
             if let Decision::Stop(concern) = &decision {
-                match self.stop_inner(
+                let save_keep = e
+                    .keep_plan
+                    .as_ref()
+                    .is_some_and(|p| p.has_enabled_target());
+                match self.stop_session(
                     &target,
-                    StopReason::Guard {
-                        concern: concern.clone(),
+                    StopOptions {
+                        reason: StopReason::Guard {
+                            concern: concern.clone(),
+                        },
+                        save_keep,
+                        force_on_keep_error: true,
+                        keep_timeout: Some(Duration::from_secs(45)),
                     },
+                    cancel,
                 ) {
                     Ok(()) => stopped = true,
                     Err(err) => error = Some(err),
@@ -1917,6 +2416,97 @@ impl Backend for MockBackend {
 
     fn tunnels(&self) -> Vec<TunnelInfo> {
         self.w().tunnels.values().cloned().collect()
+    }
+
+    fn open_in_browser(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<String> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        let rt = w
+            .runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        let url = format!(
+            "https://colab.research.google.com/notebooks/empty.ipynb?dbu=%2Ftun%2Fm%2F{}#datalabBackendUrl=https://colab.research.google.com/tun/m/{}",
+            rt.endpoint, rt.endpoint
+        );
+        w.opened_urls.push(url.clone());
+        Ok(url)
+    }
+
+    fn restart_kernel(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        if w.failures.restart_kernel_fails {
+            return Err(Error::new(ErrorKind::ConnectionLost));
+        }
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        w.restarted_kernels.push(name);
+        Ok(())
+    }
+
+    fn reset_ssh_sessions(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<()> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let mut w = self.w();
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        w.close_session_tunnels(&target.account, &name);
+        w.ssh_busy_left = 0;
+        w.ssh_resets.push(name);
+        Ok(())
+    }
+
+    fn remote_ssh(&self, target: &RuntimeRef, cancel: &CancelToken) -> Result<RemoteSsh> {
+        self.require_active(&target.account)?;
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        self.step(cancel)?;
+        let w = self.w();
+        w.runtime(&target.account, &name)
+            .ok_or_else(|| Error::new(ErrorKind::SessionGone).with("session", &name))?;
+        let state = crate::paths::HostPath::new(format!(
+            "/home/demo/.local/share/colab-playground/accounts/{}/sessions.json",
+            target.account.as_str()
+        ));
+        crate::tunnel::remote_ssh_info(
+            &Host::Local,
+            "/home/demo/.local/bin/colab",
+            &state,
+            &name,
+        )
+    }
+
+    fn write_temp_ssh_config(
+        &self,
+        target: &RuntimeRef,
+        cancel: &CancelToken,
+    ) -> Result<std::path::PathBuf> {
+        let name = target
+            .name
+            .clone()
+            .ok_or_else(|| Error::invalid("name", "the session has no local name"))?;
+        let info = self.remote_ssh(target, cancel)?;
+        let path = std::env::temp_dir()
+            .join("colab-playground-mock-ssh")
+            .join(format!("{}-{name}.conf", target.account.as_str()));
+        crate::paths::write_atomic(&path, format!("{}\n", info.config_snippet).as_bytes())?;
+        Ok(path)
     }
 
     fn plugins(&self) -> Vec<PluginInfo> {
@@ -2017,6 +2607,20 @@ impl Backend for MockBackend {
                 .runtime(&account, &session)
                 .map(|r| r.endpoint.clone())
         };
+        if let Some(mut plan) = spec.keep_plan {
+            let extra: Vec<String> = plugin.manifest.keep.iter().map(|k| k.path.clone()).collect();
+            plan.merge_paths(&extra);
+            let ep = endpoint_of(self).unwrap_or_default();
+            self.set_keep_plan(
+                &RuntimeRef {
+                    account: account.clone(),
+                    endpoint: ep,
+                    name: Some(session.clone()),
+                },
+                Some(plan),
+                cancel,
+            )?;
+        }
         let stop_it = |m: &MockBackend| {
             if let Some(ep) = endpoint_of(m) {
                 let _ = m.stop_inner(
@@ -3701,5 +4305,182 @@ mod tests {
         h.join().unwrap();
         assert!(r.unwrap_err().is(ErrorKind::Cancelled));
         assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+    }
+
+    #[test]
+    fn vm_list_dir_and_vm_upload_work_and_record_calls() {
+        let (m, _) = mock(MockScenario::demo());
+        let target = RuntimeRef {
+            account: AccountId::new("mock1").unwrap(),
+            name: Some("a100-7f3a".into()),
+            endpoint: "ep".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("asset.safetensors");
+        std::fs::write(&file, b"weights").unwrap();
+        m.vm_upload(&target, &file.to_string_lossy(), "content/asset.safetensors", &nc())
+            .expect("upload succeeds");
+        let entries = m.vm_list_dir(&target, "content", &nc()).expect("list succeeds");
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.name == "asset.safetensors" && !e.is_dir),
+            "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn keep_plan_pre_stop_failure_keeps_runtime_and_drive_requires_consent() {
+        use crate::keep::{DriveKeepTarget, KeepPlan, LocalKeepTarget};
+
+        let (m, _) = mock(MockScenario::single());
+        let (tx, _rx) = mpsc::channel();
+        let spec = m.defaults().provision_spec("keep-mock");
+        m.provision(spec, tx, &nc()).unwrap();
+        let rt = m.runtimes(&nc()).unwrap().runtimes[0].id.clone();
+
+        let dir = tempfile::tempdir().unwrap();
+        m.set_keep_plan(
+            &rt,
+            Some(KeepPlan {
+                paths: vec!["/content/out".into()],
+                local: Some(LocalKeepTarget {
+                    folder: dir.path().to_string_lossy().into_owned(),
+                }),
+                hf: None,
+                drive: Some(DriveKeepTarget {
+                    mount_path: "/content/drive".into(),
+                    dest_subpath: "MyDrive/out".into(),
+                    consented: false,
+                    mounted: false,
+                }),
+            }),
+            &nc(),
+        )
+        .unwrap();
+
+        // Explicit Drive sync fails when unconsented, while default sync skips unconsented Drive
+        // and syncs enabled Local target cleanly.
+        assert!(
+            m.sync_keep(&rt, Some(vec![crate::keep::KeepTargetId::Drive]), &nc())
+                .is_err()
+        );
+        let report = m.sync_keep(&rt, None, &nc()).unwrap();
+        assert!(report.all_succeeded());
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].0, crate::keep::KeepTargetId::Local);
+
+        // If only an unconsented Drive target exists, stop_session must not abort on it.
+        m.set_keep_plan(
+            &rt,
+            Some(KeepPlan {
+                paths: vec!["/content/out".into()],
+                local: None,
+                hf: None,
+                drive: Some(DriveKeepTarget {
+                    mount_path: "/content/drive".into(),
+                    dest_subpath: "MyDrive/out".into(),
+                    consented: false,
+                    mounted: false,
+                }),
+            }),
+            &nc(),
+        )
+        .unwrap();
+        assert!(m.sync_keep(&rt, None, &nc()).is_err());
+        m.stop_session(
+            &rt,
+            StopOptions {
+                reason: StopReason::User,
+                save_keep: true,
+                force_on_keep_error: false,
+                keep_timeout: None,
+            },
+            &nc(),
+        )
+        .unwrap();
+        assert!(m.runtimes(&nc()).unwrap().runtimes.is_empty());
+    }
+
+    #[test]
+    fn session_controls_open_url_restart_kernel_reset_ssh_and_remote_ssh() {
+        let (m, _) = mock(MockScenario::demo());
+        let runtimes = m.runtimes(&nc()).unwrap().runtimes;
+        let a100 = runtimes
+            .iter()
+            .find(|r| r.id.name.as_deref() == Some("a100-7f3a"))
+            .unwrap()
+            .id
+            .clone();
+        let other = runtimes
+            .iter()
+            .find(|r| r.id.name.as_deref() == Some("cpu-0b5e"))
+            .unwrap()
+            .id
+            .clone();
+
+        let url = m.open_in_browser(&a100, &nc()).unwrap();
+        assert!(url.contains(&a100.endpoint), "{url}");
+        assert_eq!(m.opened_urls(), vec![url]);
+        assert!(
+            m.open_in_browser(&other, &nc())
+                .unwrap_err()
+                .is(ErrorKind::AccountNotActive)
+        );
+
+        m.restart_kernel(&a100, &nc()).unwrap();
+        assert_eq!(m.restarted_kernels(), vec!["a100-7f3a".to_owned()]);
+        m.set_failures(MockFailures {
+            restart_kernel_fails: true,
+            ..MockFailures::default()
+        });
+        assert!(
+            m.restart_kernel(&a100, &nc())
+                .unwrap_err()
+                .is(ErrorKind::ConnectionLost)
+        );
+
+        m.set_failures(MockFailures {
+            ssh_busy_attempts: u32::MAX,
+            ..MockFailures::default()
+        });
+        let (tx, rx) = mpsc::channel();
+        let spec = TunnelSpec {
+            account: a100.account.clone(),
+            session: "a100-7f3a".into(),
+            local_port: 18000,
+            remote_port: 8000,
+            health_path: None,
+        };
+        let _ = m.open_tunnel(spec.clone(), tx).unwrap();
+        assert!(rx.try_iter().any(|e| matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Failed { ref error },
+                ..
+            } if error.is(ErrorKind::SshBusy)
+        )));
+
+        m.reset_ssh_sessions(&a100, &nc()).unwrap();
+        assert_eq!(m.ssh_resets(), vec!["a100-7f3a".to_owned()]);
+        let (tx2, rx2) = mpsc::channel();
+        let id = m.open_tunnel(spec, tx2).unwrap();
+        assert!(rx2.try_iter().any(|e| matches!(
+            e,
+            TunnelEvent::State {
+                state: TunnelState::Up,
+                ..
+            }
+        )));
+        m.close_tunnel(id).unwrap();
+
+        let info = m.remote_ssh(&a100, &nc()).unwrap();
+        assert_eq!(info.host_alias, "colab-a100-7f3a");
+        assert!(info.command.contains("ProxyCommand="));
+        assert!(info.config_snippet.contains("--config"));
+        let temp = m.write_temp_ssh_config(&a100, &nc()).unwrap();
+        let written = std::fs::read_to_string(&temp).unwrap();
+        assert!(written.contains("Host colab-a100-7f3a"));
+        let _ = std::fs::remove_file(&temp);
     }
 }

@@ -10,6 +10,7 @@ mod agents;
 mod defaults;
 mod environment;
 mod feedback;
+mod keep;
 mod mcp;
 mod ops;
 mod plugins;
@@ -30,7 +31,7 @@ use colab_playground_core::{
     Error, ErrorKind,
     accounts::AccountsView,
     backend::BackendKind as Flavor,
-    backend::{Backend, LoginFlow, RuntimeRef},
+    backend::{Backend, DriveMountFlow, LoginFlow, RuntimeRef},
     error::Denial,
     host::ProbeReport,
     updater::{Installed, SelfUpdate},
@@ -53,6 +54,7 @@ pub use environment::{
     install_methods,
 };
 pub use feedback::{ASK_AGAIN_AFTER, MOST_ASKS, PROJECT_PAGE, READY_BEFORE_ASKING, feedback_page};
+pub use keep::{DriveMountDialog, DriveMountPhase, KeepPlanDialog, KeepPlanInputs, VmUploadDialog};
 pub use mcp::Agents;
 pub use ops::{Op, key_of};
 pub use plugins::{HF_TOKEN, InstallPrompt, RemovePrompt, is_git_source};
@@ -62,7 +64,9 @@ pub use runs::{
     HF_RESULTS, HfLookup, PluginRun, PluginView, RUN_LOG_LINES_KEPT, RunForm, RunLog, RunPhase,
     TargetLost,
 };
-pub use sessions::{EndReason, Ended, StopPrompt, runtime_label};
+pub use sessions::{
+    EndReason, Ended, RemoteSshPrompt, RestartKernelPrompt, StopPrompt, runtime_label,
+};
 pub use tunnels::{FORWARD_START_PORT, ForwardForm, local_url};
 pub use updates::{UPDATE_INTERVAL, UpdateCheck, UpdatePhase, UpdatePrompt, is_newer};
 pub use usage::{
@@ -180,6 +184,7 @@ pub struct AppState {
     recovered_notice: bool,
     dialog: Option<AccountDialog>,
     login_flow: Option<Box<dyn LoginFlow>>,
+    drive_mount_flow: Option<Box<dyn DriveMountFlow>>,
     usage: usage::UsageCache,
     defaults_push: Option<Task<()>>,
     _poller: Option<Task<()>>,
@@ -216,8 +221,19 @@ pub enum Overlay {
     Stop(StopPrompt),
     /// Cancel a runtime's auto-stop, confirmed once.
     CancelAutoStop(StopPrompt),
+    /// Restart a runtime's Jupyter kernel, confirmed once.
+    RestartKernel(RestartKernelPrompt),
+    /// Copyable IDE Remote-SSH command and isolated config snippet.
+    RemoteSsh(RemoteSshPrompt),
     NewSession,
+    /// Forward a port on the runtime.
     Forward(ForwardForm),
+    /// Configure Keep Plan for a session or run form.
+    KeepPlan(KeepPlanDialog),
+    /// Interactive Google Drive OAuth consent flow.
+    DriveMount(DriveMountDialog),
+    /// Upload a local file to a runtime.
+    VmUpload(VmUploadDialog),
     /// Install a plugin, after checking it.
     InstallPlugin(InstallPrompt),
     RemovePlugin(RemovePrompt),
@@ -254,6 +270,15 @@ pub enum InputSlot {
     /// The forward's port on this computer.
     ForwardLocal,
     Health,
+    KeepPaths,
+    KeepLocalFolder,
+    KeepHfRepo,
+    KeepHfSubpath,
+    KeepHfInterval,
+    KeepDriveMount,
+    KeepDriveSubpath,
+    UploadLocal,
+    UploadRemote,
     /// A run-form text, secret or model field, by input id.
     Field(String),
 }
@@ -338,6 +363,7 @@ impl AppState {
                 recovered_notice: false,
                 dialog: None,
                 login_flow: None,
+                drive_mount_flow: None,
                 usage: usage::UsageCache::default(),
                 defaults_push: None,
                 _poller: None,
@@ -418,6 +444,7 @@ impl AppState {
         }
         match self.overlay {
             Some(Overlay::NewSession) => self.close_new_session(cx),
+            Some(Overlay::DriveMount(_)) => self.close_drive_mount(cx),
             Some(Overlay::Update(_)) => self.close_update_dialog(cx),
             Some(Overlay::InstallPlugin(_)) => self.close_install_plugin(cx),
             // Closing the question an agent's call is waiting on is a refusal: the agent is told
@@ -830,6 +857,11 @@ impl Drop for AppState {
             && let Err(error) = flow.cancel()
         {
             log::error!("accounts: rolling back the sign-in on quit failed: {error}");
+        }
+        if let Some(flow) = self.drive_mount_flow.take()
+            && let Err(error) = flow.cancel()
+        {
+            log::error!("keep: cancelling Drive consent on quit failed: {error}");
         }
     }
 }

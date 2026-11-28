@@ -5,12 +5,12 @@ use std::rc::Rc;
 
 use colab_playground_core::{ErrorKind, cli::RESERVED_VM_PORT};
 use ely_gpui_component::{
-    buttons::Button,
+    buttons::{Button, ButtonVariant},
     feedback::InlineMessage,
     forms::{Input, TextInput},
     overlays::Dialog,
     primitives::{IconName, Severity},
-    theme::ActiveTheme,
+    theme::{ActiveTheme, ControlSize},
     typography::{Caption, Paragraph},
 };
 use gpui::{AnyElement, App, Entity, IntoElement, ParentElement, Styled, div};
@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub const FORWARD_SUBMIT: &str = "forward-submit";
+pub const FORWARD_RESET_SSH: &str = "forward-reset-ssh";
 /// Selector of the note shown for the reserved port.
 pub const RESERVED_NOTE: &str = "forward-reserved";
 pub const FORWARD_BODY: &str = "forward-body";
@@ -118,6 +119,25 @@ pub(super) fn render(
                 handle,
                 cx,
             ));
+            if error.is(ErrorKind::SshBusy) {
+                let resetting = state.is_resetting_ssh(&form.target);
+                let (reset_handle, reset_target) = (handle.clone(), form.target.clone());
+                body = body.child(
+                    div().child(tagged(
+                        FORWARD_RESET_SSH,
+                        Button::new(FORWARD_RESET_SSH, tr(cx, keys::RESET_SSH_ACTION))
+                            .variant(ButtonVariant::Ghost)
+                            .size(ControlSize::Sm)
+                            .loading(resetting)
+                            .disabled(resetting)
+                            .on_click(move |_, _, cx| {
+                                reset_handle.update(cx, |state, cx| {
+                                    state.reset_ssh_sessions(reset_target.clone(), cx)
+                                })
+                            }),
+                    )),
+                );
+            }
         }
         None => {}
     }

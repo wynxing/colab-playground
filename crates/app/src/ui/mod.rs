@@ -54,6 +54,24 @@ pub struct Inputs {
     pub hf_query: Entity<TextInput>,
     /// Plugins: the Hugging Face token (masked; cleared once saved).
     pub hf_token: Entity<TextInput>,
+    /// Keep Plan: comma-separated VM paths to persist.
+    pub keep_paths: Entity<TextInput>,
+    /// Keep Plan: local destination folder.
+    pub keep_local_folder: Entity<TextInput>,
+    /// Keep Plan: Hugging Face repo (`owner/name`).
+    pub keep_hf_repo: Entity<TextInput>,
+    /// Keep Plan: optional subfolder inside the Hugging Face repo.
+    pub keep_hf_subpath: Entity<TextInput>,
+    /// Keep Plan: periodic Hugging Face upload cadence in minutes.
+    pub keep_hf_interval: Entity<TextInput>,
+    /// Keep Plan: Google Drive VM mount path.
+    pub keep_drive_mount: Entity<TextInput>,
+    /// Keep Plan: destination subfolder inside Google Drive.
+    pub keep_drive_subpath: Entity<TextInput>,
+    /// VM upload: local file path.
+    pub upload_local: Entity<TextInput>,
+    /// VM upload: remote destination path on the VM.
+    pub upload_remote: Entity<TextInput>,
     /// Run form: text, secret and model fields by input id (made when a form opens).
     pub fields: std::collections::BTreeMap<String, Entity<TextInput>>,
 }
@@ -73,6 +91,15 @@ impl Inputs {
             InputSlot::ForwardRemote => Some(self.forward_remote.clone()),
             InputSlot::ForwardLocal => Some(self.forward_local.clone()),
             InputSlot::Health => Some(self.health.clone()),
+            InputSlot::KeepPaths => Some(self.keep_paths.clone()),
+            InputSlot::KeepLocalFolder => Some(self.keep_local_folder.clone()),
+            InputSlot::KeepHfRepo => Some(self.keep_hf_repo.clone()),
+            InputSlot::KeepHfSubpath => Some(self.keep_hf_subpath.clone()),
+            InputSlot::KeepHfInterval => Some(self.keep_hf_interval.clone()),
+            InputSlot::KeepDriveMount => Some(self.keep_drive_mount.clone()),
+            InputSlot::KeepDriveSubpath => Some(self.keep_drive_subpath.clone()),
+            InputSlot::UploadLocal => Some(self.upload_local.clone()),
+            InputSlot::UploadRemote => Some(self.upload_remote.clone()),
             InputSlot::Field(id) => self.field(id),
         }
     }

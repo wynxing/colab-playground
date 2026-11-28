@@ -59,6 +59,16 @@ pub enum Op {
     Forward(u64),
     /// Closing a forward (keyed by tunnel id).
     CloseForward(u64),
+    /// Fetching the Colab web URL for a runtime (`colab url`, keyed by runtime).
+    OpenBrowser(u64),
+    /// Restarting a runtime's Jupyter kernel (keyed by runtime).
+    RestartKernel(u64),
+    /// Clearing stale SSH daemon sessions on a runtime (keyed by runtime).
+    ResetSsh(u64),
+    /// Building copyable Remote-SSH snippets (keyed by runtime).
+    RemoteSsh(u64),
+    /// Writing an isolated temporary SSH config file (keyed by runtime).
+    WriteTempSshConfig(u64),
     Plugins,
     /// Checking a plugin folder or Git URL before installing.
     InspectPlugin,
@@ -76,6 +86,14 @@ pub enum Op {
     HfFiles(u64),
     /// Saving what a run produced on the VM (keyed by the path).
     DownloadOutputs(u64),
+    /// Updating the Keep Plan or watchdog hooks for a session (keyed by runtime).
+    KeepPlan(u64),
+    /// Running a session's Keep Plan now (keyed by runtime).
+    KeepSync(u64),
+    /// Mounting Google Drive on a runtime (keyed by runtime).
+    DriveMount(u64),
+    /// Uploading a local file to a runtime (keyed by runtime).
+    VmUpload(u64),
     /// Stopping every runtime before quitting.
     StopAll,
     /// Checking GitHub for a newer release.
@@ -126,6 +144,8 @@ impl Op {
                 | Op::RunTemplate
                 | Op::DiscoverRuns
                 | Op::Plugins
+                | Op::OpenBrowser(_)
+                | Op::RemoteSsh(_)
                 | Op::HfFiles(_)
         )
     }

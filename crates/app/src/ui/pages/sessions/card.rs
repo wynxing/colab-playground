@@ -4,6 +4,7 @@
 //! named runtime (runtimes opened elsewhere show them disabled with the reason).
 
 use colab_playground_core::{
+    ErrorKind,
     backend::Runtime,
     guard::{Concern, Limit},
     tunnel::{TunnelInfo, TunnelState},
@@ -53,6 +54,33 @@ pub fn set_auto_stop_selector(label: &str) -> String {
 }
 pub fn switch_selector(label: &str) -> String {
     format!("runtime-switch {label}")
+}
+pub fn keep_selector(label: &str) -> String {
+    format!("runtime-keep {label}")
+}
+pub fn sync_keep_selector(label: &str) -> String {
+    format!("runtime-keep-sync {label}")
+}
+pub fn drive_mount_selector(label: &str) -> String {
+    format!("runtime-drive-mount {label}")
+}
+pub fn upload_selector(label: &str) -> String {
+    format!("runtime-upload {label}")
+}
+pub fn keep_summary_selector(label: &str) -> String {
+    format!("runtime-keep-summary {label}")
+}
+pub fn open_browser_selector(label: &str) -> String {
+    format!("runtime-open-browser {label}")
+}
+pub fn restart_kernel_selector(label: &str) -> String {
+    format!("runtime-restart-kernel {label}")
+}
+pub fn ide_ssh_selector(label: &str) -> String {
+    format!("runtime-ide-ssh {label}")
+}
+pub fn reset_ssh_selector(label: &str) -> String {
+    format!("runtime-reset-ssh {label}")
 }
 
 fn stat(label: SharedString, value: SharedString, cx: &App) -> impl IntoElement {
@@ -228,18 +256,106 @@ pub(super) fn render(
     }
     let tunnels = state.tunnels_for(&runtime.id);
     if !tunnels.is_empty() {
-        card = card.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(Caption::new(tr(cx, keys::RUNTIME_FORWARDS)))
-                .children(
-                    tunnels
-                        .into_iter()
-                        .map(|tunnel| forward_row(tunnel, handle, cx)),
-                ),
-        );
+        let ssh_busy = runtime.on_active_account
+            && runtime.id.name.is_some()
+            && tunnels.iter().any(|tunnel| {
+                matches!(
+                    &tunnel.state,
+                    TunnelState::Failed { error } if error.is(ErrorKind::SshBusy)
+                )
+            });
+        let mut forwards = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Caption::new(tr(cx, keys::RUNTIME_FORWARDS)))
+            .children(
+                tunnels
+                    .into_iter()
+                    .map(|tunnel| forward_row(tunnel, handle, cx)),
+            );
+        if ssh_busy {
+            let resetting = state.is_resetting_ssh(&runtime.id);
+            let (reset_handle, reset_target) = (handle.clone(), runtime.id.clone());
+            forwards = forwards.child(div().child(tagged(
+                reset_ssh_selector(&label),
+                Button::new(
+                    SharedString::from(format!("reset-ssh-{key}")),
+                    tr(cx, keys::RESET_SSH_ACTION),
+                )
+                .variant(ButtonVariant::Ghost)
+                .size(ControlSize::Sm)
+                .loading(resetting)
+                .disabled(resetting)
+                .on_click(move |_, _, cx| {
+                    reset_handle.update(cx, |state, cx| {
+                        state.reset_ssh_sessions(reset_target.clone(), cx)
+                    })
+                }),
+            )));
+        }
+        card = card.child(forwards);
+    }
+    if let Some(tracked) = &runtime.tracked
+        && let Some(plan) = tracked.keep_plan.as_ref().filter(|p| !p.is_empty())
+    {
+        let mut target_names = Vec::new();
+        if plan.local.is_some() {
+            target_names.push(tr(cx, keys::KEEP_TARGET_LOCAL).to_string());
+        }
+        if plan.hf.is_some() {
+            target_names.push(tr(cx, keys::KEEP_TARGET_HF).to_string());
+        }
+        if let Some(drive) = &plan.drive
+            && drive.consented
+        {
+            target_names.push(tr(cx, keys::KEEP_TARGET_DRIVE).to_string());
+        }
+        let targets_joined = if target_names.is_empty() {
+            "—".to_owned()
+        } else {
+            target_names.join(", ")
+        };
+        let path_count = plan.paths.len().to_string();
+        let mut summary_row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(Caption::new(tr_args(
+                cx,
+                keys::KEEP_CARD_SUMMARY,
+                &[("paths", &path_count), ("targets", &targets_joined)],
+            )));
+        if let Some(drive) = &plan.drive
+            && drive.consented
+        {
+            summary_row = summary_row.child(if drive.mounted {
+                Badge::new(tr(cx, keys::KEEP_DRIVE_MOUNTED_BADGE)).tone(Tone::Success)
+            } else {
+                Badge::new(tr(cx, keys::KEEP_DRIVE_UNMOUNTED_BADGE)).tone(Tone::Warning)
+            });
+        }
+        let mut block = div().flex().flex_col().gap_1().child(summary_row);
+        if let Some(report) = &tracked.last_keep_sync {
+            let line = if let Some(err) = report.first_error() {
+                Caption::new(tr_args(
+                    cx,
+                    keys::KEEP_CARD_LAST_ERR,
+                    &[("why", &errors::explain(err, false, cx).message)],
+                ))
+            } else {
+                let files: u64 = report.results.iter().map(|(_, r)| r.files).sum();
+                let files_str = files.to_string();
+                Caption::new(tr_args(
+                    cx,
+                    keys::KEEP_CARD_LAST_OK,
+                    &[("files", &files_str)],
+                ))
+            };
+            block = block.child(line);
+        }
+        card = card.child(tagged(keep_summary_selector(&label), block));
     }
     card = card.child(actions(runtime, &label, stopping, state, handle, cx));
     tagged(runtime_selector(&label), card)
@@ -356,6 +472,51 @@ fn actions(
             }),
         ));
     }
+    let (open_handle, open_target) = (handle.clone(), target.clone());
+    let opening_browser = state.is_opening_browser(&target);
+    let open_browser = Button::new(
+        SharedString::from(format!("open-browser-{key}")),
+        tr(cx, keys::OPEN_BROWSER_ACTION),
+    )
+    .variant(ButtonVariant::Ghost)
+    .icon(IconName::ExternalLink)
+    .size(ControlSize::Sm)
+    .loading(opening_browser)
+    .disabled(opening_browser)
+    .on_click(move |_, _, cx| {
+        open_handle.update(cx, |state, cx| {
+            state.open_in_browser(open_target.clone(), cx)
+        })
+    });
+    let (restart_handle, restart_target) = (handle.clone(), target.clone());
+    let restarting_kernel = state.is_restarting_kernel(&target);
+    let restart_kernel = Button::new(
+        SharedString::from(format!("restart-kernel-{key}")),
+        tr(cx, keys::RESTART_KERNEL_ACTION),
+    )
+    .variant(ButtonVariant::Ghost)
+    .icon(IconName::RotateCcw)
+    .size(ControlSize::Sm)
+    .loading(restarting_kernel)
+    .disabled(restarting_kernel)
+    .on_click(move |_, _, cx| {
+        restart_handle.update(cx, |state, cx| {
+            state.request_restart_kernel(restart_target.clone(), cx)
+        })
+    });
+    let (ide_handle, ide_target) = (handle.clone(), target.clone());
+    let ide_ssh = Button::new(
+        SharedString::from(format!("ide-ssh-{key}")),
+        tr(cx, keys::REMOTE_SSH_ACTION),
+    )
+    .variant(ButtonVariant::Ghost)
+    .icon(IconName::Terminal)
+    .size(ControlSize::Sm)
+    .on_click(move |_, _, cx| {
+        ide_handle.update(cx, |state, cx| {
+            state.open_remote_ssh_dialog(ide_target.clone(), cx)
+        })
+    });
     let (forward_handle, forward_target) = (handle.clone(), target.clone());
     let forward = Button::new(
         SharedString::from(format!("forward-{key}")),
@@ -369,17 +530,117 @@ fn actions(
             state.open_forward_dialog(forward_target.clone(), cx)
         })
     });
-    let forward: AnyElement = if named {
-        forward.into_any_element()
+    let mut row = row.child(tagged(
+        open_browser_selector(label),
+        named_action(named, format!("open-browser-wrap-{key}"), open_browser, cx),
+    ))
+    .child(tagged(
+        restart_kernel_selector(label),
+        named_action(
+            named,
+            format!("restart-kernel-wrap-{key}"),
+            restart_kernel,
+            cx,
+        ),
+    ))
+    .child(tagged(
+        ide_ssh_selector(label),
+        named_action(named, format!("ide-ssh-wrap-{key}"), ide_ssh, cx),
+    ))
+    .child(tagged(
+        forward_selector(label),
+        named_action(named, format!("forward-wrap-{key}"), forward, cx),
+    ));
+    if named {
+        let (upload_handle, upload_target) = (handle.clone(), target.clone());
+        let uploading = state.is_uploading(&target);
+        row = row.child(tagged(
+            upload_selector(label),
+            Button::new(
+                SharedString::from(format!("upload-{key}")),
+                tr(cx, keys::VM_UPLOAD_ACTION),
+            )
+            .variant(ButtonVariant::Ghost)
+            .icon(IconName::Plus)
+            .size(ControlSize::Sm)
+            .loading(uploading)
+            .on_click(move |_, _, cx| {
+                upload_handle.update(cx, |state, cx| {
+                    state.open_upload_dialog(upload_target.clone(), cx)
+                })
+            }),
+        ));
+    }
+    if named && runtime.tracked.is_some() {
+        let (keep_handle, keep_target) = (handle.clone(), target.clone());
+        row = row.child(tagged(
+            keep_selector(label),
+            Button::new(
+                SharedString::from(format!("keep-{key}")),
+                tr(cx, keys::KEEP_CONFIGURE),
+            )
+            .variant(ButtonVariant::Ghost)
+            .icon(IconName::Settings)
+            .size(ControlSize::Sm)
+            .on_click(move |_, _, cx| {
+                keep_handle.update(cx, |state, cx| state.open_keep_plan(keep_target.clone(), cx))
+            }),
+        ));
+        let plan = runtime.tracked.as_ref().and_then(|t| t.keep_plan.as_ref());
+        if plan.is_some_and(|p| p.has_enabled_target() && !p.paths.is_empty()) {
+            let (sync_handle, sync_target) = (handle.clone(), target.clone());
+            let syncing = state.is_syncing_keep(&target);
+            row = row.child(tagged(
+                sync_keep_selector(label),
+                Button::new(
+                    SharedString::from(format!("keep-sync-{key}")),
+                    tr(cx, keys::KEEP_SYNC_NOW),
+                )
+                .size(ControlSize::Sm)
+                .icon(IconName::Download)
+                .loading(syncing)
+                .disabled(syncing)
+                .on_click(move |_, _, cx| {
+                    sync_handle.update(cx, |state, cx| state.sync_keep(sync_target.clone(), cx))
+                }),
+            ));
+        }
+        if plan
+            .and_then(|p| p.drive.as_ref())
+            .is_some_and(|d| d.consented && !d.mounted)
+        {
+            let (drive_handle, drive_target) = (handle.clone(), target.clone());
+            let mounting = state.is_mounting_drive(&target);
+            row = row.child(tagged(
+                drive_mount_selector(label),
+                Button::new(
+                    SharedString::from(format!("drive-mount-{key}")),
+                    tr(cx, keys::KEEP_DRIVE_MOUNT_ACTION),
+                )
+                .size(ControlSize::Sm)
+                .loading(mounting)
+                .disabled(mounting)
+                .on_click(move |_, _, cx| {
+                    drive_handle.update(cx, |state, cx| {
+                        state.begin_drive_mount(drive_target.clone(), None, cx)
+                    })
+                }),
+            ));
+        }
+    }
+    row.into_any_element()
+}
+
+fn named_action(named: bool, wrap_id: String, button: Button, cx: &App) -> AnyElement {
+    if named {
+        button.into_any_element()
     } else {
         div()
-            .id(SharedString::from(format!("forward-wrap-{key}")))
+            .id(SharedString::from(wrap_id))
             .tooltip(Tooltip::text(tr(cx, keys::RUNTIME_UNNAMED_REASON)))
-            .child(forward.disabled(true))
+            .child(button.disabled(true))
             .into_any_element()
-    };
-    row.child(tagged(forward_selector(label), forward))
-        .into_any_element()
+    }
 }
 
 /// One forward: state, address (copy, open) and close.
