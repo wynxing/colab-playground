@@ -75,6 +75,8 @@ pub enum Op {
     /// Installing, enabling, disabling or removing a plugin (keyed by plugin id).
     PluginChange(u64),
     PluginRun,
+    /// Checking live runtimes for a plugin run started before this app launch.
+    DiscoverRuns,
     RunTemplate,
     /// Reading, saving or deleting a stored secret.
     Secret,
@@ -140,6 +142,7 @@ impl Op {
                 | Op::UpdateRestart
                 | Op::SessionName
                 | Op::RunTemplate
+                | Op::DiscoverRuns
                 | Op::Plugins
                 | Op::OpenBrowser(_)
                 | Op::RemoteSsh(_)

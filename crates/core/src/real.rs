@@ -2823,13 +2823,32 @@ impl Backend for RealBackend {
                 name: Some(session.clone()),
             }
         };
+        let non_secret_inputs: BTreeMap<String, crate::plugins::InputValue> = resolved
+            .values
+            .iter()
+            .filter(|(id, _)| {
+                manifest
+                    .input(id)
+                    .is_some_and(|i| i.kind != crate::plugins::InputKind::Secret)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if let Some(mut plan) = spec.keep_plan {
             let extra: Vec<String> = manifest.keep.iter().map(|k| k.path.clone()).collect();
             plan.merge_paths(&extra);
             self.set_keep_plan(&target(&self.inner), Some(plan), cancel)?;
         }
         let result = self.run_on(
-            &plugin, &account, &session, env, &secrets, &endpoints, &events, cancel,
+            &plugin,
+            &account,
+            &session,
+            env,
+            non_secret_inputs,
+            &secrets,
+            &endpoints,
+            provisioned,
+            &events,
+            cancel,
         );
         // A cancelled run always gives back the runtime it provisioned.
         if let Err(e) = &result
@@ -2846,6 +2865,119 @@ impl Backend for RealBackend {
                 },
                 &CancelToken::new(),
             );
+        }
+        result
+    }
+
+    fn discover_runs(
+        &self,
+        targets: &[RuntimeRef],
+        cancel: &CancelToken,
+    ) -> Result<Vec<DiscoveredRun>> {
+        let Some(active) = self.inner.active(cancel)? else {
+            return Ok(Vec::new());
+        };
+        let snippet = vm::plugin_discover_snippet();
+        let mut found = Vec::new();
+        for target in targets {
+            if target.account != active {
+                continue;
+            }
+            let Some(session) = target.name.as_deref() else {
+                continue;
+            };
+            let (_g, cli, state) = self.inner.cli_for(&active, cancel)?;
+            let raw = match cli.exec_json(&state, session, &[], &snippet, 60, cancel) {
+                Ok(v) => v,
+                Err(e)
+                    if e.is(ErrorKind::SessionGone)
+                        || e.is(ErrorKind::ConnectionLost)
+                        || e.is(ErrorKind::ExecTimeout) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            for mut entry in vm::parse_discovered(&raw) {
+                let manifest = self
+                    .inner
+                    .st()
+                    .plugins
+                    .get(&entry.meta.plugin)
+                    .map(|p| p.manifest.clone());
+                if let Some(m) = &manifest {
+                    entry.meta.inputs.retain(|id, _| {
+                        m.input(id)
+                            .is_some_and(|spec| spec.kind != crate::plugins::InputKind::Secret)
+                    });
+                } else {
+                    entry.meta.inputs.clear();
+                }
+                let secrets = self.needs_secrets(&entry.meta.plugin, cancel);
+                let status_text = entry
+                    .status
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok())
+                    .unwrap_or_default();
+                if contains_secret(&entry.log, &secrets) || contains_secret(&status_text, &secrets)
+                {
+                    let _ = self.redact_cli_history(session, &secrets);
+                }
+                if let Some(s) = entry.status.as_mut() {
+                    Self::redact_status(s, &secrets);
+                }
+                let log_tail: Vec<String> = redact(&entry.log, &secrets)
+                    .lines()
+                    .map(str::to_owned)
+                    .collect();
+                found.push(DiscoveredRun {
+                    account: active.clone(),
+                    session: session.to_owned(),
+                    meta: entry.meta,
+                    status: entry.status,
+                    log_tail,
+                    log_skipped: entry.skipped > 0,
+                    log_offset: entry.offset,
+                });
+            }
+        }
+        Ok(found)
+    }
+
+    fn reattach_run(
+        &self,
+        run: DiscoveredRun,
+        events: Events<PluginRunEvent>,
+        cancel: &CancelToken,
+    ) -> Result<PluginRunOutcome> {
+        let (_g, cli, state) = self.inner.cli_for(&run.account, cancel)?;
+        let secrets = self.needs_secrets(&run.meta.plugin, cancel);
+        let initial_ready = run
+            .status
+            .as_ref()
+            .filter(|s| run.meta.keep_alive && s.state == RunState::Ready)
+            .cloned();
+        let _ = events.send(PluginRunEvent::Launched {
+            session: run.session.clone(),
+            run_id: run.meta.run_id.clone(),
+        });
+        let result = self.poll_run_loop(
+            &cli,
+            &state,
+            &run.account,
+            &run.session,
+            run.meta.run_id,
+            run.meta.keep_alive,
+            &run.meta.endpoints,
+            &secrets,
+            run.log_offset,
+            run.status,
+            initial_ready,
+            &events,
+            cancel,
+        );
+        if !secrets.is_empty() {
+            self.scrub_history(&run.session, &secrets, &events);
         }
         result
     }
@@ -3133,6 +3265,26 @@ impl RealBackend {
         }
     }
 
+    fn needs_secrets(&self, plugin: &str, cancel: &CancelToken) -> Vec<String> {
+        let needs = self
+            .inner
+            .st()
+            .plugins
+            .get(plugin)
+            .map(|p| p.manifest.needs.clone())
+            .unwrap_or_default();
+        if needs.is_empty() {
+            return Vec::new();
+        }
+        let Ok(helper) = self.inner.helper() else {
+            return Vec::new();
+        };
+        needs
+            .into_iter()
+            .filter_map(|need| helper.secret_get(need.secret_name(), cancel).ok().flatten())
+            .collect()
+    }
+
     /// Runs the plugin on `session`, then scrubs the CLI history once more,
     /// however the run ended (ready, failed, cancelled or error).
     #[allow(clippy::too_many_arguments)]
@@ -3142,13 +3294,24 @@ impl RealBackend {
         account: &AccountId,
         session: &str,
         env: Vec<(String, String)>,
+        non_secret_inputs: BTreeMap<String, crate::plugins::InputValue>,
         secrets: &[String],
         endpoints: &[crate::plugins::ResolvedEndpoint],
+        provisions: bool,
         events: &Events<PluginRunEvent>,
         cancel: &CancelToken,
     ) -> Result<PluginRunOutcome> {
         let result = self.run_on_inner(
-            plugin, account, session, env, secrets, endpoints, events, cancel,
+            plugin,
+            account,
+            session,
+            env,
+            non_secret_inputs,
+            secrets,
+            endpoints,
+            provisions,
+            events,
+            cancel,
         );
         if !secrets.is_empty() {
             self.scrub_history(session, secrets, events);
@@ -3163,8 +3326,10 @@ impl RealBackend {
         account: &AccountId,
         session: &str,
         mut env: Vec<(String, String)>,
+        non_secret_inputs: BTreeMap<String, crate::plugins::InputValue>,
         secrets: &[String],
         endpoints: &[crate::plugins::ResolvedEndpoint],
+        provisions: bool,
         events: &Events<PluginRunEvent>,
         cancel: &CancelToken,
     ) -> Result<PluginRunOutcome> {
@@ -3178,6 +3343,15 @@ impl RealBackend {
             .next()
             .unwrap_or("script.py")
             .to_owned();
+        let meta = vm::RunMeta {
+            run_id: run_id.clone(),
+            plugin: plugin.manifest.id.clone(),
+            inputs: non_secret_inputs,
+            endpoints: endpoints.to_vec(),
+            keep_alive: plugin.manifest.run.keep_alive,
+            provisions,
+        };
+        let meta_json = serde_json::to_vec(&meta)?;
         env.push(("PLUGIN_ID".into(), plugin.manifest.id.clone()));
         env.push(("PLUGIN_RUN_ID".into(), run_id.clone()));
         env.push((vm::ENV_RUN_ID.into(), run_id.clone()));
@@ -3187,7 +3361,7 @@ impl RealBackend {
                 &state,
                 session,
                 &env,
-                &vm::plugin_launch_snippet(&plugin.script),
+                &vm::plugin_launch_snippet(&plugin.script, &meta_json),
                 120,
                 cancel,
             )
@@ -3203,10 +3377,44 @@ impl RealBackend {
             session: session.to_owned(),
             run_id: run_id.clone(),
         });
+        self.poll_run_loop(
+            &cli,
+            &state,
+            account,
+            session,
+            run_id,
+            plugin.manifest.run.keep_alive,
+            endpoints,
+            secrets,
+            0,
+            None,
+            None,
+            events,
+            cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn poll_run_loop(
+        &self,
+        cli: &Cli,
+        state: &HostPath,
+        account: &AccountId,
+        session: &str,
+        run_id: String,
+        keep_alive: bool,
+        endpoints: &[crate::plugins::ResolvedEndpoint],
+        secrets: &[String],
+        mut offset: u64,
+        mut last: Option<RunStatus>,
+        mut ready: Option<RunStatus>,
+        events: &Events<PluginRunEvent>,
+        cancel: &CancelToken,
+    ) -> Result<PluginRunOutcome> {
         let nc = CancelToken::new();
         let kill = |cli: &Cli| {
             let _ = cli.exec_json(
-                &state,
+                state,
                 session,
                 &[(vm::ENV_RUN_ID.into(), run_id.clone())],
                 &vm::plugin_kill_snippet(),
@@ -3220,7 +3428,7 @@ impl RealBackend {
                 (vm::ENV_LOG_OFFSET.into(), offset.to_string()),
             ];
             let poll = cli
-                .exec_json(&state, session, &env, &vm::plugin_poll_snippet(), 60, &nc)
+                .exec_json(state, session, &env, &vm::plugin_poll_snippet(), 60, &nc)
                 .and_then(|v| vm::parse_poll(&v))?;
             // The poll's printed output (log chunk, status) is recorded in the
             // CLI's history too. The VM side normally scrubs it already; if a
@@ -3261,7 +3469,7 @@ impl RealBackend {
                     exiting = false;
                 }
                 if cancel.is_cancelled() {
-                    kill(&cli);
+                    kill(cli);
                     return Err(Error::cancelled());
                 }
                 let Ok(next) = poll_at(poll.offset) else {
@@ -3271,11 +3479,6 @@ impl RealBackend {
             }
             Ok(())
         };
-        let mut offset = 0u64;
-        let mut last: Option<RunStatus> = None;
-        // A plugin that keeps itself alive reports ready and stays running: its
-        // status is read until it stops.
-        let mut ready: Option<RunStatus> = None;
         let mut transient = 0u32;
         let mut first = true;
         let mut catching_up = 0u32;
@@ -3289,7 +3492,7 @@ impl RealBackend {
             };
             first = false;
             if self.inner.cfg.clock.sleep(wait, cancel).is_err() {
-                kill(&cli);
+                kill(cli);
                 return Err(Error::cancelled());
             }
             let poll = match poll_at(offset) {
@@ -3318,22 +3521,14 @@ impl RealBackend {
                 0
             };
             if let Some(mut s) = poll.status.clone() {
-                if let Some(m) = s.message.as_mut() {
-                    *m = redact(m, secrets);
-                }
-                if let Some(st) = s.stage.as_mut() {
-                    *st = redact(st, secrets);
-                }
-                for v in s.outputs.values_mut() {
-                    redact_json(v, secrets);
-                }
+                Self::redact_status(&mut s, secrets);
                 if last.as_ref() != Some(&s) {
                     let _ = events.send(PluginRunEvent::Status(s.clone()));
                     last = Some(s.clone());
                 }
                 match s.state {
                     RunState::Ready => {
-                        if !plugin.manifest.run.keep_alive {
+                        if !keep_alive {
                             show_rest_of_log(poll, false)?;
                             return Ok(PluginRunOutcome {
                                 session: session.to_owned(),
@@ -3376,6 +3571,18 @@ impl RealBackend {
                     .with("stage", stage)
                     .with("message", "the script exited without reporting"));
             }
+        }
+    }
+
+    fn redact_status(s: &mut RunStatus, secrets: &[String]) {
+        if let Some(m) = s.message.as_mut() {
+            *m = redact(m, secrets);
+        }
+        if let Some(st) = s.stage.as_mut() {
+            *st = redact(st, secrets);
+        }
+        for v in s.outputs.values_mut() {
+            redact_json(v, secrets);
         }
     }
 }

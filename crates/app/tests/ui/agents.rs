@@ -21,7 +21,12 @@ use colab_playground::{
         },
     },
 };
-use colab_playground_core::mock::{MockFailures, MockScenario};
+use colab_playground_core::{
+    mock::{MockActiveRun, MockFailures, MockScenario},
+    plugins::{LocalizedText, ResolvedEndpoint},
+    tunnel::{TunnelEvent, TunnelState},
+    vm::RunState,
+};
 use gpui::TestAppContext;
 use serde_json::{Value, json};
 
@@ -237,6 +242,59 @@ impl Agent {
             .unwrap_or_else(|| panic!("no text: {answer}"));
         let body: Value = serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON: {e}"));
         (is_error, body)
+    }
+}
+
+struct SseClient {
+    reader: BufReader<TcpStream>,
+}
+
+impl SseClient {
+    fn connect(address: SocketAddr, token: &str, session: &str) -> Self {
+        let mut stream = TcpStream::connect(address).expect("SSE endpoint accepts");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("a read timeout");
+        let req = format!(
+            "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\
+             Accept: text/event-stream\r\nMcp-Session-Id: {session}\r\n\r\n"
+        );
+        stream.write_all(req.as_bytes()).expect("SSE request");
+        stream.flush().expect("flushed");
+        let mut reader = BufReader::new(stream);
+        let mut status = String::new();
+        reader.read_line(&mut status).expect("SSE status line");
+        assert!(status.contains("200"), "{status}");
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).expect("SSE header");
+            if header.trim_end().is_empty() {
+                break;
+            }
+        }
+        Self { reader }
+    }
+
+    fn next_matching(&mut self, event: &str, session: Option<&str>) -> Value {
+        for _ in 0..40 {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).expect("SSE line");
+            let Some(payload) = line.trim_end().strip_prefix("data: ") else {
+                continue;
+            };
+            let msg: Value = serde_json::from_str(payload).expect("SSE notification JSON");
+            let data = &msg["params"]["data"];
+            if data["event"].as_str() != Some(event) {
+                continue;
+            }
+            if let Some(expected_session) = session
+                && data["detail"]["session"].as_str() != Some(expected_session)
+            {
+                continue;
+            }
+            return msg;
+        }
+        panic!("timed out waiting for SSE event {event:?} for {session:?}");
     }
 }
 
@@ -738,4 +796,206 @@ fn an_agent_cannot_turn_the_question_off(cx: &mut TestAppContext) {
     let (is_error, answer) = agent.result();
     assert!(is_error, "{answer}");
     assert!(app.read(|state, _| state.agents_confirm()));
+}
+
+#[gpui::test]
+fn run_watch_follows_a_reattached_run_over_the_socket(cx: &mut TestAppContext) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8804);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    let mut sse = SseClient::connect(address, &token, &agent.session);
+
+    app.mock.seed_active_run(MockActiveRun {
+        account: 0,
+        session: "a100-7f3a".into(),
+        run_id: "reattach-watch-1".into(),
+        plugin: "comfyui".into(),
+        stage: Some("download".into()),
+        state: RunState::Running,
+        log_tail: vec!["resumed line".into()],
+        keep_alive: true,
+        endpoints: vec![ResolvedEndpoint {
+            id: "ui".into(),
+            remote_port: 8188,
+            path: "/".into(),
+            health: Some("/".into()),
+            kind: "comfyui".into(),
+            label: LocalizedText::default(),
+        }],
+        manual_stages: false,
+    });
+    app.update(|state, cx| state.load_runtimes(cx));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.plugin_run().is_some())
+    });
+
+    agent.call("run_status", json!({ "plugin": "comfyui" }));
+    settle_a_while(&mut app);
+    let (is_error, status) = agent.result();
+    assert!(!is_error, "{status}");
+    assert_eq!(status["session"], "a100-7f3a");
+    assert_eq!(status["ready"], true);
+
+    let ready_note = sse.next_matching("run_ready", None);
+    assert_eq!(ready_note["params"]["data"]["detail"]["run"]["ready"], true);
+
+    agent.call("run_watch", json!({ "plugin": "comfyui" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching())
+    });
+    app.advance(Duration::from_secs(121));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching())
+    });
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["changed"], "none", "{answer}");
+    assert_eq!(answer["run"]["session"], "a100-7f3a", "{answer}");
+    assert_eq!(answer["run"]["ready"], true, "{answer}");
+
+    app.update(|state, cx| state.cancel_run(cx));
+    settle_a_while(&mut app);
+}
+
+#[gpui::test]
+fn session_watch_reports_guard_warning_auto_stop_countdown_and_sse(cx: &mut TestAppContext) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8805);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    let mut sse = SseClient::connect(address, &token, &agent.session);
+
+    agent.call("session_watch", json!({ "session": "a100-7f3a" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching_session())
+    });
+
+    // `a100-7f3a` starts at elapsed 10 min (limit 120 min). +90 min -> 100 min elapsed (>= 80% warn)
+    // and 20 min remaining (> 10 min auto_stop_soon).
+    app.advance(Duration::from_secs(90 * 60));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching_session())
+    });
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["event"], "guard_warning", "{answer}");
+    assert_eq!(answer["session"], "a100-7f3a", "{answer}");
+    assert!(
+        !answer["warnings"].as_array().expect("warnings").is_empty(),
+        "{answer}"
+    );
+    let warn_note = sse.next_matching("guard_warning", Some("a100-7f3a"));
+    assert_eq!(warn_note["params"]["level"], "warning");
+
+    agent.call("session_watch", json!({ "session": "a100-7f3a" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching_session())
+    });
+
+    // +12 min -> 8 min remaining (<= 10 min AUTO_STOP_SOON), same runtime limit warning kind stays deduplicated.
+    app.advance(Duration::from_secs(12 * 60));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching_session())
+    });
+
+    let (is_error, answer) = agent.result();
+    assert!(!is_error, "{answer}");
+    assert_eq!(answer["event"], "auto_stop_soon", "{answer}");
+    assert_eq!(answer["session"], "a100-7f3a", "{answer}");
+    assert!(
+        answer["detail"]["remaining_seconds"]
+            .as_u64()
+            .is_some_and(|s| s <= 600),
+        "{answer}"
+    );
+    let soon_note = sse.next_matching("auto_stop_soon", Some("a100-7f3a"));
+    assert_eq!(soon_note["params"]["level"], "warning");
+}
+
+#[gpui::test]
+fn session_watch_reports_tunnel_disconnect_unhealthy_timeout_and_missing_session(
+    cx: &mut TestAppContext,
+) {
+    let mut app = with_agents_on(cx, MockScenario::demo(), 8806);
+    let (address, token) = endpoint(&mut app);
+
+    let mut agent = Agent::connect(address, &token);
+    agent.call("session_watch", json!({ "session": "nope" }));
+    settle_a_while(&mut app);
+    let (is_error, missing) = agent.result();
+    assert!(is_error, "{missing}");
+    assert_eq!(missing["kind"], "session_gone", "{missing}");
+
+    agent.call(
+        "forward_open",
+        json!({ "session": "a100-7f3a", "remote_port": 8188 }),
+    );
+    settle_until(&mut app, |app| app.read(|state, _| state.tunnels().next().is_some()));
+    let (is_error, fwd) = agent.result();
+    assert!(!is_error, "{fwd}");
+    let tunnel_id = app
+        .read(|state, _| state.tunnels().next().map(|t| t.id))
+        .expect("tunnel id");
+
+    agent.call("session_watch", json!({ "session": "a100-7f3a" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching_session())
+    });
+    app.mock.emit_tunnel_event(TunnelEvent::State {
+        id: tunnel_id,
+        state: TunnelState::Reconnecting {
+            attempt: 1,
+            delay_secs: 2,
+        },
+    });
+    app.advance(Duration::from_millis(300));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching_session())
+    });
+    let (is_error, disconnected) = agent.result();
+    assert!(!is_error, "{disconnected}");
+    assert_eq!(disconnected["event"], "tunnel_disconnected", "{disconnected}");
+    assert_eq!(disconnected["detail"]["state"], "reconnecting");
+
+    agent.call("session_watch", json!({ "session": "a100-7f3a" }));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching_session())
+    });
+    app.mock.emit_tunnel_event(TunnelEvent::Health {
+        id: tunnel_id,
+        healthy: false,
+    });
+    app.advance(Duration::from_millis(300));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching_session())
+    });
+    let (is_error, unhealthy) = agent.result();
+    assert!(!is_error, "{unhealthy}");
+    assert_eq!(unhealthy["event"], "tunnel_unhealthy", "{unhealthy}");
+    assert_eq!(unhealthy["detail"]["healthy"], false);
+
+    // Busy refusal + timeout answer.
+    let mut first = Agent::connect(address, &token);
+    first.call("session_watch", json!({}));
+    settle_until(&mut app, |app| {
+        app.read(|state, _| state.agent_is_watching_session())
+    });
+
+    let mut second = Agent::connect(address, &token);
+    second.call("session_watch", json!({ "session": "a100-7f3a" }));
+    settle_a_while(&mut app);
+    let (is_error, busy) = second.result();
+    assert!(is_error, "{busy}");
+    assert_eq!(busy["kind"], "denied", "{busy}");
+    assert_eq!(busy["params"]["reason"], "busy", "{busy}");
+
+    app.advance(Duration::from_secs(121));
+    settle_until(&mut app, |app| {
+        !app.read(|state, _| state.agent_is_watching_session())
+    });
+    let (is_error, lapsed) = first.result();
+    assert!(!is_error, "{lapsed}");
+    assert_eq!(lapsed["event"], "none", "{lapsed}");
 }

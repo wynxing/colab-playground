@@ -26,7 +26,7 @@ use crate::sessions::{Accelerator, HardwareRate, StopReason, TrackedSession, Wat
 use crate::tunnel::{TunnelEvent, TunnelId, TunnelInfo, TunnelSpec};
 use crate::updater::{Installed, SelfUpdate, Unsupported, UpdateProgress};
 use crate::usage::{BalancePoint, UsageSnapshot};
-use crate::vm::RunStatus;
+use crate::vm::{RunMeta, RunStatus};
 
 /// Event channel for long operations (send errors are ignored).
 pub type Events<T> = Sender<T>;
@@ -278,6 +278,18 @@ pub struct PluginRunOutcome {
     pub endpoints: Vec<ResolvedEndpoint>,
 }
 
+/// An active plugin run discovered on a live runtime (after an app restart).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveredRun {
+    pub account: AccountId,
+    pub session: String,
+    pub meta: RunMeta,
+    pub status: Option<RunStatus>,
+    pub log_tail: Vec<String>,
+    pub log_skipped: bool,
+    pub log_offset: u64,
+}
+
 /// A file on the VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmFile {
@@ -507,6 +519,27 @@ pub trait Backend: Send + Sync {
         events: Events<PluginRunEvent>,
         cancel: &CancelToken,
     ) -> Result<PluginRunOutcome>;
+    /// Scans live runtimes on the active account for active plugin runs that outlived an earlier
+    /// app session.
+    fn discover_runs(
+        &self,
+        targets: &[RuntimeRef],
+        cancel: &CancelToken,
+    ) -> Result<Vec<DiscoveredRun>> {
+        let _ = (targets, cancel);
+        Ok(Vec::new())
+    }
+    /// Resumes polling and cancellation for a previously discovered run.
+    fn reattach_run(
+        &self,
+        run: DiscoveredRun,
+        events: Events<PluginRunEvent>,
+        cancel: &CancelToken,
+    ) -> Result<PluginRunOutcome> {
+        let _ = (run, events, cancel);
+        Err(Error::new(ErrorKind::Unsupported)
+            .detail("this backend cannot reattach plugin runs"))
+    }
 
     // ---- app secrets (stored in the keyring vault; never returned to the UI)
     /// Stores a secret such as `hf_token`.

@@ -6,11 +6,14 @@
 //! `PLUGIN_*` variables from the kernel environment so that inputs (secrets in
 //! particular) do not linger in the long-lived kernel process.
 
+use std::collections::BTreeMap;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, ErrorKind, Result};
+use crate::plugins::{InputValue, ResolvedEndpoint};
 use crate::provision::Hardware;
 use crate::watchdog::{HEARTBEAT_PATH, VM_BASE};
 
@@ -59,16 +62,37 @@ pub fn run_dir(run_id: &str) -> String {
     format!("{VM_BASE}/runs/{run_id}")
 }
 
-/// Code that writes the plugin script into its run directory and starts it
-/// detached (own session), passing `PLUGIN_*` variables only to the child.
-pub fn plugin_launch_snippet(script: &[u8]) -> String {
+/// Minimal run metadata persisted beside the script on the VM (`meta.json`).
+/// Never stores secret inputs or host tokens.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunMeta {
+    pub run_id: String,
+    pub plugin: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, InputValue>,
+    #[serde(default)]
+    pub endpoints: Vec<ResolvedEndpoint>,
+    #[serde(default)]
+    pub keep_alive: bool,
+    #[serde(default)]
+    pub provisions: bool,
+}
+
+/// Code that writes the plugin script and non-secret `meta.json` into its run directory and
+/// starts it detached (own session), passing `PLUGIN_*` variables only to the child.
+pub fn plugin_launch_snippet(script: &[u8], meta_json: &[u8]) -> String {
     let b64 = B64.encode(script);
+    let meta_b64 = B64.encode(meta_json);
     format!(
         r#"import base64, json, os, subprocess, sys
 _rid = os.environ.pop("{ENV_RUN_ID}")
 _name = os.environ.pop("{ENV_SCRIPT_NAME}")
 _d = "{VM_BASE}/runs/" + _rid
 os.makedirs(_d, exist_ok=True)
+_meta_b64 = "{meta_b64}"
+with open(_d + "/meta.json.tmp", "wb") as _fh:
+    _fh.write(base64.b64decode(_meta_b64))
+os.replace(_d + "/meta.json.tmp", _d + "/meta.json")
 _path = _d + "/" + _name
 with open(_path, "wb") as _fh:
     _fh.write(base64.b64decode("{b64}"))
@@ -179,6 +203,93 @@ try:
 except Exception:
     pass
 print("__CPG_RESULT__ " + json.dumps({{"signalled": _ok}}))
+"#
+    )
+}
+
+/// Tail bytes read on run discovery (two chunks, enough to populate the log tail cleanly).
+const DISCOVER_TAIL: u64 = 2 * LOG_CHUNK;
+
+/// Code that scans `/root/.colab-playground/runs` for live processes that wrote `meta.json`.
+pub fn plugin_discover_snippet() -> String {
+    format!(
+        r#"import json, os
+_base = "{VM_BASE}/runs"
+_runs = []
+_redact = globals().get("_cpg_redact", {{}})
+def _cpg_scrub(v, _sec):
+    if isinstance(v, str):
+        for _s in _sec:
+            v = v.replace(_s, "***")
+        return v
+    if isinstance(v, list):
+        return [_cpg_scrub(x, _sec) for x in v]
+    if isinstance(v, dict):
+        return {{k: _cpg_scrub(x, _sec) for k, x in v.items()}}
+    return v
+def _mtime(n):
+    try:
+        return os.path.getmtime(os.path.join(_base, n))
+    except OSError:
+        return 0
+if os.path.isdir(_base):
+    _entries = sorted(os.listdir(_base), key=_mtime, reverse=True)
+    for _rid in _entries:
+        _d = os.path.join(_base, _rid)
+        if not os.path.isdir(_d):
+            continue
+        _alive = False
+        try:
+            _pid = int(open(_d + "/pid").read().strip())
+            with open("/proc/%d/stat" % _pid) as _fh:
+                _alive = _fh.read().split(") ", 1)[1][:1] not in ("Z", "X")
+        except Exception:
+            _alive = False
+        if not _alive:
+            continue
+        try:
+            with open(_d + "/meta.json") as _fh:
+                _meta = json.load(_fh)
+        except Exception:
+            continue
+        if not isinstance(_meta, dict) or _meta.get("run_id") != _rid:
+            continue
+        try:
+            with open(_d + "/status.json") as _fh:
+                _st = json.load(_fh)
+        except Exception:
+            _st = None
+        _log, _new, _size, _skip = "", 0, 0, 0
+        try:
+            with open(_d + "/run.log", "rb") as _fh:
+                _size = os.fstat(_fh.fileno()).st_size
+                _off = max(0, _size - {DISCOVER_TAIL})
+                _skip = _off
+                _fh.seek(_off)
+                _chunk = _fh.read({DISCOVER_TAIL})
+                _size = max(_size, os.fstat(_fh.fileno()).st_size)
+                if _skip:
+                    _head = _chunk.find(b"\n") + 1
+                    _skip += _head
+                    _chunk = _chunk[_head:]
+                _tail = _chunk.rfind(b"\n") + 1
+                _new = _skip + _tail if _tail else _skip + len(_chunk)
+                if _tail and _tail < len(_chunk):
+                    _chunk = _chunk[:_tail]
+                _log = _chunk.decode("utf-8", "replace")
+        except FileNotFoundError:
+            pass
+        _sec = _redact.get(_rid, [])
+        _runs.append({{
+            "meta": _meta,
+            "status": _cpg_scrub(_st, _sec),
+            "alive": _alive,
+            "log": _cpg_scrub(_log, _sec),
+            "offset": _new,
+            "size": _size,
+            "skipped": _skip,
+        }})
+print("__CPG_RESULT__ " + json.dumps({{"runs": _runs}}))
 "#
     )
 }
@@ -536,6 +647,65 @@ pub fn parse_poll(v: &serde_json::Value) -> Result<RunPoll> {
     })
 }
 
+/// One live run entry returned by [`plugin_discover_snippet`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredVmRun {
+    pub meta: RunMeta,
+    pub status: Option<RunStatus>,
+    pub alive: bool,
+    pub log: String,
+    pub offset: u64,
+    pub size: u64,
+    pub skipped: u64,
+}
+
+fn is_safe_run_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains('\0')
+}
+
+pub fn parse_discovered(v: &serde_json::Value) -> Vec<DiscoveredVmRun> {
+    let Some(runs) = v.get("runs").and_then(|r| r.as_array()) else {
+        return Vec::new();
+    };
+    let number = |obj: &serde_json::Value, key: &str| {
+        obj.get(key).and_then(|n| n.as_u64()).unwrap_or(0)
+    };
+    runs.iter()
+        .filter_map(|item| {
+            let alive = item.get("alive").and_then(|a| a.as_bool()).unwrap_or(false);
+            if !alive {
+                return None;
+            }
+            let meta: RunMeta = serde_json::from_value(item.get("meta")?.clone()).ok()?;
+            if !is_safe_run_id(&meta.run_id) || meta.plugin.is_empty() {
+                return None;
+            }
+            let status = match item.get("status") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(s) => parse_status(s).ok(),
+            };
+            Some(DiscoveredVmRun {
+                meta,
+                status,
+                alive,
+                log: item
+                    .get("log")
+                    .and_then(|l| l.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                offset: number(item, "offset"),
+                size: number(item, "size"),
+                skipped: number(item, "skipped"),
+            })
+        })
+        .collect()
+}
+
 /// Parses a `status.json` object strictly enough to render it safely.
 pub fn parse_status(v: &serde_json::Value) -> Result<RunStatus> {
     let mut s: RunStatus = serde_json::from_value(v.clone())
@@ -577,13 +747,49 @@ mod tests {
 
     #[test]
     fn launch_snippet_embeds_base64_only() {
-        let s = plugin_launch_snippet(b"print('\"; import os; os.system(\"x\")')");
+        let s = plugin_launch_snippet(
+            b"print('\"; import os; os.system(\"x\")')",
+            br#"{"run_id":"r1","plugin":"p1"}"#,
+        );
         assert!(!s.contains("os.system"));
         assert!(s.contains("start_new_session=True"));
         assert!(s.contains("os.environ.pop(_k, None)"));
+        assert!(s.contains("meta.json"));
         assert!(s.contains(ENV_SECRET_KEYS) && s.contains("_cpg_redact"));
         let p = plugin_poll_snippet();
         assert!(p.contains("_cpg_scrub(_log)") && p.contains("_cpg_scrub(_st)"));
+        let d = plugin_discover_snippet();
+        assert!(d.contains("meta.json") && d.contains("_cpg_scrub(_log"));
+    }
+
+    #[test]
+    fn discover_parsing_skips_dead_or_invalid_entries() {
+        let parsed = parse_discovered(&serde_json::json!({
+            "runs": [
+                {
+                    "meta": {"run_id": "r1", "plugin": "llama-cpp", "keep_alive": true},
+                    "status": {"state": "running", "stage": "download"},
+                    "alive": true,
+                    "log": "line1\n",
+                    "offset": 6,
+                    "size": 6,
+                    "skipped": 0
+                },
+                {
+                    "meta": {"run_id": "r2", "plugin": "llama-cpp"},
+                    "alive": false,
+                    "log": ""
+                },
+                {
+                    "meta": {"run_id": "", "plugin": "llama-cpp"},
+                    "alive": true
+                }
+            ]
+        }));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].meta.run_id, "r1");
+        assert!(parsed[0].meta.keep_alive);
+        assert_eq!(parsed[0].offset, 6);
     }
 
     #[test]
@@ -634,6 +840,20 @@ mod tests {
         let snippet = vm_ls_snippet("/content/ComfyUI/output");
         assert!(snippet.contains("/content/ComfyUI/output"));
         assert!(snippet.contains("os.walk"));
+    }
+
+    #[test]
+    fn parse_discovered_rejects_unsafe_run_ids() {
+        for bad in ["", ".", "..", "../evil", "a/b", "a\\b", "a\0b"] {
+            let parsed = parse_discovered(&serde_json::json!({
+                "runs": [{
+                    "alive": true,
+                    "meta": {"run_id": bad, "plugin": "comfyui"}
+                }]
+            }));
+            assert!(parsed.is_empty(), "expected {bad:?} to be rejected");
+        }
+        assert!(plugin_discover_snippet().contains("_meta.get(\"run_id\") != _rid"));
     }
 
     #[test]

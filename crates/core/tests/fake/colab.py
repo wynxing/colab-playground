@@ -11,6 +11,7 @@ errors surface like kernel tracebacks) and the core's known snippets get
 simulated answers. State lives under ``$CPG_FAKE_STATE`` (see fake_common).
 """
 
+import base64
 import io
 import json
 import os
@@ -272,9 +273,45 @@ def simulate(code, env, s, ep, a):
             return watchdog_reply(wd, now)
         # Status: a missing control file reads as cancelled, with nothing running.
         return watchdog_reply(wd if wd is not None else {"cancelled": True, "runtime_addr": False}, now)
+    if "os.listdir" in code and "/runs" in code:
+        stages = s["knobs"]["plugin_stages"]
+        fail = s["knobs"]["plugin_fail_stage"]
+        found = []
+        for run_id, run in s["runs"].items():
+            if run.get("endpoint") != ep or run.get("killed") or run.get("exited"):
+                continue
+            meta = run.get("meta")
+            if not meta:
+                continue
+            lines = run.get("log", [])
+            n = max(0, run.get("polls", 0) - 1)
+            if fail in stages[:n + 1]:
+                st = {"state": "failed", "stage": fail, "message": "simulated failure"}
+            elif n < len(stages):
+                st = {"state": "running", "stage": stages[n], "progress": 0.5, "message": "working on " + stages[n]}
+            else:
+                st = {"state": "ready", "stage": stages[-1], "progress": 1.0, "message": "ready",
+                      "outputs": {"model_id": "fake-model", "quant": "Q8_0" if (a.get("vram") or 0) > 70000 else "Q4_K_M"}}
+            found.append({
+                "meta": meta,
+                "status": st,
+                "alive": True,
+                "log": "".join(lines),
+                "offset": len(lines),
+                "size": len(lines),
+                "skipped": 0,
+            })
+        return {"runs": found}
     if "PLUGIN_RUN_DIR" in code:
         run_id = env["CPG_RUN_ID"]
-        s["runs"][run_id] = {"endpoint": ep, "polls": 0, "killed": False,
+        meta = {}
+        m = re.search(r'_meta_b64\s*=\s*"([^"]*)"', code)
+        if m:
+            try:
+                meta = json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+            except Exception:
+                meta = {}
+        s["runs"][run_id] = {"endpoint": ep, "polls": 0, "killed": False, "meta": meta,
                              "env": {k: v for k, v in env.items() if k.startswith("PLUGIN_")}}
         return {"pid": 4242, "run_dir": "/root/.colab-playground/runs/" + run_id}
     if "CPG_LOG_OFFSET" in code:

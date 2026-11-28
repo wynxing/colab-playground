@@ -28,8 +28,8 @@ use crate::guard::{Decision, GuardPolicy, SpendMeter, evaluate};
 use crate::hf::HfModel;
 use crate::host::{Host, Line, ProbeReport, Stream};
 use crate::plugins::{
-    PluginInfo, PluginOrigin, PluginPreview, PluginStore, discard_preview, resolve_endpoints,
-    resolve_inputs,
+    PluginInfo, PluginOrigin, PluginPreview, PluginStore, ResolvedEndpoint, discard_preview,
+    resolve_endpoints, resolve_inputs,
 };
 use crate::provision::{
     self, Hardware, ProvisionEvent, ProvisionOps, ProvisionOutcome, ProvisionSpec,
@@ -41,7 +41,7 @@ use crate::sessions::{
 use crate::tunnel::{TunnelEvent, TunnelId, TunnelInfo, TunnelSpec, TunnelState};
 use crate::updater::{Installed, SelfUpdate, Unsupported, UpdateProgress};
 use crate::usage::{AccountUsage, RateReading, Usage, poll_due};
-use crate::vm::{RunState, RunStatus};
+use crate::vm::{RunMeta, RunState, RunStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockLoginFailure {
@@ -249,6 +249,24 @@ impl MockScenario {
     }
 }
 
+/// An active plugin run seeded on a mock runtime before startup (simulates restarting the app
+/// while a run is still in progress on the VM).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockActiveRun {
+    pub account: usize,
+    pub session: String,
+    pub run_id: String,
+    pub plugin: String,
+    pub stage: Option<String>,
+    pub state: RunState,
+    pub log_tail: Vec<String>,
+    pub keep_alive: bool,
+    pub endpoints: Vec<ResolvedEndpoint>,
+    /// When true, `reattach_run` waits for [`MockBackend::advance_active_run`] between stages
+    /// (and holds `keep_alive` until cancelled or advanced again), for deterministic UI tests.
+    pub manual_stages: bool,
+}
+
 #[derive(Clone)]
 pub struct MockConfig {
     pub clock: Arc<dyn Clock>,
@@ -257,6 +275,7 @@ pub struct MockConfig {
     pub failures: MockFailures,
     pub scenario: MockScenario,
     pub defaults: Defaults,
+    pub active_runs: Vec<MockActiveRun>,
 }
 
 impl MockConfig {
@@ -270,6 +289,7 @@ impl MockConfig {
                 failures: MockFailures::default(),
                 scenario,
                 defaults: Defaults::default(),
+                active_runs: Vec::new(),
             },
             clock,
         )
@@ -283,7 +303,13 @@ impl MockConfig {
             failures: MockFailures::default(),
             scenario: MockScenario::demo(),
             defaults: Defaults::default(),
+            active_runs: Vec::new(),
         }
+    }
+
+    pub fn with_active_run(mut self, run: MockActiveRun) -> Self {
+        self.active_runs.push(run);
+        self
     }
 }
 
@@ -367,6 +393,16 @@ impl MRuntime {
     }
 }
 
+#[derive(Clone)]
+struct MActiveRun {
+    account: AccountId,
+    session: String,
+    meta: RunMeta,
+    status: Option<RunStatus>,
+    log_tail: Vec<String>,
+    step_rx: Option<Arc<Mutex<Option<std::sync::mpsc::Receiver<()>>>>>,
+}
+
 struct World {
     cli_installed: bool,
     accounts: Vec<MAccount>,
@@ -376,9 +412,12 @@ struct World {
     ledger: Ledger,
     usage: BTreeMap<AccountId, AccountUsage>,
     tunnels: BTreeMap<TunnelId, TunnelInfo>,
+    tunnel_events: BTreeMap<TunnelId, Events<TunnelEvent>>,
     next_tunnel: u64,
     ssh_busy_left: u32,
     plugins: PluginStore,
+    active_runs: Vec<MActiveRun>,
+    run_steps: BTreeMap<String, std::sync::mpsc::Sender<()>>,
     secrets: BTreeMap<String, String>,
     a100_attempt: usize,
     defaults: Defaults,
@@ -654,6 +693,7 @@ impl World {
             .collect();
         for id in ids {
             self.tunnels.remove(&id);
+            self.tunnel_events.remove(&id);
         }
     }
 }
@@ -700,9 +740,12 @@ impl MockBackend {
             ledger: Ledger::in_memory(),
             usage: BTreeMap::new(),
             tunnels: BTreeMap::new(),
+            tunnel_events: BTreeMap::new(),
             next_tunnel: 0,
             ssh_busy_left: cfg.failures.ssh_busy_attempts,
             plugins: PluginStore::load(None, None).expect("bundled plugins are valid"),
+            active_runs: Vec::new(),
+            run_steps: BTreeMap::new(),
             secrets: BTreeMap::new(),
             a100_attempt: 0,
             defaults: cfg.defaults.clone(),
@@ -773,10 +816,14 @@ impl MockBackend {
                 });
             }
         }
-        MockBackend {
-            cfg: Arc::new(cfg),
+        let backend = MockBackend {
+            cfg: Arc::new(cfg.clone()),
             world: Arc::new(Mutex::new(world)),
+        };
+        for run in &cfg.active_runs {
+            backend.seed_active_run(run.clone());
         }
+        backend
     }
 
     /// How many update checks were made (the simulation never contacts GitHub).
@@ -841,6 +888,80 @@ impl MockBackend {
             uploads: Vec::new(),
         });
         endpoint
+    }
+
+    /// Seeds an active plugin run on an existing mock runtime (simulates an app restart mid-run).
+    pub fn seed_active_run(&self, run: MockActiveRun) {
+        let mut w = self.w();
+        let Some(account) = w.accounts.get(run.account).map(|a| a.id.clone()) else {
+            return;
+        };
+        let status = Some(RunStatus {
+            state: run.state,
+            stage: run.stage.clone(),
+            progress: Some(if run.state == RunState::Ready { 1.0 } else { 0.5 }),
+            message: Some(match run.state {
+                RunState::Ready => "ready (simulated)".to_owned(),
+                _ => format!(
+                    "simulated {}",
+                    run.stage.as_deref().unwrap_or("starting")
+                ),
+            }),
+            outputs: Default::default(),
+        });
+        let step_rx = if run.manual_stages {
+            let (tx, rx) = std::sync::mpsc::channel();
+            w.run_steps.insert(run.run_id.clone(), tx);
+            Some(Arc::new(Mutex::new(Some(rx))))
+        } else {
+            None
+        };
+        w.active_runs.push(MActiveRun {
+            account,
+            session: run.session,
+            meta: RunMeta {
+                run_id: run.run_id,
+                plugin: run.plugin,
+                inputs: BTreeMap::new(),
+                endpoints: run.endpoints,
+                keep_alive: run.keep_alive,
+                provisions: false,
+            },
+            status,
+            log_tail: run.log_tail,
+            step_rx,
+        });
+    }
+
+    /// Advances a seeded run created with `manual_stages: true` by one step (next stage,
+    /// `ready`, or exits a `keep_alive` server).
+    pub fn advance_active_run(&self, run_id: &str) {
+        if let Some(tx) = self.w().run_steps.get(run_id) {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Pushes a simulated tunnel state or health change to the app's open tunnel stream.
+    pub fn emit_tunnel_event(&self, event: TunnelEvent) {
+        let mut w = self.w();
+        match &event {
+            TunnelEvent::State { id, state } => {
+                if let Some(t) = w.tunnels.get_mut(id) {
+                    t.state = state.clone();
+                }
+            }
+            TunnelEvent::Health { id, healthy } => {
+                if let Some(t) = w.tunnels.get_mut(id) {
+                    t.healthy = Some(*healthy);
+                }
+            }
+        }
+        let id = match &event {
+            TunnelEvent::State { id, .. } | TunnelEvent::Health { id, .. } => *id,
+        };
+        if let Some(tx) = w.tunnel_events.get(&id) {
+            let _ = tx.send(event);
+        }
     }
 
     fn w(&self) -> MutexGuard<'_, World> {
@@ -2279,13 +2400,15 @@ impl Backend for MockBackend {
                 t.healthy = Some(true);
             }
             let _ = events.send(TunnelEvent::Health { id, healthy: true });
+            w.tunnel_events.insert(id, events);
         }
         Ok(id)
     }
 
     fn close_tunnel(&self, id: TunnelId) -> Result<()> {
-        self.w()
-            .tunnels
+        let mut w = self.w();
+        w.tunnel_events.remove(&id);
+        w.tunnels
             .remove(&id)
             .map(|_| ())
             .ok_or_else(|| Error::invalid("tunnel", "unknown tunnel"))
@@ -2616,6 +2739,162 @@ impl Backend for MockBackend {
             account,
             run_id,
             status,
+            endpoints,
+        })
+    }
+
+    fn discover_runs(
+        &self,
+        targets: &[RuntimeRef],
+        _cancel: &CancelToken,
+    ) -> Result<Vec<DiscoveredRun>> {
+        self.ready()?;
+        let active = self.active()?;
+        let w = self.w();
+        let found = w
+            .active_runs
+            .iter()
+            .filter(|run| {
+                run.account == active
+                    && targets
+                        .iter()
+                        .any(|t| t.account == run.account && t.name.as_deref() == Some(&run.session))
+            })
+            .map(|run| DiscoveredRun {
+                account: run.account.clone(),
+                session: run.session.clone(),
+                meta: run.meta.clone(),
+                status: run.status.clone(),
+                log_tail: run.log_tail.clone(),
+                log_skipped: false,
+                log_offset: run.log_tail.len() as u64,
+            })
+            .collect();
+        Ok(found)
+    }
+
+    fn reattach_run(
+        &self,
+        run: DiscoveredRun,
+        events: Events<PluginRunEvent>,
+        cancel: &CancelToken,
+    ) -> Result<PluginRunOutcome> {
+        let account = run.account.clone();
+        let session = run.session.clone();
+        let run_id = run.meta.run_id.clone();
+        let endpoints = run.meta.endpoints.clone();
+        let (step_rx, stages, keep_alive) = {
+            let w = self.w();
+            let step_rx = w
+                .active_runs
+                .iter()
+                .find(|r| r.meta.run_id == run_id)
+                .and_then(|r| r.step_rx.as_ref())
+                .and_then(|slot| slot.lock().ok().and_then(|mut guard| guard.take()));
+            match w.plugins.get(&run.meta.plugin) {
+                Some(p) => (
+                    step_rx,
+                    p.manifest
+                        .stages
+                        .iter()
+                        .map(|s| s.id.clone())
+                        .collect::<Vec<_>>(),
+                    p.manifest.run.keep_alive || run.meta.keep_alive,
+                ),
+                None => (step_rx, Vec::new(), run.meta.keep_alive),
+            }
+        };
+        let manual_stages = step_rx.is_some();
+        let wait_step = |cancel: &CancelToken| -> Result<()> {
+            if let Some(rx) = &step_rx {
+                match rx.try_recv() {
+                    Ok(()) => return Ok(()),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Err(Error::cancelled());
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        return self.step(cancel);
+                    }
+                }
+            }
+            self.step(cancel)
+        };
+        let _ = events.send(PluginRunEvent::Launched {
+            session: session.clone(),
+            run_id: run_id.clone(),
+        });
+        let finish_entry = |m: &MockBackend| {
+            let mut w = m.w();
+            w.run_steps.remove(&run_id);
+            w.active_runs.retain(|r| r.meta.run_id != run_id);
+        };
+        let already_ready = run
+            .status
+            .as_ref()
+            .is_some_and(|s| s.state == RunState::Ready);
+        let final_status = if already_ready {
+            run.status.unwrap_or_else(|| RunStatus {
+                state: RunState::Ready,
+                stage: stages.last().cloned(),
+                progress: Some(1.0),
+                message: Some("ready (simulated)".into()),
+                outputs: Default::default(),
+            })
+        } else {
+            let start_idx = run
+                .status
+                .as_ref()
+                .and_then(|s| s.stage.as_deref())
+                .and_then(|cur| stages.iter().position(|st| st == cur).map(|i| i + 1))
+                .unwrap_or(0);
+            for (i, stage) in stages.iter().enumerate().skip(start_idx) {
+                if wait_step(cancel).is_err() || self.step(cancel).is_err() {
+                    finish_entry(self);
+                    return Err(Error::cancelled());
+                }
+                let status = RunStatus {
+                    state: RunState::Running,
+                    stage: Some(stage.clone()),
+                    progress: Some((i as f64 + 0.5) / stages.len().max(1) as f64),
+                    message: Some(format!("simulated {stage}")),
+                    outputs: Default::default(),
+                };
+                let _ = events.send(PluginRunEvent::Status(status));
+                let _ = events.send(PluginRunEvent::Log {
+                    lines: vec![format!("[mock] {stage}: working")],
+                });
+            }
+            if wait_step(cancel).is_err() {
+                finish_entry(self);
+                return Err(Error::cancelled());
+            }
+            let status = RunStatus {
+                state: RunState::Ready,
+                stage: stages.last().cloned(),
+                progress: Some(1.0),
+                message: Some("ready (simulated)".into()),
+                outputs: Default::default(),
+            };
+            let _ = events.send(PluginRunEvent::Status(status.clone()));
+            status
+        };
+        if keep_alive {
+            for _ in 0..LIVE_RUN_STEPS {
+                if cancel.is_cancelled() || self.step(cancel).is_err() {
+                    finish_entry(self);
+                    return Err(Error::cancelled());
+                }
+                if !manual_stages {
+                    std::thread::sleep(Duration::from_millis(LIVE_STEP_MILLIS));
+                }
+            }
+        }
+        finish_entry(self);
+        Ok(PluginRunOutcome {
+            session,
+            account,
+            run_id,
+            status: final_status,
             endpoints,
         })
     }

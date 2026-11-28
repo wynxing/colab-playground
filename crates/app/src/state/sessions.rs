@@ -11,6 +11,7 @@ use std::{
 
 use colab_playground_core::{
     Error, ErrorKind,
+    accounts::AccountId,
     backend::{GuardReport, RemoteSsh, Runtime, RuntimeRef, RuntimesView, StopOptions},
     guard::{Concern, Decision},
     tunnel::{TunnelId, TunnelInfo},
@@ -26,6 +27,9 @@ use crate::{
 
 /// How many ended runtimes the Sessions page keeps listing.
 const ENDED_KEPT: usize = 20;
+
+/// Notify when an armed auto-stop deadline is within this window.
+const AUTO_STOP_SOON: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
 pub struct SessionsState {
@@ -210,12 +214,17 @@ impl AppState {
                             .sessions
                             .stop_failures
                             .retain(|key, _| live.contains(&key));
+                        state
+                            .auto_stop_soon_notified
+                            .retain(|key| live.contains(&key));
                         state.sessions.tunnels = tunnels
                             .into_iter()
                             .map(|tunnel| (tunnel.id, tunnel))
                             .collect();
                         state.sessions.runtimes = Load::Ready(view);
                         state.drop_gone_run_target();
+                        state.check_auto_stop_soon(cx);
+                        state.discover_active_runs(cx);
                     }
                     Err(error) => {
                         log::warn!("sessions: listing failed: {error}");
@@ -340,6 +349,12 @@ impl AppState {
                             Some(now),
                         );
                         state.toast_done(tr_args(cx, keys::STOP_DONE, &[("name", &label)]), cx);
+                        state.emit_session_event(
+                            "session_stopped",
+                            target.name.as_deref(),
+                            serde_json::json!({ "by": "user" }),
+                            cx,
+                        );
                         state.after_runtime_change(cx);
                         state.ask_for_feedback_after_stop(cx);
                     }
@@ -390,6 +405,7 @@ impl AppState {
                 match result {
                     Ok(set) => {
                         state.sessions.warnings.remove(&target);
+                        state.auto_stop_soon_notified.remove(&target);
                         let title = tr_args(
                             cx,
                             keys::EXTEND_DONE,
@@ -448,6 +464,7 @@ impl AppState {
                             state.overlay = None;
                         }
                         state.sessions.warnings.remove(&target);
+                        state.auto_stop_soon_notified.remove(&target);
                         state.toast(
                             Toast::new(tr(cx, keys::AUTO_STOP_CANCELLED))
                                 .severity(Severity::Warning),
@@ -493,6 +510,7 @@ impl AppState {
             move |state, result, cx| {
                 match result {
                     Ok(info) => {
+                        state.auto_stop_soon_notified.remove(&target);
                         let title = tr_args(
                             cx,
                             keys::AUTO_STOP_SET,
@@ -544,7 +562,7 @@ impl AppState {
                             .iter()
                             .zip(&was)
                             .all(|(a, b)| limit_of(a) == limit_of(b));
-                    if !limits.is_empty() && !same_kinds {
+                    let emit = if !limits.is_empty() && !same_kinds {
                         let what = format::concerns(cx, &concerns);
                         self.toast(
                             Toast::new(tr_args(cx, keys::GUARD_WARN_TITLE, &[("name", &label)]))
@@ -553,8 +571,20 @@ impl AppState {
                                 .stay(None),
                             cx,
                         );
-                    }
+                        Some(concerns.clone())
+                    } else {
+                        None
+                    };
+                    let name = target.name.clone();
                     self.sessions.warnings.insert(target, concerns);
+                    if let Some(event_concerns) = emit {
+                        self.emit_session_event(
+                            "guard_warning",
+                            name.as_deref(),
+                            serde_json::json!({ "concerns": event_concerns }),
+                            cx,
+                        );
+                    }
                 }
                 Decision::Stop(concern) => {
                     if decision.stopped {
@@ -566,12 +596,19 @@ impl AppState {
                                 .stay(None),
                             cx,
                         );
+                        let name = target.name.clone();
                         self.record_ended(
                             target,
                             label,
                             email,
-                            EndReason::Guard(concern),
+                            EndReason::Guard(concern.clone()),
                             self.usage_now(),
+                        );
+                        self.emit_session_event(
+                            "guard_stopped",
+                            name.as_deref(),
+                            serde_json::json!({ "concern": concern }),
+                            cx,
                         );
                         changed = true;
                     } else {
@@ -582,6 +619,7 @@ impl AppState {
                                 .detail("the cost guard decided to stop it but no stop was made")
                         });
                         let first = !self.sessions.stop_failures.contains_key(&target);
+                        let err_kind = error.kind.as_str();
                         if first {
                             self.toast(
                                 Toast::new(tr_args(
@@ -595,12 +633,29 @@ impl AppState {
                                 cx,
                             );
                         }
+                        let name = target.name.clone();
                         self.sessions.stop_failures.insert(target, error);
+                        if first {
+                            self.emit_session_event(
+                                "guard_stop_failed",
+                                name.as_deref(),
+                                serde_json::json!({
+                                    "concern": concern,
+                                    "error": err_kind,
+                                }),
+                                cx,
+                            );
+                        }
                     }
                 }
             }
         }
         for target in report.vanished {
+            let already_ended = self
+                .sessions
+                .ended
+                .iter()
+                .any(|ended| ended.runtime == target);
             let label = self
                 .runtime(&target)
                 .map(runtime_label)
@@ -614,13 +669,107 @@ impl AppState {
                     .severity(Severity::Info),
                 cx,
             );
+            let name = target.name.clone();
             self.record_ended(target, label, email, EndReason::Vanished, self.usage_now());
+            if !already_ended {
+                self.emit_session_event(
+                    "session_vanished",
+                    name.as_deref(),
+                    serde_json::json!({}),
+                    cx,
+                );
+            }
             changed = true;
         }
         if changed {
             self.load_runtimes(cx);
         }
         cx.notify();
+    }
+
+    /// Emits `auto_stop_soon` once per session when its armed auto-stop deadline is within
+    /// [`AUTO_STOP_SOON`].
+    pub(crate) fn check_auto_stop_soon(&mut self, cx: &mut Context<Self>) {
+        let now = match (self.sessions.now, self.usage_now()) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+        .or_else(|| self.backend.as_ref().ok().map(|backend| backend.now()));
+        let Some(now) = now else {
+            return;
+        };
+        let due: Vec<(RuntimeRef, u64)> = self
+            .sessions
+            .runtimes
+            .ready()
+            .into_iter()
+            .flat_map(|view| view.runtimes.iter())
+            .filter_map(|runtime| {
+                let stop_at = runtime.auto_stop_at?;
+                let remaining = stop_at.duration_since(now).ok()?;
+                if remaining <= AUTO_STOP_SOON {
+                    Some((runtime.id.clone(), remaining.as_secs()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (target, remaining_seconds) in due {
+            if self.auto_stop_soon_notified.insert(target.clone()) {
+                self.emit_session_event(
+                    "auto_stop_soon",
+                    target.name.as_deref(),
+                    serde_json::json!({ "remaining_seconds": remaining_seconds }),
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Emits `session_vanished` immediately if a failing plugin run learned that its session
+    /// is already gone before the next guard round runs.
+    pub(crate) fn notify_run_session_gone(
+        &mut self,
+        account: Option<AccountId>,
+        session: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = session else {
+            return;
+        };
+        let Some(account) =
+            account.or_else(|| self.accounts.ready().and_then(|view| view.active.clone()))
+        else {
+            return;
+        };
+        let Some(runtime) = self
+            .sessions
+            .runtimes
+            .ready()
+            .and_then(|view| {
+                view.runtimes.iter().find(|runtime| {
+                    runtime.id.account == account && runtime.id.name.as_deref() == Some(name.as_str())
+                })
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let target = runtime.id.clone();
+        self.forget_runtime(&target);
+        self.record_ended(
+            target,
+            runtime_label(&runtime),
+            runtime.account_email,
+            EndReason::Vanished,
+            self.sessions_now(),
+        );
+        self.emit_session_event(
+            "session_vanished",
+            Some(&name),
+            serde_json::json!({}),
+            cx,
+        );
     }
 
     /// A stop elsewhere, a provision or a switch changed what runs: list again and refresh
@@ -633,6 +782,7 @@ impl AppState {
     fn forget_runtime(&mut self, target: &RuntimeRef) {
         self.sessions.warnings.remove(target);
         self.sessions.stop_failures.remove(target);
+        self.auto_stop_soon_notified.remove(target);
         self.sessions.tunnels.retain(|_, tunnel| {
             !(tunnel.spec.account == target.account
                 && Some(&tunnel.spec.session) == target.name.as_ref())

@@ -41,7 +41,7 @@ use colab_playground::{
 use colab_playground_core::{
     ManualClock,
     backend::Backend,
-    mock::{MockBackend, MockConfig, MockFailures, MockScenario},
+    mock::{MockActiveRun, MockBackend, MockConfig, MockFailures, MockScenario},
 };
 use ely_gpui_component::theme::{ActiveTheme, Mode};
 use gpui::{
@@ -71,6 +71,10 @@ pub struct Options {
     pub failures: MockFailures,
     pub os_locale: Option<String>,
     pub config: ConfigDir,
+    /// Simulated active plugin runs present on runtimes before the app starts.
+    pub active_runs: Vec<MockActiveRun>,
+    /// Delay per simulated backend step (on the manual clock).
+    pub step_delay: Duration,
 }
 
 impl Default for Options {
@@ -80,6 +84,8 @@ impl Default for Options {
             failures: MockFailures::default(),
             os_locale: Some("en-US".into()),
             config: ConfigDir::Temp,
+            active_runs: Vec::new(),
+            step_delay: Duration::ZERO,
         }
     }
 }
@@ -377,13 +383,14 @@ fn start(cx: &mut TestAppContext, options: Options) -> Started {
     });
     let store = SettingsStore::new(config_dir.clone());
     let (mut mock_config, clock) = MockConfig::headless(options.scenario);
-    mock_config.step_delay = Duration::ZERO;
+    mock_config.step_delay = options.step_delay;
     let cancel_switch = CancelSwitch::default();
     mock_config.clock = Arc::new(SwitchedClock {
         inner: clock.clone(),
         switch: cancel_switch.clone(),
     });
     mock_config.failures = options.failures;
+    mock_config.active_runs = options.active_runs;
     let mock = MockBackend::new(mock_config);
     let source = BackendSource::Mock(Arc::new(mock.clone()) as Arc<dyn Backend>);
     let state = cx.update(|cx| {

@@ -172,7 +172,7 @@ impl AppState {
                                 healthy: None,
                             },
                         );
-                        let open = state.drain_tunnel(&received).open;
+                        let open = state.drain_tunnel(&received, cx).open;
                         let failed = match state.sessions.tunnels.get(&id).map(|t| &t.state) {
                             Some(TunnelState::Failed { error }) => Some(error.clone()),
                             _ => None,
@@ -207,12 +207,12 @@ impl AppState {
         }
     }
 
-    fn drain_tunnel(&mut self, received: &Receiver<TunnelEvent>) -> Drained {
+    fn drain_tunnel(&mut self, received: &Receiver<TunnelEvent>, cx: &mut Context<Self>) -> Drained {
         let mut changed = false;
         loop {
             match received.try_recv() {
                 Ok(event) => {
-                    self.apply_tunnel_event(event);
+                    self.apply_tunnel_event(event, cx);
                     changed = true;
                 }
                 Err(TryRecvError::Empty) => {
@@ -231,16 +231,96 @@ impl AppState {
         }
     }
 
-    fn apply_tunnel_event(&mut self, event: TunnelEvent) {
+    fn apply_tunnel_event(&mut self, event: TunnelEvent, cx: &mut Context<Self>) {
         match event {
             TunnelEvent::State { id, state } => {
-                if let Some(tunnel) = self.sessions.tunnels.get_mut(&id) {
-                    tunnel.state = state;
+                let transition = self.sessions.tunnels.get_mut(&id).map(|tunnel| {
+                    let prev = tunnel.state.clone();
+                    let session = tunnel.spec.session.clone();
+                    let local_port = tunnel.spec.local_port;
+                    let remote_port = tunnel.spec.remote_port;
+                    tunnel.state = state.clone();
+                    (prev, session, local_port, remote_port)
+                });
+                if let Some((prev, session, local_port, remote_port)) = transition {
+                    let disconnected_state = match &state {
+                        TunnelState::Reconnecting { .. }
+                            if !matches!(prev, TunnelState::Reconnecting { .. }) =>
+                        {
+                            Some("reconnecting")
+                        }
+                        TunnelState::Failed { .. }
+                            if !matches!(prev, TunnelState::Starting | TunnelState::Failed { .. }) =>
+                        {
+                            Some("failed")
+                        }
+                        _ => None,
+                    };
+                    if let Some(state_label) = disconnected_state {
+                        self.emit_session_event(
+                            "tunnel_disconnected",
+                            Some(&session),
+                            serde_json::json!({
+                                "local_port": local_port,
+                                "remote_port": remote_port,
+                                "state": state_label,
+                            }),
+                            cx,
+                        );
+                    } else if matches!(state, TunnelState::Up)
+                        && matches!(prev, TunnelState::Reconnecting { .. })
+                    {
+                        self.emit_session_event(
+                            "tunnel_reconnected",
+                            Some(&session),
+                            serde_json::json!({
+                                "local_port": local_port,
+                                "remote_port": remote_port,
+                            }),
+                            cx,
+                        );
+                    } else {
+                        self.publish_snapshot();
+                    }
                 }
             }
             TunnelEvent::Health { id, healthy } => {
-                if let Some(tunnel) = self.sessions.tunnels.get_mut(&id) {
+                let transition = self.sessions.tunnels.get_mut(&id).map(|tunnel| {
+                    let prev = tunnel.healthy;
+                    let session = tunnel.spec.session.clone();
+                    let local_port = tunnel.spec.local_port;
+                    let remote_port = tunnel.spec.remote_port;
                     tunnel.healthy = Some(healthy);
+                    (prev, session, local_port, remote_port)
+                });
+                if let Some((prev, session, local_port, remote_port)) = transition
+                    && prev != Some(healthy)
+                {
+                    if !healthy {
+                        self.emit_session_event(
+                            "tunnel_unhealthy",
+                            Some(&session),
+                            serde_json::json!({
+                                "local_port": local_port,
+                                "remote_port": remote_port,
+                                "healthy": false,
+                            }),
+                            cx,
+                        );
+                    } else if prev == Some(false) {
+                        self.emit_session_event(
+                            "tunnel_healthy",
+                            Some(&session),
+                            serde_json::json!({
+                                "local_port": local_port,
+                                "remote_port": remote_port,
+                                "healthy": true,
+                            }),
+                            cx,
+                        );
+                    } else {
+                        self.publish_snapshot();
+                    }
                 }
             }
         }
@@ -253,7 +333,18 @@ impl AppState {
             cx,
             move |backend, _| backend.close_tunnel(id),
             move |state, result, cx| {
-                state.sessions.tunnels.remove(&id);
+                if let Some(tunnel) = state.sessions.tunnels.remove(&id) {
+                    state.emit_session_event(
+                        "tunnel_disconnected",
+                        Some(&tunnel.spec.session),
+                        serde_json::json!({
+                            "local_port": tunnel.spec.local_port,
+                            "remote_port": tunnel.spec.remote_port,
+                            "state": "closed",
+                        }),
+                        cx,
+                    );
+                }
                 match result {
                     Ok(()) => state.toast(
                         Toast::new(tr(cx, keys::FORWARD_CLOSED))
@@ -304,7 +395,7 @@ fn watch_tunnel(received: Receiver<TunnelEvent>, cx: &mut Context<AppState>) {
         loop {
             cx.background_executor().timer(TUNNEL_TICK).await;
             let open = this.update(cx, |state, cx| {
-                let drained = state.drain_tunnel(&received);
+                let drained = state.drain_tunnel(&received, cx);
                 if drained.changed {
                     cx.notify();
                 }

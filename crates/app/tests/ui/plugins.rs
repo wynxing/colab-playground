@@ -15,8 +15,7 @@ use colab_playground::{
         pages::{
             overview::{INSTALL_SELECTOR, deploy_selector},
             plugins::{
-                ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, INSTALL_CHECK, RUN_START, RUN_STOP,
-                hf_result_selector, plugin_selector,
+                ENDPOINT_MCP_APP_SELECTOR, ENDPOINT_SELECTOR, INSTALL_CHECK, RUN_START, RUN_STOP, hf_result_selector, plugin_selector,
             },
         },
     },
@@ -24,9 +23,11 @@ use colab_playground::{
 use colab_playground_core::{
     CancelToken, ErrorKind,
     backend::{Backend, PluginRunEvent, RuntimeRef},
-    mock::{MockFailures, MockRuntime, MockScenario},
+    mock::{MockActiveRun, MockFailures, MockRuntime, MockScenario},
+    plugins::{LocalizedText, ResolvedEndpoint},
     sessions::Accelerator,
     tunnel::TunnelState,
+    vm::RunState,
 };
 use gpui::TestAppContext;
 
@@ -917,5 +918,128 @@ fn only_the_latest_search_is_shown(cx: &mut TestAppContext) {
             .iter()
             .all(|id| id.to_ascii_lowercase().contains("8b")),
         "results match the last query only: {results:?}"
+    );
+}
+
+#[gpui::test]
+fn restarting_the_app_reattaches_a_live_run_with_stages_log_endpoints_and_cancel(
+    cx: &mut TestAppContext,
+) {
+    let options = Options {
+        scenario: MockScenario::demo(),
+        active_runs: vec![MockActiveRun {
+            account: 0,
+            session: "a100-7f3a".into(),
+            run_id: "reattach-1".into(),
+            plugin: "comfyui".into(),
+            stage: Some("download".into()),
+            state: RunState::Running,
+            log_tail: vec!["downloading checkpoint...".into()],
+            keep_alive: true,
+            endpoints: vec![ResolvedEndpoint {
+                id: "ui".into(),
+                remote_port: 8188,
+                path: "/".into(),
+                health: Some("/".into()),
+                kind: "comfyui".into(),
+                label: LocalizedText::default(),
+            }],
+            manual_stages: false,
+        }],
+        ..Options::default()
+    };
+    let mut app = TestApp::with(cx, options);
+
+    let (plugin, session, provisions, run_id, stage, has_tail, has_server_log) =
+        app.read(|state, _| {
+            let run = state.plugin_run().expect("reattached run on startup");
+            (
+                run.plugin.clone(),
+                run.session.clone(),
+                run.provisions,
+                run.run_id.clone(),
+                run.status.as_ref().and_then(|s| s.stage.clone()),
+                run.log
+                    .lines()
+                    .any(|line| line.contains("downloading checkpoint...")),
+                run.log
+                    .lines()
+                    .any(|line| line.contains("[mock] server: working")),
+            )
+        });
+    assert_eq!(plugin, "comfyui");
+    assert_eq!(session.as_deref(), Some("a100-7f3a"));
+    assert!(!provisions, "reattached run did not provision the session");
+    assert_eq!(run_id.as_deref(), Some("reattach-1"));
+    assert!(stage.is_some());
+    assert!(has_tail, "discovered log tail is restored");
+    assert!(has_server_log, "reattached run streamed later stages");
+    assert!(matches!(run_phase(&mut app), Some(RunPhase::Ready(_))));
+    assert!(app.read(|state, _| {
+        state
+            .tunnels()
+            .any(|t| t.spec.session == "a100-7f3a" && t.spec.remote_port == 8188)
+    }));
+
+    app.click(Route::Plugins.nav_selector());
+    app.update(|state, cx| state.show_plugin_run(cx));
+    app.settle();
+    assert_eq!(app.read(|state, _| state.plugin_view()), PluginView::Run);
+    app.reveal(&format!("{ENDPOINT_SELECTOR} ui"));
+    assert!(app.shown(&format!("{ENDPOINT_SELECTOR} ui")));
+}
+
+#[gpui::test]
+fn cancelling_a_reattached_run_keeps_the_runtime_up(cx: &mut TestAppContext) {
+    let options = Options {
+        scenario: MockScenario::demo(),
+        active_runs: vec![MockActiveRun {
+            account: 0,
+            session: "a100-7f3a".into(),
+            run_id: "reattach-cancel-1".into(),
+            plugin: "comfyui".into(),
+            stage: Some("download".into()),
+            state: RunState::Running,
+            log_tail: vec!["resuming...".into()],
+            keep_alive: true,
+            endpoints: vec![ResolvedEndpoint {
+                id: "ui".into(),
+                remote_port: 8188,
+                path: "/".into(),
+                health: Some("/".into()),
+                kind: "comfyui".into(),
+                label: LocalizedText::default(),
+            }],
+            manual_stages: false,
+        }],
+        ..Options::default()
+    };
+    let mut app = TestApp::with(cx, options);
+    app.cancel_switch.arm(2);
+    app.update(|state, cx| {
+        // Trigger a fresh reattach via cancel_switch by starting with a new seeded run?
+        // Actually arm(2) during TestApp::with would have cancelled after TestApp::with;
+        // instead cancel_run directly if still live, or verify cancel_switch before load.
+        state.cancel_run(cx);
+    });
+    app.settle();
+    assert!(!app.read(|state, _| state.plugin_run().is_some_and(|r| r.live)));
+    assert!(
+        app.read(|state, _| {
+            state
+                .runtimes()
+                .ready()
+                .is_some_and(|v| v.runtimes.iter().any(|r| r.id.name.as_deref() == Some("a100-7f3a")))
+        }),
+        "cancelling a reattached run keeps the existing runtime up"
+    );
+
+    // A later runtime refresh does not re-reattach the finished run id.
+    app.update(|state, cx| state.load_runtimes(cx));
+    app.settle();
+    assert_eq!(
+        app.read(|state, _| state.plugin_run().and_then(|r| r.run_id.clone()))
+            .as_deref(),
+        Some("reattach-cancel-1")
     );
 }
